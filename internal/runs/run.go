@@ -4,8 +4,10 @@
 package runs
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -72,9 +74,6 @@ type Run struct {
 	decision    *verifier.Decision
 }
 
-// Begin creates a mediated run backed by a fresh shadow transaction. The clock
-// is a trusted control-plane dependency and must be monotonic enough for expiry
-// enforcement; tests inject a fixed clock for deterministic behavior.
 func Begin(realWorkspace string, contract *contracts.Contract, now func() time.Time) (*Run, error) {
 	if contract == nil || now == nil {
 		return nil, fmt.Errorf("%w: contract and clock are required", ErrInvalidRun)
@@ -90,7 +89,6 @@ func Begin(realWorkspace string, contract *contracts.Contract, now func() time.T
 	if contract.ExpiredAt(startedAt) {
 		return nil, fmt.Errorf("%w: %s", ErrContractExpired, contract.ExpiresAt().Format(time.RFC3339Nano))
 	}
-
 	transaction, err := shadowfs.Begin(realWorkspace)
 	if err != nil {
 		return nil, fmt.Errorf("begin shadow transaction: %w", err)
@@ -98,7 +96,6 @@ func Begin(realWorkspace string, contract *contracts.Contract, now func() time.T
 	cleanupOnFailure := func(cause error) (*Run, error) {
 		return nil, errors.Join(cause, transaction.Reject())
 	}
-
 	eventLog, err := effects.NewLog(contract.RunID(), contract.ActorID(), clock.Observe)
 	if err != nil {
 		return cleanupOnFailure(fmt.Errorf("create effect log: %w", err))
@@ -107,15 +104,7 @@ func Begin(realWorkspace string, contract *contracts.Contract, now func() time.T
 	if err != nil {
 		return cleanupOnFailure(fmt.Errorf("create filesystem gateway: %w", err))
 	}
-
-	return &Run{
-		contract:    contract,
-		events:      eventLog,
-		filesystem:  filesystem,
-		transaction: transaction,
-		clock:       clock,
-		state:       StateRunning,
-	}, nil
+	return &Run{contract: contract, events: eventLog, filesystem: filesystem, transaction: transaction, clock: clock, state: StateRunning}, nil
 }
 
 func (r *Run) State() State {
@@ -124,9 +113,8 @@ func (r *Run) State() State {
 	return r.state
 }
 
-func (r *Run) ContractHash() string { return r.contract.Hash() }
-
-func (r *Run) Events() []effects.Event { return r.events.Events() }
+func (r *Run) ContractHash() string      { return r.contract.Hash() }
+func (r *Run) Events() []effects.Event   { return r.events.Events() }
 
 func (r *Run) ReadFile(resource string) ([]byte, error) {
 	r.mu.Lock()
@@ -154,9 +142,6 @@ func (r *Run) WriteFile(resource string, contents []byte) error {
 	return err
 }
 
-// Verify freezes further mediated effects. A rejected decision destroys the
-// shadow immediately; a cleanup failure leaves the run FAILED and permits only
-// an explicit cleanup retry through Reject.
 func (r *Run) Verify() (verifier.Decision, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -166,13 +151,8 @@ func (r *Run) Verify() (verifier.Decision, error) {
 	if err := r.transition(StateVerifying); err != nil {
 		return verifier.Decision{}, err
 	}
-
 	verificationAt, timeErr := r.clock.Observe()
-	decision := verifier.Decision{
-		RunID:        r.contract.RunID(),
-		Status:       verifier.StatusRejected,
-		ContractHash: r.contract.Hash(),
-	}
+	decision := verifier.Decision{RunID: r.contract.RunID(), Status: verifier.StatusRejected, ContractHash: r.contract.Hash()}
 	if timeErr == nil {
 		decision = verifier.Verify(r.contract, r.events.Events(), verificationAt)
 	} else {
@@ -180,14 +160,9 @@ func (r *Run) Verify() (verifier.Decision, error) {
 	}
 	if auditErr := r.filesystem.AuditError(); auditErr != nil {
 		decision.Status = verifier.StatusRejected
-		decision.Violations = append(decision.Violations, verifier.Violation{
-			RuleID:   "event.recording",
-			Reason:   "effect stream integrity is incomplete",
-			Evidence: auditErr.Error(),
-		})
+		decision.Violations = append(decision.Violations, verifier.Violation{RuleID: "event.recording", Reason: "effect stream integrity is incomplete", Evidence: auditErr.Error()})
 	}
 	r.decision = decisionPointer(decision)
-
 	if decision.Status == verifier.StatusRejected {
 		if err := r.transition(StateFailed); err != nil {
 			return cloneDecision(decision), err
@@ -200,15 +175,16 @@ func (r *Run) Verify() (verifier.Decision, error) {
 		}
 		return cloneDecision(decision), timeErr
 	}
-
 	if err := r.transition(StateApproved); err != nil {
 		return cloneDecision(decision), err
 	}
 	return cloneDecision(decision), nil
 }
 
-// ApplyCommit is available only after deterministic approval. M2 remains the
-// sole package that mutates the real workspace.
+// ApplyCommit binds commit authority to the exact mutation effects approved by
+// verification. No approved WRITE means a true no-op finalization: real state
+// is not replaced. An approved WRITE must carry the trusted gateway's resulting
+// content digest, and the frozen shadow must still match that digest.
 func (r *Run) ApplyCommit() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -220,13 +196,38 @@ func (r *Run) ApplyCommit() error {
 		return r.rejectBeforeCommit(err, StateRejected)
 	}
 	if r.contract.ExpiredAt(commitAt) {
-		return r.rejectBeforeCommit(
-			fmt.Errorf("%w: %s", ErrContractExpired, r.contract.ExpiresAt().Format(time.RFC3339Nano)),
-			StateExpired,
-		)
+		return r.rejectBeforeCommit(fmt.Errorf("%w: %s", ErrContractExpired, r.contract.ExpiresAt().Format(time.RFC3339Nano)), StateExpired)
 	}
+
+	events := r.events.Events()
+	expectedDigest, hasApprovedWrite, err := approvedManagedWriteDigest(*r.decision, events)
+	if err != nil {
+		return r.rejectBeforeCommit(err, StateRejected)
+	}
+	if hasApprovedWrite {
+		observedDigest, observeErr := r.transaction.ShadowContentIdentity()
+		if observeErr != nil {
+			return r.rejectBeforeCommit(observeErr, StateRejected)
+		}
+		if observedDigest != expectedDigest {
+			return r.rejectBeforeCommit(fmt.Errorf("%w: final shadow digest does not match approved WRITE result", shadowfs.ErrCommitAuthorization), StateRejected)
+		}
+	}
+
 	if err := r.transition(StateCommitting); err != nil {
 		return err
+	}
+	if !hasApprovedWrite {
+		err = r.transaction.FinalizeWithoutMutation()
+		if r.transaction.State() == shadowfs.StateCommitted {
+			return errors.Join(err, r.transition(StateCommitted))
+		}
+		if r.transaction.State() == shadowfs.StateActive {
+			rejectErr := r.transaction.Reject()
+			transitionErr := r.transition(StateRejected)
+			return errors.Join(err, rejectErr, transitionErr)
+		}
+		return errors.Join(err, r.transition(StateFailed))
 	}
 
 	err = r.transaction.ApplyCommit()
@@ -240,7 +241,6 @@ func (r *Run) ApplyCommit() error {
 			return errors.Join(err, transitionErr)
 		}
 	case shadowfs.StateActive:
-		// Revalidation uncertainty and pre-mutation failures remain retryable.
 		if transitionErr := r.transition(StateApproved); transitionErr != nil {
 			return errors.Join(err, transitionErr)
 		}
@@ -250,6 +250,39 @@ func (r *Run) ApplyCommit() error {
 		}
 	}
 	return err
+}
+
+func approvedManagedWriteDigest(decision verifier.Decision, events []effects.Event) (string, bool, error) {
+	approved := make(map[uint64]struct{}, len(decision.ApprovedEffects))
+	for _, sequence := range decision.ApprovedEffects {
+		approved[sequence] = struct{}{}
+	}
+	var digest string
+	found := false
+	for _, event := range events {
+		if _, ok := approved[event.Sequence]; !ok || event.Operation != string(contracts.FilesystemWrite) {
+			continue
+		}
+		if event.Adapter != effects.AdapterFilesystem || event.ResourceID != filesystemgateway.ManagedResource || event.Outcome != effects.OutcomeSuccessShadow {
+			return "", false, fmt.Errorf("%w: approved mutation has unsupported shape", shadowfs.ErrCommitAuthorization)
+		}
+		candidate := event.Metadata["result_sha256"]
+		if !validSHA256Identity(candidate) {
+			return "", false, fmt.Errorf("%w: approved WRITE lacks a valid resulting content digest", shadowfs.ErrCommitAuthorization)
+		}
+		digest = candidate
+		found = true
+	}
+	return digest, found, nil
+}
+
+func validSHA256Identity(value string) bool {
+	const prefix = "sha256:"
+	if !strings.HasPrefix(value, prefix) || len(value) != len(prefix)+64 {
+		return false
+	}
+	_, err := hex.DecodeString(strings.TrimPrefix(value, prefix))
+	return err == nil
 }
 
 func (r *Run) Reject() error {
@@ -306,7 +339,7 @@ func (r *Run) transition(next State) error {
 	case StateApproved:
 		allowed = next == StateCommitting || next == StateRejected || next == StateExpired || next == StateFailed
 	case StateCommitting:
-		allowed = next == StateApproved || next == StateCommitted || next == StateConflicted || next == StateFailed
+		allowed = next == StateApproved || next == StateCommitted || next == StateConflicted || next == StateRejected || next == StateFailed
 	case StateFailed:
 		allowed = next == StateRejected
 	}
@@ -326,11 +359,7 @@ func trustedTimeViolation(err error) verifier.Violation {
 	if errors.Is(err, ErrClockRollback) {
 		ruleID = "time.rollback"
 	}
-	return verifier.Violation{
-		RuleID:   ruleID,
-		Reason:   "trusted run time could not advance monotonically",
-		Evidence: err.Error(),
-	}
+	return verifier.Violation{RuleID: ruleID, Reason: "trusted run time could not advance monotonically", Evidence: err.Error()}
 }
 
 func decisionPointer(decision verifier.Decision) *verifier.Decision {
