@@ -15,7 +15,9 @@ The first runtime slice is intentionally non-committable:
   seccomp, cgroup v2 with the systemd driver, and delegated `cpu`, `memory`, and
   `pids` controllers; it also requires a preloaded digest-pinned image and an
   explicitly marked disposable workspace that does not overlap the real
-  workspace.
+  workspace. Controller delegation is established independently from trusted
+  host evidence in the current user's systemd service `cgroup.controllers`
+  file, not inferred from requested container limits.
 - The hostile process runs as a numeric non-root UID/GID with a read-only root
   filesystem, no network, private PID/IPC/cgroup namespaces, all capabilities
   dropped, `no-new-privileges`, and bounded CPU, memory, PIDs, file descriptors,
