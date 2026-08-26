@@ -187,6 +187,9 @@ func validateEvent(event Event) error {
 	if event.ID == "" || event.Sequence == 0 || event.RunID == "" || event.ActorID == "" {
 		return fmt.Errorf("%w: event identity is incomplete", ErrInvalidEvent)
 	}
+	if event.Timestamp.IsZero() {
+		return fmt.Errorf("%w: timestamp is missing", ErrInvalidEvent)
+	}
 	if event.Timestamp.Location() != time.UTC {
 		return fmt.Errorf("%w: timestamp is not canonical UTC", ErrInvalidEvent)
 	}

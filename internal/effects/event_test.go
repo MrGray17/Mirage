@@ -70,6 +70,23 @@ func TestCanonicalJSONIsIndependentOfMetadataInsertionOrder(t *testing.T) {
 	}
 }
 
+func TestCanonicalJSONRejectsZeroTimestamp(t *testing.T) {
+	at := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	log, err := effects.NewLog("run-1", "agent-1", fixedClock(at))
+	if err != nil {
+		t.Fatalf("new log: %v", err)
+	}
+	event, err := log.Append(filesystemAttempt(effects.DecisionAllow, effects.OutcomeSuccess, nil))
+	if err != nil {
+		t.Fatalf("append event: %v", err)
+	}
+
+	event.Timestamp = time.Time{}
+	if _, err := effects.CanonicalJSON(event); !errors.Is(err, effects.ErrInvalidEvent) {
+		t.Fatalf("error = %v, want ErrInvalidEvent", err)
+	}
+}
+
 func TestLogRejectsStructurallyInvalidEvent(t *testing.T) {
 	at := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 	log, err := effects.NewLog("run-1", "agent-1", fixedClock(at))
