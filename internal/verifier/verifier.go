@@ -33,8 +33,9 @@ type Decision struct {
 	DeniedAttempts  []uint64
 }
 
-// Verify rejects malformed streams, identity mismatches, expired contracts,
-// effects the gateway incorrectly marked allowed, and every denied attempt.
+// Verify rejects malformed streams, identity mismatches, temporal
+// inconsistencies, expired contracts, effects the gateway incorrectly marked
+// allowed, and every denied attempt.
 func Verify(contract *contracts.Contract, events []effects.Event, at time.Time) Decision {
 	decision := Decision{Status: StatusApproved}
 	if contract == nil {
@@ -61,6 +62,7 @@ func Verify(contract *contracts.Contract, events []effects.Event, at time.Time) 
 		})
 	}
 
+	var previousEventTime time.Time
 	for index, event := range events {
 		if _, err := effects.CanonicalJSON(event); err != nil {
 			decision.Violations = append(decision.Violations, Violation{
@@ -71,6 +73,26 @@ func Verify(contract *contracts.Contract, events []effects.Event, at time.Time) 
 			})
 			continue
 		}
+		if !at.IsZero() && event.Timestamp.After(at.UTC()) {
+			decision.Violations = append(decision.Violations, Violation{
+				Sequence: event.Sequence,
+				RuleID:   "event.future",
+				Reason:   "effect event timestamp is later than verification time",
+				Evidence: event.Timestamp.Format(time.RFC3339Nano),
+			})
+			continue
+		}
+		if !previousEventTime.IsZero() && event.Timestamp.Before(previousEventTime) {
+			decision.Violations = append(decision.Violations, Violation{
+				Sequence: event.Sequence,
+				RuleID:   "event.time_order",
+				Reason:   "effect event timestamps are not monotonic",
+				Evidence: event.Timestamp.Format(time.RFC3339Nano),
+			})
+			continue
+		}
+		previousEventTime = event.Timestamp
+
 		expectedSequence := uint64(index + 1)
 		invalidIdentity := false
 		if event.Sequence != expectedSequence || event.ID != fmt.Sprintf("%s:%020d", contract.RunID(), expectedSequence) {
