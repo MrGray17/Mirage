@@ -374,6 +374,14 @@ A contract must be:
 - explicit about denied classes of effects,
 - bounded by expiration.
 
+The M3 prototype constructs a private, immutable contract value from mutable
+input, canonicalizes exact filesystem resource identifiers and rule ordering,
+and assigns the canonical contract a SHA-256 identity. Mutation of the input
+after construction cannot add authority or change that identity. M3 supports
+exact resource matches only; it does not claim glob semantics. Deny rules take
+precedence over allow rules, unmatched operations and resources default to
+deny, and the expiration bound is exclusive.
+
 ## 7.2 Example
 
 ```yaml
@@ -469,6 +477,12 @@ ResourcePreconditions = FRESH
 
 For v0, any forbidden secret access or forbidden external egress attempt rejects the full transaction.
 
+M3 evaluates expiry when a mediated effect is requested, when the event stream
+is verified, and immediately before an approved run enters commit. An allowed
+event is independently re-evaluated against the immutable contract; the
+verifier does not trust an event's `ALLOW` label as authorization evidence by
+itself.
+
 ---
 
 # 8. Effect Model
@@ -500,6 +514,13 @@ EffectEvent {
 }
 ```
 
+M3 stores these events in an in-memory append-only log owned by the trusted run
+coordinator. The log assigns run/actor identity, contiguous sequence numbers,
+stable event IDs, and UTC timestamps, and returns defensive copies to callers.
+Canonical JSON is deterministic. `previous_event_hash` and `event_hash` remain
+empty until M7 implements and verifies the tamper-evident chain; M3 makes no
+durability or cryptographic-integrity claim for the in-memory stream.
+
 ## 8.2 Example events
 
 ```text
@@ -511,6 +532,10 @@ EffectEvent {
 ```
 
 Denied attempts remain permanently visible in the run history.
+
+For M3, "permanently" means for the lifetime of the in-memory run object,
+including after its shadow has been discarded. Durable persistence arrives in
+a later milestone.
 
 ## 8.3 Effect classes
 
@@ -762,6 +787,27 @@ cross-process locking claim.
 The Capability Gateway is the trusted boundary between the agent and privileged tools.
 
 The agent should see virtualized capabilities rather than direct credentials.
+
+The M3 filesystem gateway is a narrow mediation prototype. It accepts virtual
+workspace paths, canonicalizes relative and `/workspace/...` spellings,
+rejects traversal and host-absolute paths, and supports only
+`/workspace/README.md`. Every routed read or write produces one Effect Event:
+allowed success, allowed failure, or denied/blocked. Invalid requested paths
+are represented by a digest rather than being treated as trusted canonical
+resource identifiers.
+
+The M3 run coordinator freezes gateway access at verification, independently
+checks the event stream, and grants `ApplyCommit` authority only after an
+`APPROVED` decision. A denied attempt, malformed/inconsistent event, expired
+contract, failed shadow effect, or incomplete event recording rejects the run
+and discards its shadow. The M2 transaction remains the only component that can
+mutate the real `README.md`.
+
+M3 does **not** run an untrusted agent or prevent direct OS access to the shadow
+path. Its observation claim covers operations routed through the gateway.
+Enforced non-bypass, process isolation, and race-resistant hostile filesystem
+object acquisition (SEC-001) are required before the M4 runtime can treat this
+gateway as a security boundary.
 
 ```text
 Agent
@@ -1174,6 +1220,13 @@ EXPIRED
 ```
 
 Transitions occur only through a dedicated domain state-machine function. Do not scatter state booleans throughout the codebase.
+
+The M3 in-memory coordinator begins at `RUNNING` after contract and shadow
+preparation succeed, then uses explicit `VERIFYING`, `APPROVED`, `COMMITTING`,
+`REJECTED`, `COMMITTED`, `CONFLICTED`, `EXPIRED`, and `FAILED` transitions. `FAILED` is
+non-committable; when rejection cleanup failed, only an explicit cleanup retry
+is permitted. Earlier control-plane states and durable transition records are
+deferred until those responsibilities exist.
 
 ---
 
@@ -1857,6 +1910,12 @@ No AI required yet.
 - filesystem operations generate canonical Effect Events,
 - contract allow/deny works deterministically,
 - forbidden attempt rejects run.
+
+The M3 vertical slice is intentionally limited to exact-match read/write rules
+for the shadow `README.md`, an in-memory append-only event stream, deterministic
+verification, and commit gating. It does not include Docker, AI execution,
+external effects, persistence, event hash chaining, receipts, Git, GitHub, or
+UI work.
 
 ## M4 — Isolated agent runtime
 
