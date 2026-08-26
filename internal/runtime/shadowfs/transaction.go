@@ -1,10 +1,12 @@
 // Package shadowfs implements Mirage's directory-backed shadow filesystem
-// transaction for Milestone 1.
+// transaction and content-baseline conflict detection.
 package shadowfs
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,18 +26,59 @@ var (
 	// ErrInvalidTransition means an operation is not valid in the transaction's
 	// current state.
 	ErrInvalidTransition = errors.New("invalid shadow transaction transition")
-	// ErrCleanup means the transaction reached its intended terminal state, but
-	// Mirage could not remove the transaction-owned shadow directory.
+	// ErrStateConflict means the real resource no longer has the content identity
+	// from which the shadow transaction was derived.
+	ErrStateConflict = errors.New("real resource state conflict")
+	// ErrRevalidation means Mirage could not establish the real resource's
+	// current state and therefore refused to commit.
+	ErrRevalidation = errors.New("real resource revalidation failed")
+	// ErrCleanup means Mirage could not remove transaction-owned filesystem state.
 	ErrCleanup = errors.New("shadow cleanup failed")
 )
 
-// State is the authoritative lifecycle state of an M1 shadow transaction.
+// StateConflict reports a content-identity mismatch without exposing either
+// version's contents.
+type StateConflict struct {
+	Resource         string
+	ExpectedBaseline string
+	ObservedCurrent  string
+}
+
+func (e *StateConflict) Error() string {
+	return fmt.Sprintf("%s: %s expected %s, observed %s", ErrStateConflict, e.Resource, e.ExpectedBaseline, e.ObservedCurrent)
+}
+
+// Unwrap lets callers distinguish conflicts with errors.Is while retaining
+// structured evidence through errors.As.
+func (e *StateConflict) Unwrap() error {
+	return ErrStateConflict
+}
+
+// RevalidationError reports uncertainty while establishing current real state.
+// It is not a conflict because Mirage did not successfully observe a different
+// resource identity.
+type RevalidationError struct {
+	Resource string
+	Cause    error
+}
+
+func (e *RevalidationError) Error() string {
+	return fmt.Sprintf("%s: %s: %v", ErrRevalidation, e.Resource, e.Cause)
+}
+
+// Unwrap preserves both the error category and the underlying filesystem cause.
+func (e *RevalidationError) Unwrap() []error {
+	return []error{ErrRevalidation, e.Cause}
+}
+
+// State is the authoritative lifecycle state of a shadow transaction.
 type State uint8
 
 const (
 	StateActive State = iota + 1
 	StateCommitted
 	StateRejected
+	StateConflicted
 )
 
 func (s State) String() string {
@@ -46,6 +89,8 @@ func (s State) String() string {
 		return "COMMITTED"
 	case StateRejected:
 		return "REJECTED"
+	case StateConflicted:
+		return "CONFLICTED"
 	default:
 		return "UNKNOWN"
 	}
@@ -57,7 +102,16 @@ type Transaction struct {
 	mu              sync.Mutex
 	realWorkspace   string
 	shadowWorkspace string
+	baseline        contentIdentity
+	baselineMode    os.FileMode
+	observeReal     func(string) (resourceObservation, error)
 	state           State
+}
+
+type contentIdentity [sha256.Size]byte
+
+type resourceObservation struct {
+	identity string
 }
 
 // Begin creates a private shadow workspace containing a copy of README.md.
@@ -103,6 +157,9 @@ func Begin(realWorkspace string) (*Transaction, error) {
 	return &Transaction{
 		realWorkspace:   resolvedReal,
 		shadowWorkspace: resolvedShadow,
+		baseline:        identifyContent(contents),
+		baselineMode:    mode,
+		observeReal:     observeManagedResource,
 		state:           StateActive,
 	}, nil
 }
@@ -124,8 +181,10 @@ func (t *Transaction) State() State {
 }
 
 // ApplyCommit is the only operation in this package that changes the real
-// workspace. It validates both managed files, prepares replacement bytes in
-// the real directory, and then renames the prepared file into place.
+// workspace. It prepares replacement bytes, revalidates the real content
+// identity immediately before replacement, and then renames the prepared file
+// into place. The hash check and rename are not an atomic compare-and-swap; see
+// ARCHITECTURE.md for the residual external-writer race.
 func (t *Transaction) ApplyCommit() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -138,19 +197,50 @@ func (t *Transaction) ApplyCommit() error {
 	if err != nil {
 		return fmt.Errorf("validate shadow %s before commit: %w", managedFile, err)
 	}
-	_, realMode, err := readManagedFile(t.realWorkspace)
+
+	preparedPath, err := prepareManagedFile(t.realWorkspace, contents, t.baselineMode.Perm())
 	if err != nil {
-		return fmt.Errorf("validate real %s before commit: %w", managedFile, err)
+		return fmt.Errorf("prepare committed %s: %w", managedFile, err)
 	}
 
-	if err := replaceManagedFile(t.realWorkspace, contents, realMode.Perm()); err != nil {
-		return fmt.Errorf("apply committed %s: %w", managedFile, err)
+	if t.observeReal == nil {
+		return errors.Join(
+			&RevalidationError{Resource: managedFile, Cause: errors.New("real resource observer is unavailable")},
+			removePreparedFile(preparedPath),
+		)
+	}
+	current, err := t.observeReal(t.realWorkspace)
+	if err != nil {
+		return errors.Join(
+			&RevalidationError{Resource: managedFile, Cause: err},
+			removePreparedFile(preparedPath),
+		)
+	}
+	if current.identity != t.baseline.String() {
+		conflict := &StateConflict{
+			Resource:         managedFile,
+			ExpectedBaseline: t.baseline.String(),
+			ObservedCurrent:  current.identity,
+		}
+		t.state = StateConflicted
+		return errors.Join(
+			conflict,
+			removePreparedFile(preparedPath),
+			t.removeShadowWorkspace(),
+		)
+	}
+
+	if err := replaceRealManagedFile(preparedPath, t.realWorkspace); err != nil {
+		return errors.Join(
+			fmt.Errorf("apply committed %s: %w", managedFile, err),
+			removePreparedFile(preparedPath),
+		)
 	}
 
 	// Reality has changed at this point. Record that fact before attempting
 	// cleanup so a cleanup failure cannot make the transaction appear uncommitted.
 	t.state = StateCommitted
-	if err := os.RemoveAll(t.shadowWorkspace); err != nil {
+	if err := t.removeShadowWorkspace(); err != nil {
 		return fmt.Errorf("%w: transaction committed but shadow remains: %w", ErrCleanup, err)
 	}
 	return nil
@@ -165,10 +255,7 @@ func (t *Transaction) Reject() error {
 	if t.state != StateActive {
 		return fmt.Errorf("%w: cannot reject transaction in state %s", ErrInvalidTransition, t.state)
 	}
-	if pathsOverlap(t.realWorkspace, t.shadowWorkspace) {
-		return fmt.Errorf("%w: refusing to clean overlapping shadow workspace", ErrCleanup)
-	}
-	if err := os.RemoveAll(t.shadowWorkspace); err != nil {
+	if err := t.removeShadowWorkspace(); err != nil {
 		return fmt.Errorf("%w: remove rejected shadow workspace: %w", ErrCleanup, err)
 	}
 	t.state = StateRejected
@@ -210,6 +297,80 @@ func readManagedFile(workspace string) ([]byte, os.FileMode, error) {
 	return contents, info.Mode(), nil
 }
 
+func observeManagedResource(workspace string) (resourceObservation, error) {
+	path := filepath.Join(workspace, managedFile)
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return resourceObservation{identity: "missing"}, nil
+	}
+	if err != nil {
+		return resourceObservation{}, fmt.Errorf("inspect %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return resourceObservation{identity: "type:" + resourceType(info.Mode())}, nil
+	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		return resourceObservation{}, fmt.Errorf("open %s: %w", path, err)
+	}
+	openedInfo, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return resourceObservation{}, fmt.Errorf("inspect open %s: %w", path, err)
+	}
+	contents, err := io.ReadAll(file)
+	if err != nil {
+		_ = file.Close()
+		return resourceObservation{}, fmt.Errorf("read %s: %w", path, err)
+	}
+	afterReadInfo, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return resourceObservation{}, fmt.Errorf("reinspect open %s: %w", path, err)
+	}
+	if err := file.Close(); err != nil {
+		return resourceObservation{}, fmt.Errorf("close %s after read: %w", path, err)
+	}
+	if openedInfo.Size() != afterReadInfo.Size() ||
+		openedInfo.Mode() != afterReadInfo.Mode() ||
+		!openedInfo.ModTime().Equal(afterReadInfo.ModTime()) {
+		return resourceObservation{}, fmt.Errorf("%s changed while Mirage was reading its current contents", path)
+	}
+
+	currentInfo, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return resourceObservation{identity: "missing"}, nil
+	}
+	if err != nil {
+		return resourceObservation{}, fmt.Errorf("reinspect %s: %w", path, err)
+	}
+	if !currentInfo.Mode().IsRegular() {
+		return resourceObservation{identity: "type:" + resourceType(currentInfo.Mode())}, nil
+	}
+	if !openedInfo.Mode().IsRegular() || !os.SameFile(openedInfo, currentInfo) {
+		return resourceObservation{}, fmt.Errorf("%s changed while Mirage was establishing its current identity", path)
+	}
+	return resourceObservation{identity: identifyContent(contents).String()}, nil
+}
+
+func resourceType(mode os.FileMode) string {
+	switch {
+	case mode.IsDir():
+		return "directory"
+	case mode&os.ModeSymlink != 0:
+		return "symlink"
+	case mode&os.ModeNamedPipe != 0:
+		return "named-pipe"
+	case mode&os.ModeSocket != 0:
+		return "socket"
+	case mode&os.ModeDevice != 0:
+		return "device"
+	default:
+		return "unsupported"
+	}
+}
+
 func writeNewFile(path string, contents []byte, mode os.FileMode) error {
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if err != nil {
@@ -222,34 +383,59 @@ func writeNewFile(path string, contents []byte, mode os.FileMode) error {
 	return file.Close()
 }
 
-func replaceManagedFile(workspace string, contents []byte, mode os.FileMode) (returnErr error) {
+func prepareManagedFile(workspace string, contents []byte, mode os.FileMode) (string, error) {
 	prepared, err := os.CreateTemp(workspace, ".mirage-readme-")
 	if err != nil {
-		return err
+		return "", err
 	}
 	preparedPath := prepared.Name()
-	defer func() {
-		if err := os.Remove(preparedPath); err != nil && !errors.Is(err, os.ErrNotExist) && returnErr == nil {
-			returnErr = fmt.Errorf("remove prepared commit file: %w", err)
-		}
-	}()
+	fail := func(cause error) (string, error) {
+		_ = prepared.Close()
+		return "", errors.Join(cause, removePreparedFile(preparedPath))
+	}
 
 	if err := prepared.Chmod(mode); err != nil {
-		_ = prepared.Close()
-		return err
+		return fail(err)
 	}
 	if _, err := prepared.Write(contents); err != nil {
-		_ = prepared.Close()
-		return err
+		return fail(err)
 	}
 	if err := prepared.Sync(); err != nil {
-		_ = prepared.Close()
-		return err
+		return fail(err)
 	}
 	if err := prepared.Close(); err != nil {
-		return err
+		return "", errors.Join(err, removePreparedFile(preparedPath))
 	}
+	return preparedPath, nil
+}
+
+func replaceRealManagedFile(preparedPath, workspace string) error {
 	return os.Rename(preparedPath, filepath.Join(workspace, managedFile))
+}
+
+func removePreparedFile(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%w: remove prepared commit file: %w", ErrCleanup, err)
+	}
+	return nil
+}
+
+func (t *Transaction) removeShadowWorkspace() error {
+	if pathsOverlap(t.realWorkspace, t.shadowWorkspace) {
+		return fmt.Errorf("%w: refusing to clean overlapping shadow workspace", ErrCleanup)
+	}
+	if err := os.RemoveAll(t.shadowWorkspace); err != nil {
+		return fmt.Errorf("%w: remove shadow workspace: %w", ErrCleanup, err)
+	}
+	return nil
+}
+
+func identifyContent(contents []byte) contentIdentity {
+	return sha256.Sum256(contents)
+}
+
+func (i contentIdentity) String() string {
+	return fmt.Sprintf("sha256:%x", i[:])
 }
 
 func pathsOverlap(first, second string) bool {

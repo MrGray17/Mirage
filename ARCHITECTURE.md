@@ -674,6 +674,13 @@ At run start MIRAGE records:
 - workspace metadata,
 - contract hash.
 
+For the M2 single-file prototype, the baseline identity is the SHA-256 digest
+of the real `README.md` contents observed when the shadow transaction begins.
+This is content identity, not file-generation identity: an external rewrite
+that produces identical bytes remains commit-compatible. Inode changes,
+timestamps, ownership, and permission-only changes are not represented by this
+prototype baseline.
+
 ## 11.2 Shadow state
 
 ```text
@@ -715,6 +722,38 @@ Delete the overlay. Real state remains untouched.
 ## 11.5 Commit
 
 Apply only the approved normalized diff after resource preconditions are revalidated.
+
+Inside the trusted `ApplyCommit` phase, M2 prepares the replacement in the real
+file's directory, then re-observes the real file immediately before
+replacement. A content mismatch or a successfully observed type/shape change
+(including absence, directory, or symlink replacement) moves the transaction
+to terminal `CONFLICTED`, removes transaction-owned temporary state, and
+preserves the externally written state.
+
+If Mirage cannot establish current state because observation itself fails, it
+returns a structured revalidation error, performs no target mutation, leaves
+the transaction `ACTIVE`, and retains the shadow for retry or explicit
+rejection. Uncertainty is not mislabeled as a conflict. Mirage does not create
+commit-staging artifacts in the real workspace before `ApplyCommit`.
+
+This is not an atomic filesystem compare-and-swap. A non-cooperating process
+can still modify the destination after the final hash read and before Mirage's
+rename. Same-directory rename makes the final directory-entry replacement
+atomic on Unix filesystems that provide the usual rename guarantees, but it
+does not bind that replacement to the earlier content comparison. Go does not
+guarantee `os.Rename` atomicity on non-Unix platforms. M2 therefore narrows but
+does not eliminate the final TOCTOU window.
+
+Mirage reads through an open handle and verifies that the path still identifies
+that regular file after the read; size, mode, and modification time must also
+remain stable across the read. These checks still do not create an atomic
+snapshot against an in-place writer that can preserve or race the observed
+metadata.
+
+The transaction's in-process mutex serializes calls on that transaction only.
+It provides no protection from editors, Git, other Mirage processes, or other
+external writers. M2 intentionally adds no advisory lock and makes no
+cross-process locking claim.
 
 ---
 
@@ -1005,6 +1044,20 @@ commit = ABORT
 ```
 
 Never silently overwrite newer state.
+
+For the M2 local filesystem prototype, a regular-file "version" means a SHA-256
+content digest. Successfully observed content or shape changes conflict.
+Failures that prevent Mirage from establishing current state fail closed with
+a distinct structured error while retaining active shadow state. The
+implementation stages replacement bytes only within `ApplyCommit` and before
+the final revalidation so the remaining interval between comparison and rename
+is as small as the portable Go API reasonably permits. The staging file is
+created in the destination directory; Mirage does not fall back to a
+cross-filesystem copy/write path.
+
+M2 does **not** claim atomic compare-and-replace semantics. Eliminating the
+remaining external-writer race requires a stronger resource primitive or a
+cooperative protocol whose guarantees are explicit for the target filesystem.
 
 ## 17.3 Idempotency
 
@@ -1791,39 +1844,47 @@ COMMIT → real B
 
 No AI required yet.
 
-## M2 — Effect observation + contracts
+## M2 — Conflict-safe filesystem commit
+
+- record the SHA-256 content baseline when the shadow transaction begins,
+- revalidate real `README.md` content immediately before commit,
+- stale content becomes terminal `CONFLICTED`,
+- conflict preserves external state and cleans transaction-owned resources,
+- document the residual non-atomic compare/rename race.
+
+## M3 — Effect observation + contracts
 
 - filesystem operations generate canonical Effect Events,
 - contract allow/deny works deterministically,
 - forbidden attempt rejects run.
 
-## M3 — Isolated agent runtime
+## M4 — Isolated agent runtime
 
 - run an actual coding agent in rootless sandbox,
 - no direct external egress,
 - no real credentials inside runtime,
 - real workspace protected.
 
-## M4 — Git + GitHub deferred commit
+## M5 — Git + GitHub deferred commit
 
 - branch/commit occur in shadow,
 - PR creation becomes deferred external effect,
 - GitHub receives no mutation before commit,
 - commit creates one PR exactly once.
 
-## M5 — TOCTOU + crash safety
+## M6 — Repository TOCTOU + crash safety
 
 - stale repository base rejects commit,
 - duplicate commit does not duplicate PR,
 - simulated crash after external apply recovers safely.
 
-## M6 — Receipt + audit verification
+## M7 — Receipt + audit verification
 
 - hash-chained events,
 - signed receipt,
 - receipt verification endpoint/CLI.
 
-## M7 — Competition UI
+## M8 — Competition UI
 
 Only after the engine works:
 

@@ -1,7 +1,9 @@
 package shadowfs_test
 
 import (
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -43,6 +45,7 @@ func TestApplyCommitIsTheOnlyPointRealWorkspaceChanges(t *testing.T) {
 	writeShadowREADME(t, transaction, []byte("goodbye"))
 
 	assertFileContents(t, filepath.Join(realWorkspace, "README.md"), []byte("hello"))
+	assertNoPreparedCommitFiles(t, realWorkspace)
 	if err := transaction.ApplyCommit(); err != nil {
 		t.Fatalf("apply commit: %v", err)
 	}
@@ -52,6 +55,68 @@ func TestApplyCommitIsTheOnlyPointRealWorkspaceChanges(t *testing.T) {
 	}
 	assertFileContents(t, filepath.Join(realWorkspace, "README.md"), []byte("goodbye"))
 	assertPathMissing(t, shadowWorkspace)
+	assertNoPreparedCommitFiles(t, realWorkspace)
+}
+
+func TestApplyCommitDetectsExternalModificationConflict(t *testing.T) {
+	realWorkspace := newRealWorkspace(t, []byte("A"))
+	transaction := beginTransaction(t, realWorkspace)
+	shadowWorkspace := transaction.ShadowWorkspace()
+	writeShadowREADME(t, transaction, []byte("B"))
+	writeRealREADME(t, realWorkspace, []byte("C"))
+
+	err := transaction.ApplyCommit()
+	if !errors.Is(err, shadowfs.ErrStateConflict) {
+		t.Fatalf("error = %v, want ErrStateConflict", err)
+	}
+	var conflict *shadowfs.StateConflict
+	if !errors.As(err, &conflict) {
+		t.Fatalf("error = %v, want *StateConflict", err)
+	}
+	if conflict.Resource != "README.md" {
+		t.Fatalf("conflict resource = %q, want README.md", conflict.Resource)
+	}
+	if conflict.ExpectedBaseline != contentIdentity([]byte("A")) {
+		t.Fatalf("expected baseline = %q, want %q", conflict.ExpectedBaseline, contentIdentity([]byte("A")))
+	}
+	if conflict.ObservedCurrent != contentIdentity([]byte("C")) {
+		t.Fatalf("observed current = %q, want %q", conflict.ObservedCurrent, contentIdentity([]byte("C")))
+	}
+	if transaction.State() != shadowfs.StateConflicted {
+		t.Fatalf("state = %s, want %s", transaction.State(), shadowfs.StateConflicted)
+	}
+	assertFileContents(t, filepath.Join(realWorkspace, "README.md"), []byte("C"))
+	assertPathMissing(t, shadowWorkspace)
+}
+
+func TestContentIdenticalExternalRewriteRemainsCommitCompatible(t *testing.T) {
+	realWorkspace := newRealWorkspace(t, []byte("A"))
+	transaction := beginTransaction(t, realWorkspace)
+	writeShadowREADME(t, transaction, []byte("B"))
+
+	// M2 uses content identity, not inode or file-generation identity.
+	writeRealREADME(t, realWorkspace, []byte("A"))
+
+	if err := transaction.ApplyCommit(); err != nil {
+		t.Fatalf("apply commit after content-identical rewrite: %v", err)
+	}
+	if transaction.State() != shadowfs.StateCommitted {
+		t.Fatalf("state = %s, want %s", transaction.State(), shadowfs.StateCommitted)
+	}
+	assertFileContents(t, filepath.Join(realWorkspace, "README.md"), []byte("B"))
+}
+
+func TestConflictNeverAppliesShadowContentsToRealWorkspace(t *testing.T) {
+	realWorkspace := newRealWorkspace(t, []byte("baseline"))
+	transaction := beginTransaction(t, realWorkspace)
+	writeShadowREADME(t, transaction, []byte("shadow value that must not commit"))
+	writeRealREADME(t, realWorkspace, []byte("external writer value"))
+
+	if err := transaction.ApplyCommit(); !errors.Is(err, shadowfs.ErrStateConflict) {
+		t.Fatalf("error = %v, want ErrStateConflict", err)
+	}
+
+	assertFileContents(t, filepath.Join(realWorkspace, "README.md"), []byte("external writer value"))
 }
 
 func TestApplyCommitPreservesExactShadowBytes(t *testing.T) {
@@ -76,6 +141,28 @@ func TestApplyCommitPreservesExactShadowBytes(t *testing.T) {
 }
 
 func TestTerminalTransactionsRejectFurtherTransitions(t *testing.T) {
+	t.Run("commit after conflict", func(t *testing.T) {
+		realWorkspace := newRealWorkspace(t, []byte("A"))
+		transaction := beginTransaction(t, realWorkspace)
+		writeRealREADME(t, realWorkspace, []byte("C"))
+		if err := transaction.ApplyCommit(); !errors.Is(err, shadowfs.ErrStateConflict) {
+			t.Fatalf("create conflict: %v", err)
+		}
+		assertInvalidTransition(t, transaction.ApplyCommit())
+		assertFileContents(t, filepath.Join(realWorkspace, "README.md"), []byte("C"))
+	})
+
+	t.Run("reject after conflict", func(t *testing.T) {
+		realWorkspace := newRealWorkspace(t, []byte("A"))
+		transaction := beginTransaction(t, realWorkspace)
+		writeRealREADME(t, realWorkspace, []byte("C"))
+		if err := transaction.ApplyCommit(); !errors.Is(err, shadowfs.ErrStateConflict) {
+			t.Fatalf("create conflict: %v", err)
+		}
+		assertInvalidTransition(t, transaction.Reject())
+		assertFileContents(t, filepath.Join(realWorkspace, "README.md"), []byte("C"))
+	})
+
 	t.Run("commit after reject", func(t *testing.T) {
 		transaction := beginTransaction(t, newRealWorkspace(t, []byte("hello")))
 		if err := transaction.Reject(); err != nil {
@@ -216,6 +303,106 @@ func TestApplyCommitFailsClosedWhenShadowREADMEIsMissing(t *testing.T) {
 	assertFileContents(t, filepath.Join(realWorkspace, "README.md"), []byte("hello"))
 }
 
+func TestApplyCommitTreatsMissingRealREADMEAsConflict(t *testing.T) {
+	realWorkspace := newRealWorkspace(t, []byte("A"))
+	transaction := beginTransaction(t, realWorkspace)
+	shadowWorkspace := transaction.ShadowWorkspace()
+	writeShadowREADME(t, transaction, []byte("B"))
+	if err := os.Remove(filepath.Join(realWorkspace, "README.md")); err != nil {
+		t.Fatalf("remove real README: %v", err)
+	}
+
+	err := transaction.ApplyCommit()
+	if !errors.Is(err, shadowfs.ErrStateConflict) {
+		t.Fatalf("error = %v, want ErrStateConflict", err)
+	}
+	var conflict *shadowfs.StateConflict
+	if !errors.As(err, &conflict) {
+		t.Fatalf("error = %v, want *StateConflict", err)
+	}
+	if conflict.ObservedCurrent != "missing" {
+		t.Fatalf("observed current = %q, want missing", conflict.ObservedCurrent)
+	}
+	if transaction.State() != shadowfs.StateConflicted {
+		t.Fatalf("state = %s, want %s", transaction.State(), shadowfs.StateConflicted)
+	}
+	assertPathMissing(t, filepath.Join(realWorkspace, "README.md"))
+	assertPathMissing(t, shadowWorkspace)
+	assertNoPreparedCommitFiles(t, realWorkspace)
+}
+
+func TestApplyCommitTreatsRealREADMETypeReplacementAsConflict(t *testing.T) {
+	realWorkspace := newRealWorkspace(t, []byte("A"))
+	transaction := beginTransaction(t, realWorkspace)
+	shadowWorkspace := transaction.ShadowWorkspace()
+	writeShadowREADME(t, transaction, []byte("B"))
+	realREADME := filepath.Join(realWorkspace, "README.md")
+	if err := os.Remove(realREADME); err != nil {
+		t.Fatalf("remove real README: %v", err)
+	}
+	if err := os.Mkdir(realREADME, 0o700); err != nil {
+		t.Fatalf("replace real README with directory: %v", err)
+	}
+
+	err := transaction.ApplyCommit()
+	if !errors.Is(err, shadowfs.ErrStateConflict) {
+		t.Fatalf("error = %v, want ErrStateConflict", err)
+	}
+	var conflict *shadowfs.StateConflict
+	if !errors.As(err, &conflict) {
+		t.Fatalf("error = %v, want *StateConflict", err)
+	}
+	if conflict.ObservedCurrent != "type:directory" {
+		t.Fatalf("observed current = %q, want type:directory", conflict.ObservedCurrent)
+	}
+	if transaction.State() != shadowfs.StateConflicted {
+		t.Fatalf("state = %s, want %s", transaction.State(), shadowfs.StateConflicted)
+	}
+	info, statErr := os.Stat(realREADME)
+	if statErr != nil {
+		t.Fatalf("stat real README replacement: %v", statErr)
+	}
+	if !info.IsDir() {
+		t.Fatalf("real README replacement mode = %s, want directory", info.Mode())
+	}
+	assertPathMissing(t, shadowWorkspace)
+	assertNoPreparedCommitFiles(t, realWorkspace)
+}
+
+func TestApplyCommitTreatsRealREADMESymlinkReplacementAsConflict(t *testing.T) {
+	realWorkspace := newRealWorkspace(t, []byte("A"))
+	transaction := beginTransaction(t, realWorkspace)
+	shadowWorkspace := transaction.ShadowWorkspace()
+	writeShadowREADME(t, transaction, []byte("B"))
+	realREADME := filepath.Join(realWorkspace, "README.md")
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outside, []byte("external"), 0o600); err != nil {
+		t.Fatalf("create outside file: %v", err)
+	}
+	if err := os.Remove(realREADME); err != nil {
+		t.Fatalf("remove real README: %v", err)
+	}
+	createSymlinkOrSkip(t, outside, realREADME)
+
+	err := transaction.ApplyCommit()
+	if !errors.Is(err, shadowfs.ErrStateConflict) {
+		t.Fatalf("error = %v, want ErrStateConflict", err)
+	}
+	var conflict *shadowfs.StateConflict
+	if !errors.As(err, &conflict) {
+		t.Fatalf("error = %v, want *StateConflict", err)
+	}
+	if conflict.ObservedCurrent != "type:symlink" {
+		t.Fatalf("observed current = %q, want type:symlink", conflict.ObservedCurrent)
+	}
+	if transaction.State() != shadowfs.StateConflicted {
+		t.Fatalf("state = %s, want %s", transaction.State(), shadowfs.StateConflicted)
+	}
+	assertFileContents(t, outside, []byte("external"))
+	assertPathMissing(t, shadowWorkspace)
+	assertNoPreparedCommitFiles(t, realWorkspace)
+}
+
 func TestRejectRemovesOnlyTransactionOwnedShadow(t *testing.T) {
 	realWorkspace := newRealWorkspace(t, []byte("hello"))
 	transaction := beginTransaction(t, realWorkspace)
@@ -264,6 +451,17 @@ func writeShadowREADME(t *testing.T, transaction *shadowfs.Transaction, contents
 	}
 }
 
+func writeRealREADME(t *testing.T, realWorkspace string, contents []byte) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(realWorkspace, "README.md"), contents, 0o600); err != nil {
+		t.Fatalf("write real README: %v", err)
+	}
+}
+
+func contentIdentity(contents []byte) string {
+	return fmt.Sprintf("sha256:%x", sha256.Sum256(contents))
+}
+
 func assertFileContents(t *testing.T, path string, want []byte) {
 	t.Helper()
 	got, err := os.ReadFile(path)
@@ -279,6 +477,17 @@ func assertPathMissing(t *testing.T, path string) {
 	t.Helper()
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("stat %s error = %v, want path not to exist", path, err)
+	}
+}
+
+func assertNoPreparedCommitFiles(t *testing.T, realWorkspace string) {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(realWorkspace, ".mirage-readme-*"))
+	if err != nil {
+		t.Fatalf("find prepared commit files: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("prepared commit files remain after failed revalidation: %v", matches)
 	}
 }
 
