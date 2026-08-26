@@ -12,12 +12,17 @@ The first runtime slice is intentionally non-committable:
   only a bounded, race-checked copy of `README.md`; it does not yet snapshot a
   repository tree.
 - The launcher accepts only a local Linux rootless Docker daemon reporting
-  seccomp, a preloaded digest-pinned image, and an explicitly marked disposable
-  workspace that does not overlap the real workspace.
+  seccomp, cgroup v2 with the systemd driver, and delegated `cpu`, `memory`, and
+  `pids` controllers; it also requires a preloaded digest-pinned image and an
+  explicitly marked disposable workspace that does not overlap the real
+  workspace.
 - The hostile process runs as a numeric non-root UID/GID with a read-only root
   filesystem, no network, private PID/IPC/cgroup namespaces, all capabilities
   dropped, `no-new-privileges`, and bounded CPU, memory, PIDs, file descriptors,
   shared memory, temporary storage, runtime duration, and Docker log output.
+- The launcher explicitly requests Docker's `seccomp=builtin` profile and
+  rejects the effective container configuration unless that exact non-
+  unconfined profile is present alongside `no-new-privileges`.
 - Docker's effective container configuration is inspected before start. A
   mismatch aborts startup and removes the untrusted container if removal can be
   proven.
@@ -37,6 +42,11 @@ go test -race -count=1 ./internal/runtime/docker
 
 Passing unit tests proves lifecycle and Docker-policy construction. It does not
 substitute for the opt-in live containment test.
+
+The writable bind-mounted workspace does not yet have a hard storage quota.
+That is acceptable only for the fixed, trusted M4.1 fixture, which performs
+bounded overwrites. A hard writable-workspace budget is required before Mirage
+runs arbitrary agent code.
 
 ## 1. Security question
 

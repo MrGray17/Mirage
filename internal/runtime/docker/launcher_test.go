@@ -54,6 +54,101 @@ func TestPrepareRequiresRootlessLinuxSeccompDaemon(t *testing.T) {
 	}
 }
 
+func TestPrepareRequiresEnforcedRootlessCgroupControllers(t *testing.T) {
+	tests := []struct {
+		name       string
+		mutate     func(*daemonInfo)
+		wantReason string
+	}{
+		{
+			name: "cgroup v1",
+			mutate: func(info *daemonInfo) {
+				info.CgroupVersion = "1"
+			},
+			wantReason: "cgroup v2",
+		},
+		{
+			name: "non-systemd driver",
+			mutate: func(info *daemonInfo) {
+				info.CgroupDriver = "none"
+			},
+			wantReason: "systemd",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := dockerTestConfig(t)
+			info := secureDaemonInfo()
+			test.mutate(&info)
+			runner := &fakeRunner{responses: []fakeResponse{
+				{output: []byte("rootless\n")},
+				{output: []byte(`"unix:///run/user/1000/docker.sock"`)},
+				{output: mustJSON(t, info)},
+			}}
+			launcher, err := newWithRunner(config, runner)
+			if err != nil {
+				t.Fatalf("new launcher: %v", err)
+			}
+			if err := launcher.Prepare(context.Background()); !errors.Is(err, ErrIsolation) || !strings.Contains(err.Error(), test.wantReason) {
+				t.Fatalf("prepare error = %v, want %q", err, test.wantReason)
+			}
+		})
+	}
+}
+
+func TestPrepareRequiresEachDelegatedRootlessCgroupController(t *testing.T) {
+	tests := []struct {
+		name        string
+		controllers []string
+		wantReason  string
+	}{
+		{name: "cpu not delegated", controllers: []string{"memory", "pids"}, wantReason: `controller "cpu"`},
+		{name: "memory not delegated", controllers: []string{"cpu", "pids"}, wantReason: `controller "memory"`},
+		{name: "pids not delegated", controllers: []string{"cpu", "memory"}, wantReason: `controller "pids"`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := dockerTestConfig(t)
+			runner := &fakeRunner{responses: []fakeResponse{
+				{output: []byte("rootless\n")},
+				{output: []byte(`"unix:///run/user/1000/docker.sock"`)},
+				{output: mustJSON(t, secureDaemonInfo())},
+			}}
+			launcher, err := newWithRunner(config, runner)
+			if err != nil {
+				t.Fatalf("new launcher: %v", err)
+			}
+			launcher.delegatedControllers = func() ([]string, error) {
+				return test.controllers, nil
+			}
+			if err := launcher.Prepare(context.Background()); !errors.Is(err, ErrIsolation) || !strings.Contains(err.Error(), test.wantReason) {
+				t.Fatalf("prepare error = %v, want %q", err, test.wantReason)
+			}
+		})
+	}
+}
+
+func TestPrepareFailsClosedWhenCgroupDelegationCannotBeEstablished(t *testing.T) {
+	config := dockerTestConfig(t)
+	runner := &fakeRunner{responses: []fakeResponse{
+		{output: []byte("rootless\n")},
+		{output: []byte(`"unix:///run/user/1000/docker.sock"`)},
+		{output: mustJSON(t, secureDaemonInfo())},
+	}}
+	launcher, err := newWithRunner(config, runner)
+	if err != nil {
+		t.Fatalf("new launcher: %v", err)
+	}
+	launcher.delegatedControllers = func() ([]string, error) {
+		return nil, errors.New("cgroup hierarchy unavailable")
+	}
+	if err := launcher.Prepare(context.Background()); !errors.Is(err, ErrIsolation) || !strings.Contains(err.Error(), "establish rootless cgroup") {
+		t.Fatalf("prepare error = %v", err)
+	}
+}
+
 func TestPrepareCreatesAndRevalidatesLockedDownContainer(t *testing.T) {
 	config := dockerTestConfig(t)
 	runner := securePrepareRunner(t, config)
@@ -78,6 +173,7 @@ func TestPrepareCreatesAndRevalidatesLockedDownContainer(t *testing.T) {
 		{"--cgroupns", "private"},
 		{"--cap-drop", "ALL"},
 		{"--security-opt", "no-new-privileges=true"},
+		{"--security-opt", "seccomp=builtin"},
 		{"--pids-limit", "64"},
 		{"--memory", "268435456"},
 		{"--memory-swap", "268435456"},
@@ -102,7 +198,34 @@ func TestPrepareRemovesContainerWhenEffectiveIsolationDiffers(t *testing.T) {
 	runner := &fakeRunner{responses: []fakeResponse{
 		{output: []byte("rootless\n")},
 		{output: []byte(`"unix:///run/user/1000/docker.sock"`)},
-		{output: mustJSON(t, daemonInfo{OSType: "linux", SecurityOptions: []string{"name=seccomp", "name=rootless"}})},
+		{output: mustJSON(t, secureDaemonInfo())},
+		{output: []byte(`"sha256:image"`)},
+		{output: nil},
+		{output: []byte("0123456789ab\n")},
+		{output: mustJSON(t, inspect)},
+		{output: []byte("0123456789ab\n")},
+	}}
+	launcher, err := newWithRunner(config, runner)
+	if err != nil {
+		t.Fatalf("new launcher: %v", err)
+	}
+	if err := launcher.Prepare(context.Background()); !errors.Is(err, ErrIsolation) {
+		t.Fatalf("prepare error = %v", err)
+	}
+	last := runner.calls[len(runner.calls)-1]
+	if !containsSequence(last, []string{"rm", "--force", "0123456789ab"}) {
+		t.Fatalf("cleanup call = %v", last)
+	}
+}
+
+func TestPrepareRejectsUnconfinedEffectiveSeccomp(t *testing.T) {
+	config := dockerTestConfig(t)
+	inspect := secureContainerInspect(t, config)
+	inspect.HostConfig.SecurityOpt = []string{"no-new-privileges", "seccomp=unconfined"}
+	runner := &fakeRunner{responses: []fakeResponse{
+		{output: []byte("rootless\n")},
+		{output: []byte(`"unix:///run/user/1000/docker.sock"`)},
+		{output: mustJSON(t, secureDaemonInfo())},
 		{output: []byte(`"sha256:image"`)},
 		{output: nil},
 		{output: []byte("0123456789ab\n")},
@@ -127,7 +250,7 @@ func TestUncertainCreateRemainsDiscoverableForCleanup(t *testing.T) {
 	runner := &fakeRunner{responses: []fakeResponse{
 		{output: []byte("rootless\n")},
 		{output: []byte(`"unix:///run/user/1000/docker.sock"`)},
-		{output: mustJSON(t, daemonInfo{OSType: "linux", SecurityOptions: []string{"name=seccomp", "name=rootless"}})},
+		{output: mustJSON(t, secureDaemonInfo())},
 		{output: []byte(`"sha256:image"`)},
 		{output: nil},
 		{err: errors.New("client response lost")},
@@ -231,12 +354,21 @@ func securePrepareRunner(t *testing.T, config Config) *fakeRunner {
 	return &fakeRunner{responses: []fakeResponse{
 		{output: []byte("rootless\n")},
 		{output: []byte(`"unix:///run/user/1000/docker.sock"`)},
-		{output: mustJSON(t, daemonInfo{OSType: "linux", SecurityOptions: []string{"name=seccomp,profile=builtin", "name=rootless"}})},
+		{output: mustJSON(t, secureDaemonInfo())},
 		{output: []byte(`"sha256:image"`)},
 		{output: nil},
 		{output: []byte("0123456789ab\n")},
 		{output: mustJSON(t, secureContainerInspect(t, config))},
 	}}
+}
+
+func secureDaemonInfo() daemonInfo {
+	return daemonInfo{
+		OSType:          "linux",
+		SecurityOptions: []string{"name=seccomp,profile=builtin", "name=rootless"},
+		CgroupDriver:    "systemd",
+		CgroupVersion:   "2",
+	}
 }
 
 func secureContainerInspect(t *testing.T, config Config) containerInspect {
@@ -258,7 +390,7 @@ func secureContainerInspect(t *testing.T, config Config) containerInspect {
 	inspected.HostConfig.IpcMode = "private"
 	inspected.HostConfig.CgroupnsMode = "private"
 	inspected.HostConfig.CapDrop = []string{"ALL"}
-	inspected.HostConfig.SecurityOpt = []string{"no-new-privileges"}
+	inspected.HostConfig.SecurityOpt = []string{"no-new-privileges", "seccomp=builtin"}
 	inspected.HostConfig.PidsLimit = &pids
 	inspected.HostConfig.Memory = normalized.MemoryBytes
 	inspected.HostConfig.MemorySwap = normalized.MemoryBytes

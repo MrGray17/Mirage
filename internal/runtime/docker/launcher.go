@@ -59,15 +59,16 @@ type Config struct {
 // Launcher owns one container. It is safe for serialized lifecycle calls and
 // also guards its own mutable identity against accidental concurrent use.
 type Launcher struct {
-	mu          sync.Mutex
-	config      Config
-	runner      commandRunner
-	containerID string
-	prepared    bool
-	started     bool
-	frozen      bool
-	hostOS      string
-	createTried bool
+	mu                   sync.Mutex
+	config               Config
+	runner               commandRunner
+	delegatedControllers func() ([]string, error)
+	containerID          string
+	prepared             bool
+	started              bool
+	frozen               bool
+	hostOS               string
+	createTried          bool
 }
 
 type commandRunner interface {
@@ -131,7 +132,12 @@ func New(config Config) (*Launcher, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Launcher{config: normalized, runner: execCommandRunner{}, hostOS: runtime.GOOS}, nil
+	return &Launcher{
+		config:               normalized,
+		runner:               execCommandRunner{},
+		delegatedControllers: hostDelegatedControllers,
+		hostOS:               runtime.GOOS,
+	}, nil
 }
 
 func newWithRunner(config Config, runner commandRunner) (*Launcher, error) {
@@ -143,6 +149,9 @@ func newWithRunner(config Config, runner commandRunner) (*Launcher, error) {
 		return nil, fmt.Errorf("%w: command runner is required", ErrInvalidConfig)
 	}
 	launcher.runner = runner
+	launcher.delegatedControllers = func() ([]string, error) {
+		return []string{"cpu", "memory", "pids"}, nil
+	}
 	// This constructor is package-private and exists only for deterministic
 	// policy tests on non-Linux development hosts.
 	launcher.hostOS = "linux"
@@ -315,6 +324,25 @@ func (l *Launcher) verifyDaemon(ctx context.Context) error {
 	if !containsSecurityOption(info.SecurityOptions, "seccomp") {
 		return fmt.Errorf("%w: Docker daemon does not report seccomp", ErrIsolation)
 	}
+	if info.CgroupVersion != "2" || !strings.EqualFold(info.CgroupDriver, "systemd") {
+		return fmt.Errorf(
+			"%w: rootless resource enforcement requires cgroup v2 with the systemd driver",
+			ErrIsolation,
+		)
+	}
+	controllers, err := l.delegatedControllers()
+	if err != nil {
+		return fmt.Errorf("%w: establish rootless cgroup controller delegation: %w", ErrIsolation, err)
+	}
+	for _, controller := range []string{"cpu", "memory", "pids"} {
+		if !containsFold(controllers, controller) {
+			return fmt.Errorf(
+				"%w: rootless cgroup controller %q is not delegated",
+				ErrIsolation,
+				controller,
+			)
+		}
+	}
 	return nil
 }
 
@@ -333,6 +361,7 @@ func (l *Launcher) createArguments() []string {
 		"--cgroupns", "private",
 		"--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges=true",
+		"--security-opt", "seccomp=builtin",
 		"--pids-limit", strconv.FormatInt(l.config.PIDLimit, 10),
 		"--memory", strconv.FormatInt(l.config.MemoryBytes, 10),
 		"--memory-swap", strconv.FormatInt(l.config.MemoryBytes, 10),
@@ -374,7 +403,9 @@ func (l *Launcher) verifyContainer(ctx context.Context) error {
 	if host.Privileged || !host.ReadonlyRootfs || host.NetworkMode != "none" || host.PidMode != "private" || host.IpcMode != "private" || host.CgroupnsMode != "private" {
 		return fmt.Errorf("%w: namespace or root-filesystem isolation changed", ErrIsolation)
 	}
-	if !containsFold(host.CapDrop, "ALL") || !containsSecurityOption(host.SecurityOpt, "no-new-privileges") {
+	if !containsFold(host.CapDrop, "ALL") ||
+		!containsSecurityOption(host.SecurityOpt, "no-new-privileges") ||
+		!containsExactFold(host.SecurityOpt, "seccomp=builtin") {
 		return fmt.Errorf("%w: capability or privilege isolation changed", ErrIsolation)
 	}
 	if host.PidsLimit == nil || *host.PidsLimit != l.config.PIDLimit || host.Memory != l.config.MemoryBytes || host.MemorySwap != l.config.MemoryBytes || host.NanoCPUs != l.config.NanoCPUs {
@@ -476,6 +507,8 @@ func (l *Launcher) run(ctx context.Context, args ...string) ([]byte, error) {
 type daemonInfo struct {
 	OSType          string   `json:"OSType"`
 	SecurityOptions []string `json:"SecurityOptions"`
+	CgroupDriver    string   `json:"CgroupDriver"`
+	CgroupVersion   string   `json:"CgroupVersion"`
 }
 
 type containerInspect struct {
@@ -670,6 +703,15 @@ func samePath(first, second string) bool {
 func containsFold(values []string, wanted string) bool {
 	for _, value := range values {
 		if strings.EqualFold(value, wanted) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsExactFold(values []string, wanted string) bool {
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), wanted) {
 			return true
 		}
 	}
