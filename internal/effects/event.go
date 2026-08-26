@@ -8,11 +8,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/MrGray17/Mirage/internal/securitylimits"
 )
 
 var (
 	ErrInvalidEvent = errors.New("invalid effect event")
 	ErrEventTime    = errors.New("trusted event time unavailable")
+	ErrEventLimit   = errors.New("effect event limit exceeded")
 )
 
 type Decision string
@@ -105,6 +108,9 @@ func (l *Log) Append(attempt Attempt) (Event, error) {
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if len(l.events) >= securitylimits.MaxEffectEvents {
+		return Event{}, fmt.Errorf("%w: maximum %d events per run", ErrEventLimit, securitylimits.MaxEffectEvents)
+	}
 	at, err := l.trustedTime()
 	if err != nil {
 		return Event{}, err
@@ -168,6 +174,9 @@ func validateAttempt(attempt Attempt) error {
 		strings.TrimSpace(attempt.Classification) == "" ||
 		strings.TrimSpace(attempt.Phase) == "" {
 		return fmt.Errorf("%w: required field is empty", ErrInvalidEvent)
+	}
+	if len(attempt.ResourceID) > securitylimits.MaxResourceIDBytes {
+		return fmt.Errorf("%w: resource ID exceeds %d bytes", ErrInvalidEvent, securitylimits.MaxResourceIDBytes)
 	}
 	if attempt.Decision != DecisionAllow && attempt.Decision != DecisionDeny {
 		return fmt.Errorf("%w: decision %q", ErrInvalidEvent, attempt.Decision)
