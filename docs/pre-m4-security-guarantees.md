@@ -6,11 +6,11 @@ This document records the precise guarantees of the pre-M4 runtime hardening lin
 
 An `APPROVED` verifier status is necessary but no longer sufficient to replace the real managed file.
 
-At verification, the run freezes the final shadow content identity and derives whether the verifier actually approved a successful filesystem `WRITE` for `/workspace/README.md` from `ApprovedEffects` plus the canonical event stream.
+At verification, the run freezes the final shadow content identity, compares it with the transaction baseline, and derives whether the verifier actually approved a successful filesystem `WRITE` for `/workspace/README.md` from `ApprovedEffects` plus the canonical event stream.
 
-- If no filesystem write was approved, the final shadow identity must still equal the transaction baseline. A different final shadow is `shadow.unobserved_mutation` and rejects the run.
-- An approved read-only or empty run finalizes by deleting the shadow and marking the transaction committed **without replacing the real `README.md`**.
-- If a filesystem write was approved, the frozen shadow identity is passed into the transaction commit path.
+- If the final shadow differs from baseline, a successful filesystem `WRITE` for that managed resource must be among the verifier-approved effects. Otherwise the run is rejected as `shadow.unobserved_mutation`.
+- If the final shadow equals baseline, the final diff is empty. The run finalizes by deleting the shadow and marking the transaction committed **without replacing the real `README.md`**, even if an allowed write event occurred but ultimately produced no state change.
+- For a non-empty authorized mutation, the frozen shadow identity is passed into the transaction commit path.
 - Immediately before any real replacement, the transaction rereads the bounded shadow and requires its identity to equal the verification snapshot.
 - A post-verification shadow change is `ErrShadowChanged`, discards the compromised shadow, and makes the run `REJECTED`.
 
@@ -82,4 +82,4 @@ Simply mounting the shadow workspace writable into a container and trusting the 
 
 ## Evidence gate before M4 implementation
 
-The repository must run its Go security suite on Linux with Go 1.24, including race detection and symlink-capable filesystem tests. Windows-local skips are reported as skips and are not treated as evidence that those cases passed.
+The repository must run its Go security suite on Linux with Go 1.24, including race detection and symlink-capable filesystem tests. Windows-local skips are reported as skips and are not treated as evidence that those cases passed. The Linux evidence suite additionally contains a non-skippable capability test so an unsuitable CI filesystem cannot silently masquerade as proof.
