@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/MrGray17/Mirage/internal/limits"
 )
 
 const VersionV1 = "mirage.contract/v1"
@@ -224,7 +226,10 @@ func canonicalizeResources(field string, resources []string) ([]string, error) {
 	canonical := make([]string, 0, len(resources))
 	seen := make(map[string]struct{}, len(resources))
 	for _, resource := range resources {
-		if !isCanonicalWorkspaceResource(resource) {
+		if len(resource) > limits.MaxResourceIdentifierBytes {
+			return nil, fmt.Errorf("%w: %s resource exceeds %d bytes", ErrInvalidContract, field, limits.MaxResourceIdentifierBytes)
+		}
+		if strings.ContainsRune(resource, '\x00') || !isCanonicalWorkspaceResource(resource) {
 			return nil, fmt.Errorf("%w: %s contains non-canonical resource %q", ErrInvalidContract, field, resource)
 		}
 		if _, exists := seen[resource]; exists {

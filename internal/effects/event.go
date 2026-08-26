@@ -8,11 +8,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/MrGray17/Mirage/internal/limits"
 )
 
 var (
 	ErrInvalidEvent = errors.New("invalid effect event")
 	ErrEventTime    = errors.New("trusted event time unavailable")
+	ErrEventLimit   = errors.New("effect event limit exceeded")
 )
 
 type Decision string
@@ -97,6 +100,15 @@ func NewLog(runID, actorID string, now func() (time.Time, error)) (*Log, error) 
 	return &Log{runID: runID, actorID: actorID, now: now}, nil
 }
 
+// EnsureCapacity fails before a mediated operation executes when the in-memory
+// stream has reached its security budget. Append performs the same check so a
+// caller cannot bypass the bound by calling the log directly.
+func (l *Log) EnsureCapacity() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.ensureCapacityLocked()
+}
+
 // Append validates, sequences, and stores one immutable event.
 func (l *Log) Append(attempt Attempt) (Event, error) {
 	if err := validateAttempt(attempt); err != nil {
@@ -105,6 +117,9 @@ func (l *Log) Append(attempt Attempt) (Event, error) {
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if err := l.ensureCapacityLocked(); err != nil {
+		return Event{}, err
+	}
 	at, err := l.trustedTime()
 	if err != nil {
 		return Event{}, err
@@ -214,6 +229,13 @@ func (l *Log) trustedTime() (time.Time, error) {
 		return time.Time{}, fmt.Errorf("%w: trusted clock returned zero time", ErrEventTime)
 	}
 	return at.UTC(), nil
+}
+
+func (l *Log) ensureCapacityLocked() error {
+	if len(l.events) >= limits.MaxEffectEventsPerRun {
+		return fmt.Errorf("%w: maximum %d events per run", ErrEventLimit, limits.MaxEffectEventsPerRun)
+	}
+	return nil
 }
 
 func cloneEvent(event Event) Event {

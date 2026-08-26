@@ -62,14 +62,16 @@ func (s State) String() string {
 }
 
 type Run struct {
-	mu          sync.Mutex
-	contract    *contracts.Contract
-	events      *effects.Log
-	filesystem  *filesystemgateway.Gateway
-	transaction *shadowfs.Transaction
-	clock       *trustedClock
-	state       State
-	decision    *verifier.Decision
+	mu                       sync.Mutex
+	contract                 *contracts.Contract
+	events                   *effects.Log
+	filesystem               *filesystemgateway.Gateway
+	transaction              *shadowfs.Transaction
+	clock                    *trustedClock
+	state                    State
+	decision                 *verifier.Decision
+	verifiedShadowIdentity   string
+	commitFilesystemMutation bool
 }
 
 // Begin creates a mediated run backed by a fresh shadow transaction. The clock
@@ -128,6 +130,17 @@ func (r *Run) ContractHash() string { return r.contract.Hash() }
 
 func (r *Run) Events() []effects.Event { return r.events.Events() }
 
+// Decision returns the latest immutable verification/rejection decision when
+// the run has one. The copy cannot mutate the run's stored evidence.
+func (r *Run) Decision() (verifier.Decision, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.decision == nil {
+		return verifier.Decision{}, false
+	}
+	return cloneDecision(*r.decision), true
+}
+
 func (r *Run) ReadFile(resource string) ([]byte, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -135,7 +148,7 @@ func (r *Run) ReadFile(resource string) ([]byte, error) {
 		return nil, fmt.Errorf("%w: cannot read in state %s", ErrInvalidTransition, r.state)
 	}
 	contents, err := r.filesystem.ReadFile(resource)
-	if isTrustedTimeError(err) {
+	if isAuditIntegrityError(err) {
 		return nil, r.rejectRunning(err)
 	}
 	return contents, err
@@ -148,7 +161,7 @@ func (r *Run) WriteFile(resource string, contents []byte) error {
 		return fmt.Errorf("%w: cannot write in state %s", ErrInvalidTransition, r.state)
 	}
 	err := r.filesystem.WriteFile(resource, contents)
-	if isTrustedTimeError(err) {
+	if isAuditIntegrityError(err) {
 		return r.rejectRunning(err)
 	}
 	return err
@@ -167,6 +180,7 @@ func (r *Run) Verify() (verifier.Decision, error) {
 		return verifier.Decision{}, err
 	}
 
+	events := r.events.Events()
 	verificationAt, timeErr := r.clock.Observe()
 	decision := verifier.Decision{
 		RunID:        r.contract.RunID(),
@@ -174,7 +188,7 @@ func (r *Run) Verify() (verifier.Decision, error) {
 		ContractHash: r.contract.Hash(),
 	}
 	if timeErr == nil {
-		decision = verifier.Verify(r.contract, r.events.Events(), verificationAt)
+		decision = verifier.Verify(r.contract, events, verificationAt)
 	} else {
 		decision.Violations = append(decision.Violations, trustedTimeViolation(timeErr))
 	}
@@ -186,6 +200,36 @@ func (r *Run) Verify() (verifier.Decision, error) {
 			Evidence: auditErr.Error(),
 		})
 	}
+
+	r.verifiedShadowIdentity = ""
+	r.commitFilesystemMutation = false
+	if decision.Status == verifier.StatusApproved {
+		shadowIdentity, snapshotErr := r.transaction.ShadowIdentity()
+		if snapshotErr != nil {
+			decision.Status = verifier.StatusRejected
+			decision.Violations = append(decision.Violations, verifier.Violation{
+				RuleID:   "shadow.snapshot",
+				Reason:   "Mirage could not freeze the final shadow state",
+				Evidence: snapshotErr.Error(),
+			})
+		} else {
+			baselineIdentity := r.transaction.BaselineIdentity()
+			finalMutation := shadowIdentity != baselineIdentity
+			approvedWrite := hasApprovedFilesystemWrite(decision, events)
+			if finalMutation && !approvedWrite {
+				decision.Status = verifier.StatusRejected
+				decision.Violations = append(decision.Violations, verifier.Violation{
+					RuleID:   "shadow.unobserved_mutation",
+					Reason:   "final shadow state changed without an approved filesystem write",
+					Evidence: filesystemgateway.ManagedResource,
+				})
+			} else {
+				r.verifiedShadowIdentity = shadowIdentity
+				r.commitFilesystemMutation = finalMutation
+			}
+		}
+	}
+
 	r.decision = decisionPointer(decision)
 
 	if decision.Status == verifier.StatusRejected {
@@ -207,12 +251,13 @@ func (r *Run) Verify() (verifier.Decision, error) {
 	return cloneDecision(decision), nil
 }
 
-// ApplyCommit is available only after deterministic approval. M2 remains the
-// sole package that mutates the real workspace.
+// ApplyCommit is available only after deterministic approval. Real mutation is
+// additionally bound to the frozen shadow state and to a verified non-empty
+// filesystem diff backed by approved WRITE authority.
 func (r *Run) ApplyCommit() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.state != StateApproved || r.decision == nil || r.decision.Status != verifier.StatusApproved {
+	if r.state != StateApproved || r.decision == nil || r.decision.Status != verifier.StatusApproved || r.verifiedShadowIdentity == "" {
 		return fmt.Errorf("%w: cannot commit in state %s", ErrInvalidTransition, r.state)
 	}
 	commitAt, err := r.clock.Observe()
@@ -229,7 +274,16 @@ func (r *Run) ApplyCommit() error {
 		return err
 	}
 
-	err = r.transaction.ApplyCommit()
+	if r.commitFilesystemMutation {
+		err = r.transaction.ApplyCommitExpected(r.verifiedShadowIdentity)
+	} else {
+		err = r.transaction.FinalizeVerifiedNoop(r.verifiedShadowIdentity)
+	}
+
+	if errors.Is(err, shadowfs.ErrShadowChanged) || errors.Is(err, shadowfs.ErrUnauthorizedShadowMutation) {
+		return r.rejectCompromisedCommit(err)
+	}
+
 	switch r.transaction.State() {
 	case shadowfs.StateCommitted:
 		if transitionErr := r.transition(StateCommitted); transitionErr != nil {
@@ -283,12 +337,34 @@ func (r *Run) rejectBeforeCommit(cause error, terminal State) error {
 	return cause
 }
 
+func (r *Run) rejectCompromisedCommit(cause error) error {
+	transitionErr := r.transition(StateFailed)
+	if transitionErr != nil {
+		return errors.Join(cause, transitionErr)
+	}
+	if r.transaction.State() == shadowfs.StateActive {
+		if err := r.transaction.Reject(); err != nil {
+			return errors.Join(cause, fmt.Errorf("discard compromised shadow: %w", err))
+		}
+	}
+	if err := r.transition(StateRejected); err != nil {
+		return errors.Join(cause, err)
+	}
+	return cause
+}
+
 func (r *Run) rejectRunning(cause error) error {
+	r.decision = decisionPointer(verifier.Decision{
+		RunID:        r.contract.RunID(),
+		Status:       verifier.StatusRejected,
+		ContractHash: r.contract.Hash(),
+		Violations:   []verifier.Violation{auditIntegrityViolation(cause)},
+	})
 	if err := r.transition(StateFailed); err != nil {
 		return errors.Join(cause, err)
 	}
 	if err := r.transaction.Reject(); err != nil {
-		return errors.Join(cause, fmt.Errorf("discard run after trusted-time failure: %w", err))
+		return errors.Join(cause, fmt.Errorf("discard run after audit-integrity failure: %w", err))
 	}
 	if err := r.transition(StateRejected); err != nil {
 		return errors.Join(cause, err)
@@ -317,8 +393,30 @@ func (r *Run) transition(next State) error {
 	return nil
 }
 
+func hasApprovedFilesystemWrite(decision verifier.Decision, events []effects.Event) bool {
+	for _, sequence := range decision.ApprovedEffects {
+		if sequence == 0 || sequence > uint64(len(events)) {
+			continue
+		}
+		event := events[sequence-1]
+		if event.Sequence == sequence &&
+			event.Adapter == effects.AdapterFilesystem &&
+			event.Operation == string(contracts.FilesystemWrite) &&
+			event.ResourceID == filesystemgateway.ManagedResource &&
+			event.Decision == effects.DecisionAllow &&
+			event.Outcome == effects.OutcomeSuccessShadow {
+			return true
+		}
+	}
+	return false
+}
+
 func isTrustedTimeError(err error) bool {
 	return errors.Is(err, ErrTrustedTime) || errors.Is(err, ErrClockRollback) || errors.Is(err, effects.ErrEventTime)
+}
+
+func isAuditIntegrityError(err error) bool {
+	return isTrustedTimeError(err) || errors.Is(err, filesystemgateway.ErrEffectRecording) || errors.Is(err, effects.ErrEventLimit)
 }
 
 func trustedTimeViolation(err error) verifier.Violation {
@@ -329,6 +427,17 @@ func trustedTimeViolation(err error) verifier.Violation {
 	return verifier.Violation{
 		RuleID:   ruleID,
 		Reason:   "trusted run time could not advance monotonically",
+		Evidence: err.Error(),
+	}
+}
+
+func auditIntegrityViolation(err error) verifier.Violation {
+	if isTrustedTimeError(err) {
+		return trustedTimeViolation(err)
+	}
+	return verifier.Violation{
+		RuleID:   "event.recording",
+		Reason:   "effect stream integrity is incomplete",
 		Evidence: err.Error(),
 	}
 }
