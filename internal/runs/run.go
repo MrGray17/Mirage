@@ -62,16 +62,16 @@ func (s State) String() string {
 }
 
 type Run struct {
-	mu                      sync.Mutex
-	contract                *contracts.Contract
-	events                  *effects.Log
-	filesystem              *filesystemgateway.Gateway
-	transaction             *shadowfs.Transaction
-	clock                   *trustedClock
-	state                   State
-	decision                *verifier.Decision
-	verifiedShadowIdentity  string
-	approvedFilesystemWrite bool
+	mu                       sync.Mutex
+	contract                 *contracts.Contract
+	events                   *effects.Log
+	filesystem               *filesystemgateway.Gateway
+	transaction              *shadowfs.Transaction
+	clock                    *trustedClock
+	state                    State
+	decision                 *verifier.Decision
+	verifiedShadowIdentity   string
+	commitFilesystemMutation bool
 }
 
 // Begin creates a mediated run backed by a fresh shadow transaction. The clock
@@ -202,7 +202,7 @@ func (r *Run) Verify() (verifier.Decision, error) {
 	}
 
 	r.verifiedShadowIdentity = ""
-	r.approvedFilesystemWrite = false
+	r.commitFilesystemMutation = false
 	if decision.Status == verifier.StatusApproved {
 		shadowIdentity, snapshotErr := r.transaction.ShadowIdentity()
 		if snapshotErr != nil {
@@ -213,8 +213,10 @@ func (r *Run) Verify() (verifier.Decision, error) {
 				Evidence: snapshotErr.Error(),
 			})
 		} else {
+			baselineIdentity := r.transaction.BaselineIdentity()
+			finalMutation := shadowIdentity != baselineIdentity
 			approvedWrite := hasApprovedFilesystemWrite(decision, events)
-			if !approvedWrite && shadowIdentity != r.transaction.BaselineIdentity() {
+			if finalMutation && !approvedWrite {
 				decision.Status = verifier.StatusRejected
 				decision.Violations = append(decision.Violations, verifier.Violation{
 					RuleID:   "shadow.unobserved_mutation",
@@ -223,7 +225,7 @@ func (r *Run) Verify() (verifier.Decision, error) {
 				})
 			} else {
 				r.verifiedShadowIdentity = shadowIdentity
-				r.approvedFilesystemWrite = approvedWrite
+				r.commitFilesystemMutation = finalMutation
 			}
 		}
 	}
@@ -250,7 +252,8 @@ func (r *Run) Verify() (verifier.Decision, error) {
 }
 
 // ApplyCommit is available only after deterministic approval. Real mutation is
-// additionally bound to the frozen shadow state and to an approved WRITE effect.
+// additionally bound to the frozen shadow state and to a verified non-empty
+// filesystem diff backed by approved WRITE authority.
 func (r *Run) ApplyCommit() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -271,7 +274,7 @@ func (r *Run) ApplyCommit() error {
 		return err
 	}
 
-	if r.approvedFilesystemWrite {
+	if r.commitFilesystemMutation {
 		err = r.transaction.ApplyCommitExpected(r.verifiedShadowIdentity)
 	} else {
 		err = r.transaction.FinalizeVerifiedNoop(r.verifiedShadowIdentity)
