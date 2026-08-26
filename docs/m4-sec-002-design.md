@@ -1,6 +1,42 @@
 # M4 SEC-002 — Non-Bypassable Runtime Design
 
-> Status: design gate; no hostile-agent runtime should be implemented until the invariants and tests below are accepted.
+> Status: approved design. M4.1 implements only lifecycle, hostile-fixture
+> launch, isolation checks, and process-tree stop proof. Reconciliation and
+> commit authority remain unimplemented.
+
+## M4.1 implementation boundary
+
+The first runtime slice is intentionally non-committable:
+
+- `mirage run hostile-fixture` prepares a disposable M4.1 workspace containing
+  only a bounded, race-checked copy of `README.md`; it does not yet snapshot a
+  repository tree.
+- The launcher accepts only a local Linux rootless Docker daemon reporting
+  seccomp, a preloaded digest-pinned image, and an explicitly marked disposable
+  workspace that does not overlap the real workspace.
+- The hostile process runs as a numeric non-root UID/GID with a read-only root
+  filesystem, no network, private PID/IPC/cgroup namespaces, all capabilities
+  dropped, `no-new-privileges`, and bounded CPU, memory, PIDs, file descriptors,
+  shared memory, temporary storage, runtime duration, and Docker log output.
+- Docker's effective container configuration is inspected before start. A
+  mismatch aborts startup and removes the untrusted container if removal can be
+  proven.
+- The runtime enters `FROZEN` only after `SIGKILL`, Docker wait, and an inspected
+  state showing no running, paused, or restarting process and PID zero.
+- Because no trusted tree scanner or normalized diff exists yet, every M4.1 run
+  is rejected after freeze. The real workspace is never mounted or committed.
+
+The live attack test is opt-in and requires a Linux rootless Docker host plus a
+preloaded image containing `/bin/sh` and `wget`:
+
+```text
+MIRAGE_M41_INTEGRATION=1
+MIRAGE_HOSTILE_IMAGE=<repository@sha256:digest>
+go test -race -count=1 ./internal/runtime/docker
+```
+
+Passing unit tests proves lifecycle and Docker-policy construction. It does not
+substitute for the opt-in live containment test.
 
 ## 1. Security question
 

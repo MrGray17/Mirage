@@ -679,21 +679,27 @@ Do not adopt a microVM platform until the core transaction model is proven.
 ## 10.3 Runtime lifecycle
 
 ```text
-ALLOCATED
+CREATED
     ↓
 PREPARING
     ↓
-READY
-    ↓
 RUNNING
+    ↓
+FREEZING
     ↓
 FROZEN
     ↓
-DESTROYING
+RECONCILING
     ↓
-DESTROYED
+VERIFIED
+    ↓
+COMMITTED / REJECTED / FAILED
 ```
 
+`FROZEN` is reachable only after the trusted sandbox backend proves the
+untrusted process tree can no longer mutate the disposable workspace. M4.1
+implements lifecycle through this freeze proof and then always rejects; the
+scanner, normalized diff, verification, and commit transitions remain M4.2+.
 The runtime is disposable. Durable truth lives outside it.
 
 ---
