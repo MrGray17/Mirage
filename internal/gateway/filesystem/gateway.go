@@ -16,6 +16,7 @@ import (
 
 	"github.com/MrGray17/Mirage/internal/contracts"
 	"github.com/MrGray17/Mirage/internal/effects"
+	"github.com/MrGray17/Mirage/internal/securitylimits"
 )
 
 const ManagedResource = "/workspace/README.md"
@@ -25,6 +26,7 @@ var (
 	ErrInvalidGateway  = errors.New("invalid filesystem gateway")
 	ErrEffectRecording = errors.New("effect recording failed")
 	ErrUnsafeResource  = errors.New("unsafe filesystem resource")
+	ErrResourceLimit   = errors.New("filesystem resource limit exceeded")
 )
 
 type DeniedError struct {
@@ -87,7 +89,11 @@ func (g *Gateway) ReadFile(requestedResource string) ([]byte, error) {
 	metadata := policyMetadata(policyDecision)
 	if err != nil {
 		outcome = effects.OutcomeFailed
-		metadata["error_class"] = "shadow_read_failed"
+		if errors.Is(err, ErrResourceLimit) {
+			metadata["error_class"] = "resource_limit"
+		} else {
+			metadata["error_class"] = "shadow_read_failed"
+		}
 	}
 	if recordErr := g.record(contracts.FilesystemRead, resource, effects.DecisionAllow, outcome, metadata); recordErr != nil {
 		return nil, errors.Join(fmt.Errorf("%w: %w", ErrEffectRecording, recordErr), err)
@@ -111,12 +117,27 @@ func (g *Gateway) WriteFile(requestedResource string, contents []byte) error {
 		return g.recordDenied(contracts.FilesystemWrite, resource, policyDecision, requestedResource)
 	}
 
+	metadata := policyMetadata(policyDecision)
+	if int64(len(contents)) > securitylimits.ManagedFileBytes {
+		metadata["error_class"] = "resource_limit"
+		limitErr := fmt.Errorf("%w: write payload is %d bytes, maximum is %d", ErrResourceLimit, len(contents), securitylimits.ManagedFileBytes)
+		if recordErr := g.record(contracts.FilesystemWrite, resource, effects.DecisionAllow, effects.OutcomeFailed, metadata); recordErr != nil {
+			return errors.Join(limitErr, fmt.Errorf("%w: %w", ErrEffectRecording, recordErr))
+		}
+		return limitErr
+	}
+
 	err = writeRegularFile(g.shadow, contents)
 	outcome := effects.OutcomeSuccessShadow
-	metadata := policyMetadata(policyDecision)
 	if err != nil {
 		outcome = effects.OutcomeFailed
-		metadata["error_class"] = "shadow_write_failed"
+		if errors.Is(err, ErrResourceLimit) {
+			metadata["error_class"] = "resource_limit"
+		} else {
+			metadata["error_class"] = "shadow_write_failed"
+		}
+	} else {
+		metadata["result_sha256"] = digestBytes(contents)
 	}
 	if recordErr := g.record(contracts.FilesystemWrite, resource, effects.DecisionAllow, outcome, metadata); recordErr != nil {
 		return errors.Join(fmt.Errorf("%w: %w", ErrEffectRecording, recordErr), err)
@@ -198,6 +219,9 @@ func canonicalResource(requested string) (string, error) {
 	if requested == "" || strings.ContainsRune(requested, '\x00') {
 		return "", errors.New("empty or NUL-containing resource")
 	}
+	if len(requested) > securitylimits.MaxResourceIDBytes {
+		return "", errors.New("resource path exceeds maximum length")
+	}
 	normalized := strings.ReplaceAll(requested, "\\", "/")
 	if strings.HasPrefix(normalized, "//") || (len(normalized) >= 2 && normalized[1] == ':') {
 		return "", errors.New("host-absolute resource")
@@ -231,9 +255,9 @@ func readRegularFileWithHook(workspace string, afterInitialInspection func()) (c
 		returnErr = errors.Join(returnErr, closeAcquiredFile(root, file))
 	}()
 
-	contents, err = io.ReadAll(file)
+	contents, err = readBounded(file)
 	if err != nil {
-		return nil, fmt.Errorf("read rooted README.md: %w", err)
+		return nil, err
 	}
 	afterReadInfo, err := file.Stat()
 	if err != nil {
@@ -255,6 +279,9 @@ func writeRegularFile(workspace string, contents []byte) error {
 }
 
 func writeRegularFileWithHook(workspace string, contents []byte, afterInitialInspection func()) (returnErr error) {
+	if int64(len(contents)) > securitylimits.ManagedFileBytes {
+		return fmt.Errorf("%w: write payload is %d bytes, maximum is %d", ErrResourceLimit, len(contents), securitylimits.ManagedFileBytes)
+	}
 	root, file, openedInfo, err := acquireRegularFile(workspace, os.O_WRONLY, afterInitialInspection)
 	if err != nil {
 		return err
@@ -332,6 +359,17 @@ func validateCurrentEntry(root *os.Root, openedInfo os.FileInfo) error {
 	return nil
 }
 
+func readBounded(file *os.File) ([]byte, error) {
+	contents, err := io.ReadAll(io.LimitReader(file, securitylimits.ManagedFileBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read rooted README.md: %w", err)
+	}
+	if int64(len(contents)) > securitylimits.ManagedFileBytes {
+		return nil, fmt.Errorf("%w: README.md exceeds %d bytes", ErrResourceLimit, securitylimits.ManagedFileBytes)
+	}
+	return contents, nil
+}
+
 func closeAcquiredFile(root *os.Root, file *os.File) error {
 	var closeErr error
 	if file != nil {
@@ -356,5 +394,10 @@ func invalidResourceIdentity(requested string) string {
 
 func digestString(value string) string {
 	digest := sha256.Sum256([]byte(value))
+	return fmt.Sprintf("sha256:%x", digest)
+}
+
+func digestBytes(value []byte) string {
+	digest := sha256.Sum256(value)
 	return fmt.Sprintf("sha256:%x", digest)
 }
