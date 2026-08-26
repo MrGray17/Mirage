@@ -11,13 +11,13 @@ import (
 )
 
 func TestLogIsAppendOnlyAndOwnsEventIdentity(t *testing.T) {
-	log, err := effects.NewLog("run-1", "agent-1")
+	at := time.Date(2026, 8, 26, 12, 0, 0, 0, time.FixedZone("test", 60*60))
+	log, err := effects.NewLog("run-1", "agent-1", fixedClock(at))
 	if err != nil {
 		t.Fatalf("new log: %v", err)
 	}
-	at := time.Date(2026, 8, 26, 12, 0, 0, 0, time.FixedZone("test", 60*60))
 	metadata := map[string]string{"rule_id": "filesystem.explicit_allow"}
-	event, err := log.Append(filesystemAttempt(at, effects.DecisionAllow, effects.OutcomeSuccess, metadata))
+	event, err := log.Append(filesystemAttempt(effects.DecisionAllow, effects.OutcomeSuccess, metadata))
 	if err != nil {
 		t.Fatalf("append event: %v", err)
 	}
@@ -44,12 +44,12 @@ func TestLogIsAppendOnlyAndOwnsEventIdentity(t *testing.T) {
 }
 
 func TestCanonicalJSONIsIndependentOfMetadataInsertionOrder(t *testing.T) {
-	log, err := effects.NewLog("run-1", "agent-1")
+	at := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	log, err := effects.NewLog("run-1", "agent-1", fixedClock(at))
 	if err != nil {
 		t.Fatalf("new log: %v", err)
 	}
-	at := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
-	event, err := log.Append(filesystemAttempt(at, effects.DecisionAllow, effects.OutcomeSuccess, map[string]string{
+	event, err := log.Append(filesystemAttempt(effects.DecisionAllow, effects.OutcomeSuccess, map[string]string{
 		"z": "last",
 		"a": "first",
 	}))
@@ -71,11 +71,12 @@ func TestCanonicalJSONIsIndependentOfMetadataInsertionOrder(t *testing.T) {
 }
 
 func TestLogRejectsStructurallyInvalidEvent(t *testing.T) {
-	log, err := effects.NewLog("run-1", "agent-1")
+	at := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	log, err := effects.NewLog("run-1", "agent-1", fixedClock(at))
 	if err != nil {
 		t.Fatalf("new log: %v", err)
 	}
-	attempt := filesystemAttempt(time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC), effects.DecisionDeny, effects.OutcomeSuccess, nil)
+	attempt := filesystemAttempt(effects.DecisionDeny, effects.OutcomeSuccess, nil)
 	if _, err := log.Append(attempt); !errors.Is(err, effects.ErrInvalidEvent) {
 		t.Fatalf("error = %v, want ErrInvalidEvent", err)
 	}
@@ -85,18 +86,18 @@ func TestLogRejectsStructurallyInvalidEvent(t *testing.T) {
 }
 
 func TestConcurrentAppendsRemainContiguous(t *testing.T) {
-	log, err := effects.NewLog("run-1", "agent-1")
+	at := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	log, err := effects.NewLog("run-1", "agent-1", fixedClock(at))
 	if err != nil {
 		t.Fatalf("new log: %v", err)
 	}
 	const count = 32
-	at := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 	var wait sync.WaitGroup
 	wait.Add(count)
 	for index := 0; index < count; index++ {
 		go func() {
 			defer wait.Done()
-			if _, appendErr := log.Append(filesystemAttempt(at, effects.DecisionAllow, effects.OutcomeSuccess, nil)); appendErr != nil {
+			if _, appendErr := log.Append(filesystemAttempt(effects.DecisionAllow, effects.OutcomeSuccess, nil)); appendErr != nil {
 				t.Errorf("append event: %v", appendErr)
 			}
 		}()
@@ -109,7 +110,7 @@ func TestConcurrentAppendsRemainContiguous(t *testing.T) {
 	}
 }
 
-func filesystemAttempt(at time.Time, decision effects.Decision, outcome effects.Outcome, metadata map[string]string) effects.Attempt {
+func filesystemAttempt(decision effects.Decision, outcome effects.Outcome, metadata map[string]string) effects.Attempt {
 	return effects.Attempt{
 		Adapter:        effects.AdapterFilesystem,
 		Operation:      "READ",
@@ -119,7 +120,10 @@ func filesystemAttempt(at time.Time, decision effects.Decision, outcome effects.
 		Phase:          effects.PhaseExecution,
 		Decision:       decision,
 		Outcome:        outcome,
-		Timestamp:      at,
 		Metadata:       metadata,
 	}
+}
+
+func fixedClock(at time.Time) func() (time.Time, error) {
+	return func() (time.Time, error) { return at, nil }
 }

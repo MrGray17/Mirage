@@ -221,6 +221,72 @@ func TestUnavailableTrustedTimeCannotStartRun(t *testing.T) {
 	}
 }
 
+func TestClockRollbackDuringExecutionCannotRevalidateExpiredContract(t *testing.T) {
+	current := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	expires := current.Add(10 * time.Minute)
+	workspace := newWorkspace(t, []byte("real"))
+	run := beginRun(t, workspace, allowREADMEContract(t, expires), func() time.Time { return current })
+
+	current = expires.Add(time.Minute)
+	if err := run.WriteFile("README.md", []byte("expired write")); !errors.Is(err, filesystemgateway.ErrDenied) {
+		t.Fatalf("expired write error = %v, want ErrDenied", err)
+	}
+	current = expires.Add(-time.Minute)
+	if err := run.WriteFile("README.md", []byte("rollback write")); !errors.Is(err, runs.ErrClockRollback) {
+		t.Fatalf("rollback write error = %v, want ErrClockRollback", err)
+	}
+	if run.State() != runs.StateRejected {
+		t.Fatalf("state = %s, want REJECTED", run.State())
+	}
+	assertContents(t, filepath.Join(workspace, "README.md"), []byte("real"))
+	if events := run.Events(); len(events) != 1 || events[0].Metadata["rule_id"] != "contract.expired" {
+		t.Fatalf("events = %+v, want only the expired denied attempt", events)
+	}
+}
+
+func TestClockRollbackAtVerificationRejectsRun(t *testing.T) {
+	current := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	workspace := newWorkspace(t, []byte("real"))
+	run := beginRun(t, workspace, allowREADMEContract(t, current.Add(time.Hour)), func() time.Time { return current })
+	if err := run.WriteFile("README.md", []byte("shadow")); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	current = current.Add(-time.Minute)
+
+	decision, err := run.Verify()
+	if !errors.Is(err, runs.ErrClockRollback) {
+		t.Fatalf("verify error = %v, want ErrClockRollback", err)
+	}
+	if decision.Status != verifier.StatusRejected || len(decision.Violations) != 1 || decision.Violations[0].RuleID != "time.rollback" {
+		t.Fatalf("decision = %+v", decision)
+	}
+	if run.State() != runs.StateRejected {
+		t.Fatalf("state = %s, want REJECTED", run.State())
+	}
+	assertContents(t, filepath.Join(workspace, "README.md"), []byte("real"))
+}
+
+func TestClockRollbackImmediatelyBeforeCommitRejectsRun(t *testing.T) {
+	current := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	workspace := newWorkspace(t, []byte("real"))
+	run := beginRun(t, workspace, allowREADMEContract(t, current.Add(time.Hour)), func() time.Time { return current })
+	if err := run.WriteFile("README.md", []byte("shadow")); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	if decision, err := run.Verify(); err != nil || decision.Status != verifier.StatusApproved {
+		t.Fatalf("verify = %+v, %v", decision, err)
+	}
+	current = current.Add(-time.Minute)
+
+	if err := run.ApplyCommit(); !errors.Is(err, runs.ErrClockRollback) {
+		t.Fatalf("commit error = %v, want ErrClockRollback", err)
+	}
+	if run.State() != runs.StateRejected {
+		t.Fatalf("state = %s, want REJECTED", run.State())
+	}
+	assertContents(t, filepath.Join(workspace, "README.md"), []byte("real"))
+}
+
 func allowREADMEContract(t *testing.T, expires time.Time) *contracts.Contract {
 	t.Helper()
 	contract, err := contracts.New(contracts.Spec{

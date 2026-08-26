@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -23,6 +24,7 @@ var (
 	ErrDenied          = errors.New("filesystem effect denied")
 	ErrInvalidGateway  = errors.New("invalid filesystem gateway")
 	ErrEffectRecording = errors.New("effect recording failed")
+	ErrUnsafeResource  = errors.New("unsafe filesystem resource")
 )
 
 type DeniedError struct {
@@ -45,13 +47,12 @@ type Gateway struct {
 	contract *contracts.Contract
 	log      *effects.Log
 	shadow   string
-	now      func() time.Time
 	auditErr error
 }
 
-func New(contract *contracts.Contract, log *effects.Log, shadowWorkspace string, now func() time.Time) (*Gateway, error) {
-	if contract == nil || log == nil || now == nil || strings.TrimSpace(shadowWorkspace) == "" {
-		return nil, fmt.Errorf("%w: contract, event log, shadow workspace, and clock are required", ErrInvalidGateway)
+func New(contract *contracts.Contract, log *effects.Log, shadowWorkspace string) (*Gateway, error) {
+	if contract == nil || log == nil || strings.TrimSpace(shadowWorkspace) == "" {
+		return nil, fmt.Errorf("%w: contract, event log, and shadow workspace are required", ErrInvalidGateway)
 	}
 	absolute, err := filepath.Abs(shadowWorkspace)
 	if err != nil {
@@ -65,7 +66,6 @@ func New(contract *contracts.Contract, log *effects.Log, shadowWorkspace string,
 		contract: contract,
 		log:      log,
 		shadow:   filepath.Clean(absolute),
-		now:      now,
 	}, nil
 }
 
@@ -73,20 +73,23 @@ func (g *Gateway) ReadFile(requestedResource string) ([]byte, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	at := g.now().UTC()
+	at, err := g.log.TrustedTime()
+	if err != nil {
+		return nil, g.recordTimeFailure(err)
+	}
 	resource, policyDecision := g.authorize(contracts.FilesystemRead, requestedResource, at)
 	if !policyDecision.Allowed {
-		return nil, g.recordDenied(contracts.FilesystemRead, resource, policyDecision, requestedResource, at)
+		return nil, g.recordDenied(contracts.FilesystemRead, resource, policyDecision, requestedResource)
 	}
 
-	contents, err := readRegularFile(filepath.Join(g.shadow, "README.md"))
+	contents, err := readRegularFile(g.shadow)
 	outcome := effects.OutcomeSuccess
 	metadata := policyMetadata(policyDecision)
 	if err != nil {
 		outcome = effects.OutcomeFailed
 		metadata["error_class"] = "shadow_read_failed"
 	}
-	if recordErr := g.record(contracts.FilesystemRead, resource, effects.DecisionAllow, outcome, metadata, at); recordErr != nil {
+	if recordErr := g.record(contracts.FilesystemRead, resource, effects.DecisionAllow, outcome, metadata); recordErr != nil {
 		return nil, errors.Join(fmt.Errorf("%w: %w", ErrEffectRecording, recordErr), err)
 	}
 	if err != nil {
@@ -99,20 +102,23 @@ func (g *Gateway) WriteFile(requestedResource string, contents []byte) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	at := g.now().UTC()
+	at, err := g.log.TrustedTime()
+	if err != nil {
+		return g.recordTimeFailure(err)
+	}
 	resource, policyDecision := g.authorize(contracts.FilesystemWrite, requestedResource, at)
 	if !policyDecision.Allowed {
-		return g.recordDenied(contracts.FilesystemWrite, resource, policyDecision, requestedResource, at)
+		return g.recordDenied(contracts.FilesystemWrite, resource, policyDecision, requestedResource)
 	}
 
-	err := writeRegularFile(filepath.Join(g.shadow, "README.md"), contents)
+	err = writeRegularFile(g.shadow, contents)
 	outcome := effects.OutcomeSuccessShadow
 	metadata := policyMetadata(policyDecision)
 	if err != nil {
 		outcome = effects.OutcomeFailed
 		metadata["error_class"] = "shadow_write_failed"
 	}
-	if recordErr := g.record(contracts.FilesystemWrite, resource, effects.DecisionAllow, outcome, metadata, at); recordErr != nil {
+	if recordErr := g.record(contracts.FilesystemWrite, resource, effects.DecisionAllow, outcome, metadata); recordErr != nil {
 		return errors.Join(fmt.Errorf("%w: %w", ErrEffectRecording, recordErr), err)
 	}
 	if err != nil {
@@ -149,10 +155,10 @@ func (g *Gateway) authorize(operation contracts.FilesystemOperation, requested s
 	return resource, decision
 }
 
-func (g *Gateway) recordDenied(operation contracts.FilesystemOperation, resource string, decision contracts.Decision, requested string, at time.Time) error {
+func (g *Gateway) recordDenied(operation contracts.FilesystemOperation, resource string, decision contracts.Decision, requested string) error {
 	metadata := policyMetadata(decision)
 	metadata["requested_resource_sha256"] = digestString(requested)
-	recordErr := g.record(operation, resource, effects.DecisionDeny, effects.OutcomeBlocked, metadata, at)
+	recordErr := g.record(operation, resource, effects.DecisionDeny, effects.OutcomeBlocked, metadata)
 	denied := &DeniedError{
 		Operation: string(operation),
 		Resource:  resource,
@@ -165,7 +171,7 @@ func (g *Gateway) recordDenied(operation contracts.FilesystemOperation, resource
 	return denied
 }
 
-func (g *Gateway) record(operation contracts.FilesystemOperation, resource string, decision effects.Decision, outcome effects.Outcome, metadata map[string]string, at time.Time) error {
+func (g *Gateway) record(operation contracts.FilesystemOperation, resource string, decision effects.Decision, outcome effects.Outcome, metadata map[string]string) error {
 	_, err := g.log.Append(effects.Attempt{
 		Adapter:        effects.AdapterFilesystem,
 		Operation:      string(operation),
@@ -175,13 +181,17 @@ func (g *Gateway) record(operation contracts.FilesystemOperation, resource strin
 		Phase:          effects.PhaseExecution,
 		Decision:       decision,
 		Outcome:        outcome,
-		Timestamp:      at,
 		Metadata:       metadata,
 	})
 	if err != nil {
 		g.auditErr = errors.Join(g.auditErr, err)
 	}
 	return err
+}
+
+func (g *Gateway) recordTimeFailure(err error) error {
+	g.auditErr = errors.Join(g.auditErr, err)
+	return fmt.Errorf("%w: %w", ErrEffectRecording, err)
 }
 
 func canonicalResource(requested string) (string, error) {
@@ -208,26 +218,129 @@ func canonicalResource(requested string) (string, error) {
 	return "/workspace/" + cleaned, nil
 }
 
-func readRegularFile(filePath string) ([]byte, error) {
-	info, err := os.Lstat(filePath)
+func readRegularFile(workspace string) ([]byte, error) {
+	return readRegularFileWithHook(workspace, nil)
+}
+
+func readRegularFileWithHook(workspace string, afterInitialInspection func()) (contents []byte, returnErr error) {
+	root, file, openedInfo, err := acquireRegularFile(workspace, os.O_RDONLY, afterInitialInspection)
 	if err != nil {
 		return nil, err
 	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("resource type %s is not regular", info.Mode().Type())
+	defer func() {
+		returnErr = errors.Join(returnErr, closeAcquiredFile(root, file))
+	}()
+
+	contents, err = io.ReadAll(file)
+	if err != nil {
+		return nil, fmt.Errorf("read rooted README.md: %w", err)
 	}
-	return os.ReadFile(filePath)
+	afterReadInfo, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("inspect README.md after read: %w", err)
+	}
+	if err := validateCurrentEntry(root, openedInfo); err != nil {
+		return nil, err
+	}
+	if openedInfo.Size() != afterReadInfo.Size() ||
+		openedInfo.Mode() != afterReadInfo.Mode() ||
+		!openedInfo.ModTime().Equal(afterReadInfo.ModTime()) {
+		return nil, fmt.Errorf("%w: README.md changed during read", ErrUnsafeResource)
+	}
+	return contents, nil
 }
 
-func writeRegularFile(filePath string, contents []byte) error {
-	info, err := os.Lstat(filePath)
+func writeRegularFile(workspace string, contents []byte) error {
+	return writeRegularFileWithHook(workspace, contents, nil)
+}
+
+func writeRegularFileWithHook(workspace string, contents []byte, afterInitialInspection func()) (returnErr error) {
+	root, file, openedInfo, err := acquireRegularFile(workspace, os.O_WRONLY, afterInitialInspection)
 	if err != nil {
 		return err
 	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("resource type %s is not regular", info.Mode().Type())
+	defer func() {
+		returnErr = errors.Join(returnErr, closeAcquiredFile(root, file))
+	}()
+
+	if err := file.Truncate(0); err != nil {
+		return fmt.Errorf("truncate rooted README.md: %w", err)
 	}
-	return os.WriteFile(filePath, contents, info.Mode().Perm())
+	if _, err := file.Seek(0, 0); err != nil {
+		return fmt.Errorf("seek rooted README.md: %w", err)
+	}
+	if _, err := file.Write(contents); err != nil {
+		return fmt.Errorf("write rooted README.md: %w", err)
+	}
+	if err := validateCurrentEntry(root, openedInfo); err != nil {
+		return err
+	}
+	return nil
+}
+
+func acquireRegularFile(workspace string, flag int, afterInitialInspection func()) (*os.Root, *os.File, os.FileInfo, error) {
+	root, err := os.OpenRoot(workspace)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("open shadow workspace root: %w", err)
+	}
+	fail := func(cause error, file *os.File) (*os.Root, *os.File, os.FileInfo, error) {
+		return nil, nil, nil, errors.Join(cause, closeAcquiredFile(root, file))
+	}
+
+	initialInfo, err := root.Lstat("README.md")
+	if err != nil {
+		return fail(fmt.Errorf("inspect rooted README.md: %w", err), nil)
+	}
+	if !initialInfo.Mode().IsRegular() {
+		return fail(fmt.Errorf("%w: README.md has type %s", ErrUnsafeResource, initialInfo.Mode().Type()), nil)
+	}
+	if afterInitialInspection != nil {
+		afterInitialInspection()
+	}
+
+	file, err := root.OpenFile("README.md", flag, 0)
+	if err != nil {
+		if currentInfo, currentErr := root.Lstat("README.md"); currentErr == nil && !currentInfo.Mode().IsRegular() {
+			return fail(fmt.Errorf("%w: README.md has type %s", ErrUnsafeResource, currentInfo.Mode().Type()), nil)
+		}
+		return fail(fmt.Errorf("open rooted README.md: %w", err), nil)
+	}
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return fail(fmt.Errorf("inspect opened README.md: %w", err), file)
+	}
+	if !openedInfo.Mode().IsRegular() {
+		return fail(fmt.Errorf("%w: opened README.md has type %s", ErrUnsafeResource, openedInfo.Mode().Type()), file)
+	}
+	if err := validateCurrentEntry(root, openedInfo); err != nil {
+		return fail(err, file)
+	}
+	return root, file, openedInfo, nil
+}
+
+func validateCurrentEntry(root *os.Root, openedInfo os.FileInfo) error {
+	currentInfo, err := root.Lstat("README.md")
+	if err != nil {
+		return fmt.Errorf("reinspect rooted README.md: %w", err)
+	}
+	if !currentInfo.Mode().IsRegular() {
+		return fmt.Errorf("%w: README.md has type %s", ErrUnsafeResource, currentInfo.Mode().Type())
+	}
+	if !os.SameFile(openedInfo, currentInfo) {
+		return fmt.Errorf("%w: README.md changed during object acquisition", ErrUnsafeResource)
+	}
+	return nil
+}
+
+func closeAcquiredFile(root *os.Root, file *os.File) error {
+	var closeErr error
+	if file != nil {
+		closeErr = errors.Join(closeErr, file.Close())
+	}
+	if root != nil {
+		closeErr = errors.Join(closeErr, root.Close())
+	}
+	return closeErr
 }
 
 func policyMetadata(decision contracts.Decision) map[string]string {

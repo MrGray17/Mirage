@@ -67,7 +67,7 @@ type Run struct {
 	events      *effects.Log
 	filesystem  *filesystemgateway.Gateway
 	transaction *shadowfs.Transaction
-	now         func() time.Time
+	clock       *trustedClock
 	state       State
 	decision    *verifier.Decision
 }
@@ -79,9 +79,13 @@ func Begin(realWorkspace string, contract *contracts.Contract, now func() time.T
 	if contract == nil || now == nil {
 		return nil, fmt.Errorf("%w: contract and clock are required", ErrInvalidRun)
 	}
-	startedAt := now()
-	if startedAt.IsZero() {
-		return nil, fmt.Errorf("%w: trusted clock returned zero time", ErrInvalidRun)
+	clock, err := newTrustedClock(now)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidRun, err)
+	}
+	startedAt, err := clock.Observe()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidRun, err)
 	}
 	if contract.ExpiredAt(startedAt) {
 		return nil, fmt.Errorf("%w: %s", ErrContractExpired, contract.ExpiresAt().Format(time.RFC3339Nano))
@@ -95,11 +99,11 @@ func Begin(realWorkspace string, contract *contracts.Contract, now func() time.T
 		return nil, errors.Join(cause, transaction.Reject())
 	}
 
-	eventLog, err := effects.NewLog(contract.RunID(), contract.ActorID())
+	eventLog, err := effects.NewLog(contract.RunID(), contract.ActorID(), clock.Observe)
 	if err != nil {
 		return cleanupOnFailure(fmt.Errorf("create effect log: %w", err))
 	}
-	filesystem, err := filesystemgateway.New(contract, eventLog, transaction.ShadowWorkspace(), now)
+	filesystem, err := filesystemgateway.New(contract, eventLog, transaction.ShadowWorkspace())
 	if err != nil {
 		return cleanupOnFailure(fmt.Errorf("create filesystem gateway: %w", err))
 	}
@@ -109,7 +113,7 @@ func Begin(realWorkspace string, contract *contracts.Contract, now func() time.T
 		events:      eventLog,
 		filesystem:  filesystem,
 		transaction: transaction,
-		now:         now,
+		clock:       clock,
 		state:       StateRunning,
 	}, nil
 }
@@ -130,7 +134,11 @@ func (r *Run) ReadFile(resource string) ([]byte, error) {
 	if r.state != StateRunning {
 		return nil, fmt.Errorf("%w: cannot read in state %s", ErrInvalidTransition, r.state)
 	}
-	return r.filesystem.ReadFile(resource)
+	contents, err := r.filesystem.ReadFile(resource)
+	if isTrustedTimeError(err) {
+		return nil, r.rejectRunning(err)
+	}
+	return contents, err
 }
 
 func (r *Run) WriteFile(resource string, contents []byte) error {
@@ -139,7 +147,11 @@ func (r *Run) WriteFile(resource string, contents []byte) error {
 	if r.state != StateRunning {
 		return fmt.Errorf("%w: cannot write in state %s", ErrInvalidTransition, r.state)
 	}
-	return r.filesystem.WriteFile(resource, contents)
+	err := r.filesystem.WriteFile(resource, contents)
+	if isTrustedTimeError(err) {
+		return r.rejectRunning(err)
+	}
+	return err
 }
 
 // Verify freezes further mediated effects. A rejected decision destroys the
@@ -155,7 +167,17 @@ func (r *Run) Verify() (verifier.Decision, error) {
 		return verifier.Decision{}, err
 	}
 
-	decision := verifier.Verify(r.contract, r.events.Events(), r.now())
+	verificationAt, timeErr := r.clock.Observe()
+	decision := verifier.Decision{
+		RunID:        r.contract.RunID(),
+		Status:       verifier.StatusRejected,
+		ContractHash: r.contract.Hash(),
+	}
+	if timeErr == nil {
+		decision = verifier.Verify(r.contract, r.events.Events(), verificationAt)
+	} else {
+		decision.Violations = append(decision.Violations, trustedTimeViolation(timeErr))
+	}
 	if auditErr := r.filesystem.AuditError(); auditErr != nil {
 		decision.Status = verifier.StatusRejected
 		decision.Violations = append(decision.Violations, verifier.Violation{
@@ -171,12 +193,12 @@ func (r *Run) Verify() (verifier.Decision, error) {
 			return cloneDecision(decision), err
 		}
 		if err := r.transaction.Reject(); err != nil {
-			return cloneDecision(decision), fmt.Errorf("discard rejected run shadow: %w", err)
+			return cloneDecision(decision), errors.Join(timeErr, fmt.Errorf("discard rejected run shadow: %w", err))
 		}
 		if err := r.transition(StateRejected); err != nil {
 			return cloneDecision(decision), err
 		}
-		return cloneDecision(decision), nil
+		return cloneDecision(decision), timeErr
 	}
 
 	if err := r.transition(StateApproved); err != nil {
@@ -193,9 +215,9 @@ func (r *Run) ApplyCommit() error {
 	if r.state != StateApproved || r.decision == nil || r.decision.Status != verifier.StatusApproved {
 		return fmt.Errorf("%w: cannot commit in state %s", ErrInvalidTransition, r.state)
 	}
-	commitAt := r.now()
-	if commitAt.IsZero() {
-		return r.rejectBeforeCommit(fmt.Errorf("%w: trusted clock returned zero time", ErrInvalidRun), StateFailed)
+	commitAt, err := r.clock.Observe()
+	if err != nil {
+		return r.rejectBeforeCommit(err, StateRejected)
 	}
 	if r.contract.ExpiredAt(commitAt) {
 		return r.rejectBeforeCommit(
@@ -207,7 +229,7 @@ func (r *Run) ApplyCommit() error {
 		return err
 	}
 
-	err := r.transaction.ApplyCommit()
+	err = r.transaction.ApplyCommit()
 	switch r.transaction.State() {
 	case shadowfs.StateCommitted:
 		if transitionErr := r.transition(StateCommitted); transitionErr != nil {
@@ -261,6 +283,19 @@ func (r *Run) rejectBeforeCommit(cause error, terminal State) error {
 	return cause
 }
 
+func (r *Run) rejectRunning(cause error) error {
+	if err := r.transition(StateFailed); err != nil {
+		return errors.Join(cause, err)
+	}
+	if err := r.transaction.Reject(); err != nil {
+		return errors.Join(cause, fmt.Errorf("discard run after trusted-time failure: %w", err))
+	}
+	if err := r.transition(StateRejected); err != nil {
+		return errors.Join(cause, err)
+	}
+	return cause
+}
+
 func (r *Run) transition(next State) error {
 	allowed := false
 	switch r.state {
@@ -269,7 +304,7 @@ func (r *Run) transition(next State) error {
 	case StateVerifying:
 		allowed = next == StateApproved || next == StateFailed
 	case StateApproved:
-		allowed = next == StateCommitting || next == StateExpired || next == StateFailed
+		allowed = next == StateCommitting || next == StateRejected || next == StateExpired || next == StateFailed
 	case StateCommitting:
 		allowed = next == StateApproved || next == StateCommitted || next == StateConflicted || next == StateFailed
 	case StateFailed:
@@ -280,6 +315,22 @@ func (r *Run) transition(next State) error {
 	}
 	r.state = next
 	return nil
+}
+
+func isTrustedTimeError(err error) bool {
+	return errors.Is(err, ErrTrustedTime) || errors.Is(err, ErrClockRollback) || errors.Is(err, effects.ErrEventTime)
+}
+
+func trustedTimeViolation(err error) verifier.Violation {
+	ruleID := "time.unavailable"
+	if errors.Is(err, ErrClockRollback) {
+		ruleID = "time.rollback"
+	}
+	return verifier.Violation{
+		RuleID:   ruleID,
+		Reason:   "trusted run time could not advance monotonically",
+		Evidence: err.Error(),
+	}
 }
 
 func decisionPointer(decision verifier.Decision) *verifier.Decision {

@@ -10,7 +10,10 @@ import (
 	"time"
 )
 
-var ErrInvalidEvent = errors.New("invalid effect event")
+var (
+	ErrInvalidEvent = errors.New("invalid effect event")
+	ErrEventTime    = errors.New("trusted event time unavailable")
+)
 
 type Decision string
 
@@ -72,7 +75,6 @@ type Attempt struct {
 	Phase          string
 	Decision       Decision
 	Outcome        Outcome
-	Timestamp      time.Time
 	Metadata       map[string]string
 }
 
@@ -82,16 +84,17 @@ type Log struct {
 	mu      sync.Mutex
 	runID   string
 	actorID string
+	now     func() (time.Time, error)
 	events  []Event
 }
 
-func NewLog(runID, actorID string) (*Log, error) {
+func NewLog(runID, actorID string, now func() (time.Time, error)) (*Log, error) {
 	runID = strings.TrimSpace(runID)
 	actorID = strings.TrimSpace(actorID)
-	if runID == "" || actorID == "" {
-		return nil, fmt.Errorf("%w: run ID and actor ID are required", ErrInvalidEvent)
+	if runID == "" || actorID == "" || now == nil {
+		return nil, fmt.Errorf("%w: run ID, actor ID, and trusted clock are required", ErrInvalidEvent)
 	}
-	return &Log{runID: runID, actorID: actorID}, nil
+	return &Log{runID: runID, actorID: actorID, now: now}, nil
 }
 
 // Append validates, sequences, and stores one immutable event.
@@ -102,6 +105,10 @@ func (l *Log) Append(attempt Attempt) (Event, error) {
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	at, err := l.trustedTime()
+	if err != nil {
+		return Event{}, err
+	}
 	sequence := uint64(len(l.events) + 1)
 	event := Event{
 		ID:             fmt.Sprintf("%s:%020d", l.runID, sequence),
@@ -118,11 +125,19 @@ func (l *Log) Append(attempt Attempt) (Event, error) {
 		Phase:          attempt.Phase,
 		Decision:       attempt.Decision,
 		Outcome:        attempt.Outcome,
-		Timestamp:      attempt.Timestamp.UTC(),
+		Timestamp:      at,
 		Metadata:       cloneMetadata(attempt.Metadata),
 	}
 	l.events = append(l.events, event)
 	return cloneEvent(event), nil
+}
+
+// TrustedTime exposes the same trusted run clock used to assign event
+// timestamps so policy checks and event creation share one time authority.
+func (l *Log) TrustedTime() (time.Time, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.trustedTime()
 }
 
 // Events returns a snapshot. Mutating the result cannot rewrite log history.
@@ -154,9 +169,6 @@ func validateAttempt(attempt Attempt) error {
 		strings.TrimSpace(attempt.Phase) == "" {
 		return fmt.Errorf("%w: required field is empty", ErrInvalidEvent)
 	}
-	if attempt.Timestamp.IsZero() {
-		return fmt.Errorf("%w: timestamp is missing", ErrInvalidEvent)
-	}
 	if attempt.Decision != DecisionAllow && attempt.Decision != DecisionDeny {
 		return fmt.Errorf("%w: decision %q", ErrInvalidEvent, attempt.Decision)
 	}
@@ -187,8 +199,18 @@ func validateEvent(event Event) error {
 		Phase:          event.Phase,
 		Decision:       event.Decision,
 		Outcome:        event.Outcome,
-		Timestamp:      event.Timestamp,
 	})
+}
+
+func (l *Log) trustedTime() (time.Time, error) {
+	at, err := l.now()
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%w: %w", ErrEventTime, err)
+	}
+	if at.IsZero() {
+		return time.Time{}, fmt.Errorf("%w: trusted clock returned zero time", ErrEventTime)
+	}
+	return at.UTC(), nil
 }
 
 func cloneEvent(event Event) Event {

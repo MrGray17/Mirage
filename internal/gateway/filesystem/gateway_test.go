@@ -15,7 +15,7 @@ import (
 func TestAllowedFilesystemFailureIsRecorded(t *testing.T) {
 	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 	contract := gatewayContract(t, now.Add(time.Hour), []string{filesystemgateway.ManagedResource})
-	log, err := effects.NewLog(contract.RunID(), contract.ActorID())
+	log, err := effects.NewLog(contract.RunID(), contract.ActorID(), gatewayClock(now))
 	if err != nil {
 		t.Fatalf("new log: %v", err)
 	}
@@ -23,7 +23,7 @@ func TestAllowedFilesystemFailureIsRecorded(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(shadow, "README.md"), []byte("hello"), 0o600); err != nil {
 		t.Fatalf("write README: %v", err)
 	}
-	gateway, err := filesystemgateway.New(contract, log, shadow, func() time.Time { return now })
+	gateway, err := filesystemgateway.New(contract, log, shadow)
 	if err != nil {
 		t.Fatalf("new gateway: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestContractCannotAuthorizeUnsupportedM3Resource(t *testing.T) {
 	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 	resource := "/workspace/docs/install.md"
 	contract := gatewayContract(t, now.Add(time.Hour), []string{resource})
-	log, err := effects.NewLog(contract.RunID(), contract.ActorID())
+	log, err := effects.NewLog(contract.RunID(), contract.ActorID(), gatewayClock(now))
 	if err != nil {
 		t.Fatalf("new log: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestContractCannotAuthorizeUnsupportedM3Resource(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(shadow, "README.md"), []byte("hello"), 0o600); err != nil {
 		t.Fatalf("write README: %v", err)
 	}
-	gateway, err := filesystemgateway.New(contract, log, shadow, func() time.Time { return now })
+	gateway, err := filesystemgateway.New(contract, log, shadow)
 	if err != nil {
 		t.Fatalf("new gateway: %v", err)
 	}
@@ -81,4 +81,8 @@ func gatewayContract(t *testing.T, expires time.Time, readAllow []string) *contr
 		t.Fatalf("new contract: %v", err)
 	}
 	return contract
+}
+
+func gatewayClock(at time.Time) func() (time.Time, error) {
+	return func() (time.Time, error) { return at, nil }
 }

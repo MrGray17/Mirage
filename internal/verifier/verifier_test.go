@@ -12,7 +12,7 @@ import (
 func TestVerifierReevaluatesGatewayDecisionAgainstContract(t *testing.T) {
 	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 	contract := testContract(t, now.Add(time.Hour))
-	log, err := effects.NewLog(contract.RunID(), contract.ActorID())
+	log, err := effects.NewLog(contract.RunID(), contract.ActorID(), verifierClock(now))
 	if err != nil {
 		t.Fatalf("new log: %v", err)
 	}
@@ -25,7 +25,6 @@ func TestVerifierReevaluatesGatewayDecisionAgainstContract(t *testing.T) {
 		Phase:          effects.PhaseExecution,
 		Decision:       effects.DecisionAllow,
 		Outcome:        effects.OutcomeSuccess,
-		Timestamp:      now,
 	})
 	if err != nil {
 		t.Fatalf("append forged allowed event: %v", err)
@@ -43,7 +42,7 @@ func TestVerifierReevaluatesGatewayDecisionAgainstContract(t *testing.T) {
 func TestDeniedAttemptRejectsEvenWhenContractWouldAllowResource(t *testing.T) {
 	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 	contract := testContract(t, now.Add(time.Hour))
-	log, err := effects.NewLog(contract.RunID(), contract.ActorID())
+	log, err := effects.NewLog(contract.RunID(), contract.ActorID(), verifierClock(now))
 	if err != nil {
 		t.Fatalf("new log: %v", err)
 	}
@@ -56,7 +55,6 @@ func TestDeniedAttemptRejectsEvenWhenContractWouldAllowResource(t *testing.T) {
 		Phase:          effects.PhaseExecution,
 		Decision:       effects.DecisionDeny,
 		Outcome:        effects.OutcomeBlocked,
-		Timestamp:      now,
 		Metadata: map[string]string{
 			"rule_id": "gateway.runtime_integrity",
 			"reason":  "gateway refused unsafe acquisition",
@@ -78,7 +76,7 @@ func TestDeniedAttemptRejectsEvenWhenContractWouldAllowResource(t *testing.T) {
 func TestFailedAllowedEffectRejectsUncertainShadowResult(t *testing.T) {
 	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 	contract := testContract(t, now.Add(time.Hour))
-	log, err := effects.NewLog(contract.RunID(), contract.ActorID())
+	log, err := effects.NewLog(contract.RunID(), contract.ActorID(), verifierClock(now))
 	if err != nil {
 		t.Fatalf("new log: %v", err)
 	}
@@ -91,7 +89,6 @@ func TestFailedAllowedEffectRejectsUncertainShadowResult(t *testing.T) {
 		Phase:          effects.PhaseExecution,
 		Decision:       effects.DecisionAllow,
 		Outcome:        effects.OutcomeFailed,
-		Timestamp:      now,
 	})
 	if err != nil {
 		t.Fatalf("append failed event: %v", err)
@@ -130,4 +127,8 @@ func testContract(t *testing.T, expires time.Time) *contracts.Contract {
 		t.Fatalf("new contract: %v", err)
 	}
 	return contract
+}
+
+func verifierClock(at time.Time) func() (time.Time, error) {
+	return func() (time.Time, error) { return at, nil }
 }

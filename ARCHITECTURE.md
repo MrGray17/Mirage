@@ -483,6 +483,14 @@ event is independently re-evaluated against the immutable contract; the
 verifier does not trust an event's `ALLOW` label as authorization evidence by
 itself.
 
+The pre-M4 TIME-001 hardening gives each run one trusted wall-clock authority.
+It records the greatest UTC wall time observed at run start, effect
+authorization, event append, verification, and commit. Equal readings are
+valid; an earlier reading is a structured clock-rollback failure. The greatest
+time never moves backward, the run fails closed, and wall-clock rollback cannot
+make an expired contract valid again. This is an intra-run monotonicity guard,
+not a claim that the host clock is globally accurate.
+
 ---
 
 # 8. Effect Model
@@ -517,6 +525,10 @@ EffectEvent {
 M3 stores these events in an in-memory append-only log owned by the trusted run
 coordinator. The log assigns run/actor identity, contiguous sequence numbers,
 stable event IDs, and UTC timestamps, and returns defensive copies to callers.
+Adapters describe the attempted operation, decision, outcome, and metadata;
+they cannot supply the security-relevant event timestamp. The log obtains that
+timestamp from the run's shared trusted clock, while policy authorization uses
+the same clock authority.
 Canonical JSON is deterministic. `previous_event_hash` and `event_hash` remain
 empty until M7 implements and verifies the tamper-evident chain; M3 makes no
 durability or cryptographic-integrity claim for the in-memory stream.
@@ -706,6 +718,25 @@ that produces identical bytes remains commit-compatible. Inode changes,
 timestamps, ownership, and permission-only changes are not represented by this
 prototype baseline.
 
+The pre-M4 SEC-001 hardening opens each workspace through Go 1.24 `os.Root`.
+Baseline creation, revalidation, and mediated shadow reads inspect the rooted
+entry, open it relative to the root, bind the opened regular-file handle to the
+still-named regular entry with `os.SameFile` before reading, and revalidate the
+entry and stable size/mode/modification-time observations after reading. A
+mediated shadow write opens without truncation, validates the opened handle
+against the rooted entry before its first mutation, writes through that handle,
+and revalidates the named entry afterward. Static or raced type/symlink changes
+fail closed before Mirage reads from or writes through an unverified handle.
+
+These operations are safer object acquisition, not complete hostile-filesystem
+containment. `os.Root` prevents traversal outside the root but may follow
+in-root symlinks; Mirage's handle/entry checks reject an entry that is observed
+as a symlink before use. Hard-link substitution to the same object, mount or
+bind-mount behavior, special-object replacement while an open is in progress,
+metadata-preserving in-place races, and platform-specific filesystem behavior
+remain explicit limitations. The final revalidation-to-rename race described
+below also remains.
+
 ## 11.2 Shadow state
 
 ```text
@@ -804,10 +835,12 @@ and discards its shadow. The M2 transaction remains the only component that can
 mutate the real `README.md`.
 
 M3 does **not** run an untrusted agent or prevent direct OS access to the shadow
-path. Its observation claim covers operations routed through the gateway.
-Enforced non-bypass, process isolation, and race-resistant hostile filesystem
-object acquisition (SEC-001) are required before the M4 runtime can treat this
-gateway as a security boundary.
+path. Its observation claim covers operations routed through the gateway. The
+pre-M4 acquisition hardening removes the obvious separated validation/read and
+validation/write gaps on that route, subject to the filesystem limitations in
+Section 11. It does not solve SEC-002: M4 must prevent an actual process from
+bypassing mediation or must independently observe and reconcile all of that
+process's security-relevant filesystem effects.
 
 ```text
 Agent
@@ -1916,6 +1949,12 @@ for the shadow `README.md`, an in-memory append-only event stream, deterministic
 verification, and commit gating. It does not include Docker, AI execution,
 external effects, persistence, event hash chaining, receipts, Git, GitHub, or
 UI work.
+
+Before M4, TIME-001 makes the shared trusted run clock fail closed on rollback,
+EVT-001 moves event timestamp ownership into the trusted event system, and the
+narrow SEC-001 pass binds rooted filesystem use to validated open handles. The
+documented residual filesystem limitations and SEC-002 non-bypass design remain
+M4 inputs, not solved claims.
 
 ## M4 — Isolated agent runtime
 

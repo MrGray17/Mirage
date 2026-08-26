@@ -282,76 +282,201 @@ func resolveRealWorkspace(path string) (string, error) {
 }
 
 func readManagedFile(workspace string) ([]byte, os.FileMode, error) {
-	path := filepath.Join(workspace, managedFile)
-	info, err := os.Lstat(path)
+	return readManagedFileWithHook(workspace, nil)
+}
+
+func readManagedFileWithHook(workspace string, afterInitialInspection func()) (contents []byte, mode os.FileMode, returnErr error) {
+	root, file, openedInfo, err := acquireManagedRegularFile(workspace, os.O_RDONLY, afterInitialInspection)
 	if err != nil {
-		return nil, 0, fmt.Errorf("inspect %s: %w", path, err)
+		return nil, 0, err
 	}
-	if !info.Mode().IsRegular() {
-		return nil, 0, fmt.Errorf("%w: %s has type %s", ErrUnsafeFile, path, info.Mode().Type())
-	}
-	contents, err := os.ReadFile(path)
+	defer func() {
+		returnErr = errors.Join(returnErr, closeManagedAcquisition(root, file))
+	}()
+
+	contents, err = io.ReadAll(file)
 	if err != nil {
-		return nil, 0, fmt.Errorf("read %s: %w", path, err)
+		return nil, 0, fmt.Errorf("read rooted %s: %w", managedFile, err)
 	}
-	return contents, info.Mode(), nil
+	afterReadInfo, err := file.Stat()
+	if err != nil {
+		return nil, 0, fmt.Errorf("reinspect opened %s: %w", managedFile, err)
+	}
+	if err := validateManagedCurrentEntry(root, openedInfo); err != nil {
+		return nil, 0, err
+	}
+	if managedFileChangedDuringRead(openedInfo, afterReadInfo) {
+		return nil, 0, fmt.Errorf("%w: %s changed during read", ErrUnsafeFile, managedFile)
+	}
+	return contents, openedInfo.Mode(), nil
 }
 
 func observeManagedResource(workspace string) (resourceObservation, error) {
-	path := filepath.Join(workspace, managedFile)
-	info, err := os.Lstat(path)
+	return observeManagedResourceWithHook(workspace, nil)
+}
+
+func observeManagedResourceWithHook(workspace string, afterInitialInspection func()) (observation resourceObservation, returnErr error) {
+	root, err := os.OpenRoot(workspace)
+	if err != nil {
+		return resourceObservation{}, fmt.Errorf("open real workspace root: %w", err)
+	}
+	var file *os.File
+	defer func() {
+		returnErr = errors.Join(returnErr, closeManagedAcquisition(root, file))
+	}()
+
+	info, err := root.Lstat(managedFile)
 	if errors.Is(err, os.ErrNotExist) {
 		return resourceObservation{identity: "missing"}, nil
 	}
 	if err != nil {
-		return resourceObservation{}, fmt.Errorf("inspect %s: %w", path, err)
+		return resourceObservation{}, fmt.Errorf("inspect rooted %s: %w", managedFile, err)
 	}
 	if !info.Mode().IsRegular() {
 		return resourceObservation{identity: "type:" + resourceType(info.Mode())}, nil
 	}
+	if afterInitialInspection != nil {
+		afterInitialInspection()
+	}
 
-	file, err := os.Open(path)
+	file, err = root.Open(managedFile)
 	if err != nil {
-		return resourceObservation{}, fmt.Errorf("open %s: %w", path, err)
+		current, currentErr := observeCurrentEntry(root)
+		if currentErr == nil && current.identity != "regular" {
+			return current, nil
+		}
+		return resourceObservation{}, errors.Join(fmt.Errorf("open rooted %s: %w", managedFile, err), currentErr)
 	}
 	openedInfo, err := file.Stat()
 	if err != nil {
-		_ = file.Close()
-		return resourceObservation{}, fmt.Errorf("inspect open %s: %w", path, err)
+		return resourceObservation{}, fmt.Errorf("inspect opened %s: %w", managedFile, err)
+	}
+	current, err := observeCurrentEntry(root)
+	if err != nil {
+		return resourceObservation{}, err
+	}
+	if current.identity != "regular" {
+		return current, nil
+	}
+	currentInfo, err := root.Lstat(managedFile)
+	if err != nil {
+		return resourceObservation{}, fmt.Errorf("reinspect rooted %s: %w", managedFile, err)
+	}
+	if !openedInfo.Mode().IsRegular() || !os.SameFile(openedInfo, currentInfo) {
+		return resourceObservation{}, fmt.Errorf("%s changed during object acquisition", managedFile)
 	}
 	contents, err := io.ReadAll(file)
 	if err != nil {
-		_ = file.Close()
-		return resourceObservation{}, fmt.Errorf("read %s: %w", path, err)
+		return resourceObservation{}, fmt.Errorf("read rooted %s: %w", managedFile, err)
 	}
 	afterReadInfo, err := file.Stat()
 	if err != nil {
-		_ = file.Close()
-		return resourceObservation{}, fmt.Errorf("reinspect open %s: %w", path, err)
+		return resourceObservation{}, fmt.Errorf("reinspect opened %s: %w", managedFile, err)
 	}
-	if err := file.Close(); err != nil {
-		return resourceObservation{}, fmt.Errorf("close %s after read: %w", path, err)
-	}
-	if openedInfo.Size() != afterReadInfo.Size() ||
-		openedInfo.Mode() != afterReadInfo.Mode() ||
-		!openedInfo.ModTime().Equal(afterReadInfo.ModTime()) {
-		return resourceObservation{}, fmt.Errorf("%s changed while Mirage was reading its current contents", path)
+	if managedFileChangedDuringRead(openedInfo, afterReadInfo) {
+		return resourceObservation{}, fmt.Errorf("%s changed while Mirage was reading its current contents", managedFile)
 	}
 
-	currentInfo, err := os.Lstat(path)
+	current, err = observeCurrentEntry(root)
+	if err != nil {
+		return resourceObservation{}, err
+	}
+	if current.identity != "regular" {
+		return current, nil
+	}
+	currentInfo, err = root.Lstat(managedFile)
+	if err != nil {
+		return resourceObservation{}, fmt.Errorf("reinspect rooted %s: %w", managedFile, err)
+	}
+	if !os.SameFile(openedInfo, currentInfo) {
+		return resourceObservation{}, fmt.Errorf("%s changed while Mirage was establishing its current identity", managedFile)
+	}
+	return resourceObservation{identity: identifyContent(contents).String()}, nil
+}
+
+func acquireManagedRegularFile(workspace string, flag int, afterInitialInspection func()) (*os.Root, *os.File, os.FileInfo, error) {
+	root, err := os.OpenRoot(workspace)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("open workspace root: %w", err)
+	}
+	fail := func(cause error, file *os.File) (*os.Root, *os.File, os.FileInfo, error) {
+		return nil, nil, nil, errors.Join(cause, closeManagedAcquisition(root, file))
+	}
+
+	initialInfo, err := root.Lstat(managedFile)
+	if err != nil {
+		return fail(fmt.Errorf("inspect rooted %s: %w", managedFile, err), nil)
+	}
+	if !initialInfo.Mode().IsRegular() {
+		return fail(fmt.Errorf("%w: %s has type %s", ErrUnsafeFile, managedFile, initialInfo.Mode().Type()), nil)
+	}
+	if afterInitialInspection != nil {
+		afterInitialInspection()
+	}
+
+	file, err := root.OpenFile(managedFile, flag, 0)
+	if err != nil {
+		if currentInfo, currentErr := root.Lstat(managedFile); currentErr == nil && !currentInfo.Mode().IsRegular() {
+			return fail(fmt.Errorf("%w: %s has type %s", ErrUnsafeFile, managedFile, currentInfo.Mode().Type()), nil)
+		}
+		return fail(fmt.Errorf("open rooted %s: %w", managedFile, err), nil)
+	}
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return fail(fmt.Errorf("inspect opened %s: %w", managedFile, err), file)
+	}
+	if !openedInfo.Mode().IsRegular() {
+		return fail(fmt.Errorf("%w: opened %s has type %s", ErrUnsafeFile, managedFile, openedInfo.Mode().Type()), file)
+	}
+	if err := validateManagedCurrentEntry(root, openedInfo); err != nil {
+		return fail(err, file)
+	}
+	return root, file, openedInfo, nil
+}
+
+func validateManagedCurrentEntry(root *os.Root, openedInfo os.FileInfo) error {
+	currentInfo, err := root.Lstat(managedFile)
+	if err != nil {
+		return fmt.Errorf("reinspect rooted %s: %w", managedFile, err)
+	}
+	if !currentInfo.Mode().IsRegular() {
+		return fmt.Errorf("%w: %s has type %s", ErrUnsafeFile, managedFile, currentInfo.Mode().Type())
+	}
+	if !os.SameFile(openedInfo, currentInfo) {
+		return fmt.Errorf("%w: %s changed during object acquisition", ErrUnsafeFile, managedFile)
+	}
+	return nil
+}
+
+func observeCurrentEntry(root *os.Root) (resourceObservation, error) {
+	info, err := root.Lstat(managedFile)
 	if errors.Is(err, os.ErrNotExist) {
 		return resourceObservation{identity: "missing"}, nil
 	}
 	if err != nil {
-		return resourceObservation{}, fmt.Errorf("reinspect %s: %w", path, err)
+		return resourceObservation{}, fmt.Errorf("inspect rooted %s: %w", managedFile, err)
 	}
-	if !currentInfo.Mode().IsRegular() {
-		return resourceObservation{identity: "type:" + resourceType(currentInfo.Mode())}, nil
+	if !info.Mode().IsRegular() {
+		return resourceObservation{identity: "type:" + resourceType(info.Mode())}, nil
 	}
-	if !openedInfo.Mode().IsRegular() || !os.SameFile(openedInfo, currentInfo) {
-		return resourceObservation{}, fmt.Errorf("%s changed while Mirage was establishing its current identity", path)
+	return resourceObservation{identity: "regular"}, nil
+}
+
+func managedFileChangedDuringRead(before, after os.FileInfo) bool {
+	return before.Size() != after.Size() ||
+		before.Mode() != after.Mode() ||
+		!before.ModTime().Equal(after.ModTime())
+}
+
+func closeManagedAcquisition(root *os.Root, file *os.File) error {
+	var closeErr error
+	if file != nil {
+		closeErr = errors.Join(closeErr, file.Close())
 	}
-	return resourceObservation{identity: identifyContent(contents).String()}, nil
+	if root != nil {
+		closeErr = errors.Join(closeErr, root.Close())
+	}
+	return closeErr
 }
 
 func resourceType(mode os.FileMode) string {
