@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/MrGray17/Mirage/internal/limits"
 )
 
 const managedFile = "README.md"
@@ -34,6 +36,14 @@ var (
 	ErrRevalidation = errors.New("real resource revalidation failed")
 	// ErrCleanup means Mirage could not remove transaction-owned filesystem state.
 	ErrCleanup = errors.New("shadow cleanup failed")
+	// ErrResourceLimit means a managed resource exceeds a trusted-process budget.
+	ErrResourceLimit = errors.New("managed resource limit exceeded")
+	// ErrShadowChanged means the shadow no longer matches the state that was
+	// frozen and approved by the run coordinator.
+	ErrShadowChanged = errors.New("verified shadow state changed")
+	// ErrUnauthorizedShadowMutation means a no-op commit encountered shadow state
+	// that differs from the transaction baseline despite no approved write.
+	ErrUnauthorizedShadowMutation = errors.New("shadow mutation lacks approved write authority")
 )
 
 // StateConflict reports a content-identity mismatch without exposing either
@@ -53,6 +63,19 @@ func (e *StateConflict) Error() string {
 func (e *StateConflict) Unwrap() error {
 	return ErrStateConflict
 }
+
+// ShadowStateError reports that the verified shadow snapshot no longer matches
+// the transaction-owned shadow at commit time.
+type ShadowStateError struct {
+	Expected string
+	Observed string
+}
+
+func (e *ShadowStateError) Error() string {
+	return fmt.Sprintf("%s: expected %s, observed %s", ErrShadowChanged, e.Expected, e.Observed)
+}
+
+func (e *ShadowStateError) Unwrap() error { return ErrShadowChanged }
 
 // RevalidationError reports uncertainty while establishing current real state.
 // It is not a conflict because Mirage did not successfully observe a different
@@ -97,7 +120,8 @@ func (s State) String() string {
 }
 
 // Transaction owns one disposable shadow workspace derived from a real
-// workspace. The real workspace can be changed only by ApplyCommit.
+// workspace. The real workspace can be changed only by ApplyCommit or
+// ApplyCommitExpected.
 type Transaction struct {
 	mu              sync.Mutex
 	realWorkspace   string
@@ -173,6 +197,28 @@ func (t *Transaction) ShadowWorkspace() string {
 	return t.shadowWorkspace
 }
 
+// BaselineIdentity returns the immutable content identity captured at Begin.
+func (t *Transaction) BaselineIdentity() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.baseline.String()
+}
+
+// ShadowIdentity returns the current bounded, race-checked shadow content
+// identity. Runs use this when freezing the state that verification approved.
+func (t *Transaction) ShadowIdentity() (string, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.state != StateActive {
+		return "", fmt.Errorf("%w: cannot snapshot transaction in state %s", ErrInvalidTransition, t.state)
+	}
+	contents, _, err := readManagedFile(t.shadowWorkspace)
+	if err != nil {
+		return "", fmt.Errorf("snapshot shadow %s: %w", managedFile, err)
+	}
+	return identifyContent(contents).String(), nil
+}
+
 // State returns the transaction's current authoritative lifecycle state.
 func (t *Transaction) State() State {
 	t.mu.Lock()
@@ -180,15 +226,27 @@ func (t *Transaction) State() State {
 	return t.state
 }
 
-// ApplyCommit is the only operation in this package that changes the real
-// workspace. It prepares replacement bytes, revalidates the real content
-// identity immediately before replacement, and then renames the prepared file
-// into place. The hash check and rename are not an atomic compare-and-swap; see
-// ARCHITECTURE.md for the residual external-writer race.
+// ApplyCommit is the M2 primitive. Higher-level M3+ runs should prefer
+// ApplyCommitExpected so a post-verification shadow mutation cannot silently
+// change the bytes that are committed.
 func (t *Transaction) ApplyCommit() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	return t.applyCommitLocked("")
+}
 
+// ApplyCommitExpected applies the shadow only if its content identity still
+// matches the snapshot frozen by verification.
+func (t *Transaction) ApplyCommitExpected(expectedShadowIdentity string) error {
+	if strings.TrimSpace(expectedShadowIdentity) == "" {
+		return fmt.Errorf("%w: expected shadow identity is empty", ErrShadowChanged)
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.applyCommitLocked(expectedShadowIdentity)
+}
+
+func (t *Transaction) applyCommitLocked(expectedShadowIdentity string) error {
 	if t.state != StateActive {
 		return fmt.Errorf("%w: cannot commit transaction in state %s", ErrInvalidTransition, t.state)
 	}
@@ -196,6 +254,10 @@ func (t *Transaction) ApplyCommit() error {
 	contents, _, err := readManagedFile(t.shadowWorkspace)
 	if err != nil {
 		return fmt.Errorf("validate shadow %s before commit: %w", managedFile, err)
+	}
+	observedShadowIdentity := identifyContent(contents).String()
+	if expectedShadowIdentity != "" && observedShadowIdentity != expectedShadowIdentity {
+		return &ShadowStateError{Expected: expectedShadowIdentity, Observed: observedShadowIdentity}
 	}
 
 	preparedPath, err := prepareManagedFile(t.realWorkspace, contents, t.baselineMode.Perm())
@@ -243,6 +305,37 @@ func (t *Transaction) ApplyCommit() error {
 	if err := t.removeShadowWorkspace(); err != nil {
 		return fmt.Errorf("%w: transaction committed but shadow remains: %w", ErrCleanup, err)
 	}
+	return nil
+}
+
+// FinalizeVerifiedNoop commits an approved run that contains no authorized
+// filesystem write. It proves the frozen shadow is still both the verified
+// snapshot and the original baseline, then destroys the shadow without
+// touching the real workspace.
+func (t *Transaction) FinalizeVerifiedNoop(expectedShadowIdentity string) error {
+	if strings.TrimSpace(expectedShadowIdentity) == "" {
+		return fmt.Errorf("%w: expected shadow identity is empty", ErrShadowChanged)
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.state != StateActive {
+		return fmt.Errorf("%w: cannot finalize transaction in state %s", ErrInvalidTransition, t.state)
+	}
+	contents, _, err := readManagedFile(t.shadowWorkspace)
+	if err != nil {
+		return fmt.Errorf("validate no-op shadow %s: %w", managedFile, err)
+	}
+	observed := identifyContent(contents).String()
+	if observed != expectedShadowIdentity {
+		return &ShadowStateError{Expected: expectedShadowIdentity, Observed: observed}
+	}
+	if observed != t.baseline.String() {
+		return fmt.Errorf("%w: baseline %s, shadow %s", ErrUnauthorizedShadowMutation, t.baseline.String(), observed)
+	}
+	if err := t.removeShadowWorkspace(); err != nil {
+		return fmt.Errorf("%w: finalize no-op shadow: %w", ErrCleanup, err)
+	}
+	t.state = StateCommitted
 	return nil
 }
 
@@ -294,7 +387,7 @@ func readManagedFileWithHook(workspace string, afterInitialInspection func()) (c
 		returnErr = errors.Join(returnErr, closeManagedAcquisition(root, file))
 	}()
 
-	contents, err = io.ReadAll(file)
+	contents, err = readManagedFileContents(file)
 	if err != nil {
 		return nil, 0, fmt.Errorf("read rooted %s: %w", managedFile, err)
 	}
@@ -335,6 +428,9 @@ func observeManagedResourceWithHook(workspace string, afterInitialInspection fun
 	if !info.Mode().IsRegular() {
 		return resourceObservation{identity: "type:" + resourceType(info.Mode())}, nil
 	}
+	if info.Size() > limits.MaxManagedFileBytes {
+		return resourceObservation{}, fmt.Errorf("%w: %s exceeds %d bytes", ErrResourceLimit, managedFile, limits.MaxManagedFileBytes)
+	}
 	if afterInitialInspection != nil {
 		afterInitialInspection()
 	}
@@ -351,6 +447,9 @@ func observeManagedResourceWithHook(workspace string, afterInitialInspection fun
 	if err != nil {
 		return resourceObservation{}, fmt.Errorf("inspect opened %s: %w", managedFile, err)
 	}
+	if openedInfo.Size() > limits.MaxManagedFileBytes {
+		return resourceObservation{}, fmt.Errorf("%w: %s exceeds %d bytes", ErrResourceLimit, managedFile, limits.MaxManagedFileBytes)
+	}
 	current, err := observeCurrentEntry(root)
 	if err != nil {
 		return resourceObservation{}, err
@@ -365,7 +464,7 @@ func observeManagedResourceWithHook(workspace string, afterInitialInspection fun
 	if !openedInfo.Mode().IsRegular() || !os.SameFile(openedInfo, currentInfo) {
 		return resourceObservation{}, fmt.Errorf("%s changed during object acquisition", managedFile)
 	}
-	contents, err := io.ReadAll(file)
+	contents, err := readManagedFileContents(file)
 	if err != nil {
 		return resourceObservation{}, fmt.Errorf("read rooted %s: %w", managedFile, err)
 	}
@@ -410,6 +509,9 @@ func acquireManagedRegularFile(workspace string, flag int, afterInitialInspectio
 	if !initialInfo.Mode().IsRegular() {
 		return fail(fmt.Errorf("%w: %s has type %s", ErrUnsafeFile, managedFile, initialInfo.Mode().Type()), nil)
 	}
+	if initialInfo.Size() > limits.MaxManagedFileBytes {
+		return fail(fmt.Errorf("%w: %s exceeds %d bytes", ErrResourceLimit, managedFile, limits.MaxManagedFileBytes), nil)
+	}
 	if afterInitialInspection != nil {
 		afterInitialInspection()
 	}
@@ -427,6 +529,9 @@ func acquireManagedRegularFile(workspace string, flag int, afterInitialInspectio
 	}
 	if !openedInfo.Mode().IsRegular() {
 		return fail(fmt.Errorf("%w: opened %s has type %s", ErrUnsafeFile, managedFile, openedInfo.Mode().Type()), file)
+	}
+	if openedInfo.Size() > limits.MaxManagedFileBytes {
+		return fail(fmt.Errorf("%w: %s exceeds %d bytes", ErrResourceLimit, managedFile, limits.MaxManagedFileBytes), file)
 	}
 	if err := validateManagedCurrentEntry(root, openedInfo); err != nil {
 		return fail(err, file)
@@ -459,7 +564,21 @@ func observeCurrentEntry(root *os.Root) (resourceObservation, error) {
 	if !info.Mode().IsRegular() {
 		return resourceObservation{identity: "type:" + resourceType(info.Mode())}, nil
 	}
+	if info.Size() > limits.MaxManagedFileBytes {
+		return resourceObservation{}, fmt.Errorf("%w: %s exceeds %d bytes", ErrResourceLimit, managedFile, limits.MaxManagedFileBytes)
+	}
 	return resourceObservation{identity: "regular"}, nil
+}
+
+func readManagedFileContents(file *os.File) ([]byte, error) {
+	contents, err := io.ReadAll(io.LimitReader(file, limits.MaxManagedFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(contents)) > limits.MaxManagedFileBytes {
+		return nil, fmt.Errorf("%w: %s exceeds %d bytes", ErrResourceLimit, managedFile, limits.MaxManagedFileBytes)
+	}
+	return contents, nil
 }
 
 func managedFileChangedDuringRead(before, after os.FileInfo) bool {
@@ -497,6 +616,9 @@ func resourceType(mode os.FileMode) string {
 }
 
 func writeNewFile(path string, contents []byte, mode os.FileMode) error {
+	if int64(len(contents)) > limits.MaxManagedFileBytes {
+		return fmt.Errorf("%w: %s exceeds %d bytes", ErrResourceLimit, managedFile, limits.MaxManagedFileBytes)
+	}
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if err != nil {
 		return err
@@ -509,6 +631,9 @@ func writeNewFile(path string, contents []byte, mode os.FileMode) error {
 }
 
 func prepareManagedFile(workspace string, contents []byte, mode os.FileMode) (string, error) {
+	if int64(len(contents)) > limits.MaxManagedFileBytes {
+		return "", fmt.Errorf("%w: %s exceeds %d bytes", ErrResourceLimit, managedFile, limits.MaxManagedFileBytes)
+	}
 	prepared, err := os.CreateTemp(workspace, ".mirage-readme-")
 	if err != nil {
 		return "", err
