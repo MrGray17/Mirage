@@ -1,9 +1,9 @@
-// Package hostilefixture contains the deliberately malicious M4.1 workload.
+// Package hostilefixture contains the deliberately malicious M4 workload.
 // The script is trusted test input; the process executing it is not trusted.
 package hostilefixture
 
 // Script is passed as one argv value to /bin/sh inside the sandbox. It probes
-// every M4.1 containment assumption, spawns a TERM-resistant child, and then
+// the runtime containment assumptions, spawns a TERM-resistant child, and then
 // keeps mutating the disposable workspace until the supervisor kills the
 // container process tree.
 const Script = `set +e

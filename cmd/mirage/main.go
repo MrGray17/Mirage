@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/MrGray17/Mirage/internal/contracts"
 	hostileruntime "github.com/MrGray17/Mirage/internal/runtime"
 	runtimedocker "github.com/MrGray17/Mirage/internal/runtime/docker"
 	"github.com/MrGray17/Mirage/internal/runtime/workspace"
@@ -37,7 +38,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("run hostile-fixture", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	image := flags.String("image", strings.TrimSpace(os.Getenv("MIRAGE_HOSTILE_IMAGE")), "preloaded digest-pinned Linux image containing /bin/sh and wget")
-	realWorkspace := flags.String("workspace", ".", "trusted real workspace used only as the README.md snapshot source")
+	realWorkspace := flags.String("workspace", ".", "trusted real repository used only as the bounded snapshot source")
 	duration := flags.Duration("duration", defaultRunDuration, "time before Mirage kills the hostile fixture")
 	if err := flags.Parse(args[2:]); err != nil {
 		return err
@@ -70,6 +71,19 @@ func run(args []string, stdout, stderr io.Writer) error {
 	lifecycle, err := hostileruntime.NewLifecycle(launcher)
 	if err != nil {
 		return errors.Join(err, disposable.Cleanup())
+	}
+	trustedStart := time.Now().UTC()
+	contract, err := contracts.New(contracts.Spec{
+		Version:   contracts.VersionV1,
+		RunID:     "hostile-fixture-" + disposable.Token()[:16],
+		ActorID:   "hostile-fixture",
+		ExpiresAt: trustedStart.Add(*duration + 3*operationTimeout),
+		Filesystem: contracts.FilesystemPolicy{Write: contracts.AccessRules{
+			Allow: []string{"/workspace/README.md"},
+		}},
+	})
+	if err != nil {
+		return errors.Join(err, cleanupRuntime(lifecycle, disposable))
 	}
 
 	commandCtx, cancelSignal := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -114,15 +128,30 @@ func run(args []string, stdout, stderr io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "runtime=%s process_tree=stopped\n", lifecycle.State())
 
-	// M4.1 has no authoritative scanner or diff verifier. The frozen workspace
-	// therefore has no commit authority and is always rejected and destroyed.
-	if err := lifecycle.Reject(); err != nil {
+	verificationTime := time.Now().UTC()
+	if verificationTime.Before(trustedStart) {
+		verificationTime = time.Time{}
+	}
+	decision, err := lifecycle.Reconcile(disposable.Baseline(), disposable.Path(), contract, verificationTime)
+	if err != nil {
 		return errors.Join(err, cleanupRuntime(lifecycle, disposable))
+	}
+	plan, _ := lifecycle.Reconciliation()
+	fmt.Fprintf(stdout, "runtime=%s plan=%s mutations=%d violations=%d\n", lifecycle.State(), plan.Hash(), len(plan.Mutations()), len(decision.Violations()))
+	for _, violation := range decision.Violations() {
+		fmt.Fprintf(stdout, "violation operation=%s resource=%s rule=%s\n", violation.Operation, violation.Resource, violation.RuleID)
+	}
+	if decision.Allowed {
+		// M4.2 can verify and bind a plan, but the real-tree commit phase remains
+		// deliberately absent. A verified fixture is still explicitly rejected.
+		if err := lifecycle.Reject(); err != nil {
+			return errors.Join(err, cleanupRuntime(lifecycle, disposable))
+		}
 	}
 	if err := cleanupRuntime(lifecycle, disposable); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "runtime=%s commit=disabled reason=reconciliation-not-implemented\n", lifecycle.State())
+	fmt.Fprintf(stdout, "runtime=%s commit=disabled reason=m4.2-has-no-real-workspace-commit\n", lifecycle.State())
 	return nil
 }
 

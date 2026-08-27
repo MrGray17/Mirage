@@ -3,7 +3,13 @@ package runtime
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/MrGray17/Mirage/internal/contracts"
+	"github.com/MrGray17/Mirage/internal/runtime/tree"
 )
 
 type sandboxStub struct {
@@ -85,7 +91,7 @@ func TestLifecycleFreezeFailureIsNeverFrozen(t *testing.T) {
 	if lifecycle.State() != StateFailed {
 		t.Fatalf("state = %s, want FAILED", lifecycle.State())
 	}
-	if err := lifecycle.BeginReconciliation(); !errors.Is(err, ErrInvalidTransition) {
+	if _, err := lifecycle.Reconcile(nil, "", nil, time.Time{}); !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("reconcile error = %v", err)
 	}
 }
@@ -106,19 +112,28 @@ func TestLifecycleStartFailureCannotBeReconciled(t *testing.T) {
 	if lifecycle.State() != StateFailed {
 		t.Fatalf("state = %s, want FAILED", lifecycle.State())
 	}
-	if err := lifecycle.BeginReconciliation(); !errors.Is(err, ErrInvalidTransition) {
+	if _, err := lifecycle.Reconcile(nil, "", nil, time.Time{}); !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("reconcile error = %v", err)
 	}
 }
 
-func TestLifecycleFutureSecurityTransitionsAreOrdered(t *testing.T) {
+func TestLifecycleVerificationRequiresFrozenExactReconciliation(t *testing.T) {
 	stub := &sandboxStub{}
 	lifecycle, err := NewLifecycle(stub)
 	if err != nil {
 		t.Fatalf("new lifecycle: %v", err)
 	}
-	if err := lifecycle.MarkVerified(); !errors.Is(err, ErrInvalidTransition) {
+	if _, err := lifecycle.Reconcile(nil, "", nil, time.Time{}); !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("early verify error = %v", err)
+	}
+	workspace := t.TempDir()
+	readme := filepath.Join(workspace, "README.md")
+	if err := os.WriteFile(readme, []byte("before"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := tree.Scan(workspace, tree.ScanOptions{})
+	if err != nil {
+		t.Fatal(err)
 	}
 	if err := lifecycle.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
@@ -129,17 +144,53 @@ func TestLifecycleFutureSecurityTransitionsAreOrdered(t *testing.T) {
 	if err := lifecycle.Freeze(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err := lifecycle.BeginReconciliation(); err != nil {
+	if err := os.WriteFile(readme, []byte("after"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := lifecycle.MarkVerified(); err != nil {
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	contract := lifecycleContract(t, now.Add(time.Hour), "/workspace/README.md")
+	decision, err := lifecycle.Reconcile(baseline, workspace, contract, now)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := lifecycle.MarkCommitted(); err != nil {
+	if !decision.Allowed {
+		t.Fatalf("decision = %#v, violations = %#v", decision, decision.Violations())
+	}
+	if lifecycle.State() != StateVerified {
+		t.Fatalf("state = %s, want VERIFIED", lifecycle.State())
+	}
+	plan, stored := lifecycle.Reconciliation()
+	if plan == nil || len(plan.Mutations()) != 1 || stored.AuthorityHash != decision.AuthorityHash {
+		t.Fatalf("stored reconciliation = %#v, %#v", plan, stored)
+	}
+}
+
+func TestLifecyclePolicyDenialIsRejectedNotFailed(t *testing.T) {
+	lifecycle, workspace, baseline := frozenLifecycle(t)
+	if err := os.WriteFile(filepath.Join(workspace, "forbidden.txt"), []byte("hostile"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if lifecycle.State() != StateCommitted {
-		t.Fatalf("state = %s", lifecycle.State())
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	decision, err := lifecycle.Reconcile(baseline, workspace, lifecycleContract(t, now.Add(time.Hour)), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Allowed || lifecycle.State() != StateRejected {
+		t.Fatalf("decision = %#v, state = %s", decision, lifecycle.State())
+	}
+}
+
+func TestLifecycleScanUncertaintyFailsClosed(t *testing.T) {
+	lifecycle, workspace, baseline := frozenLifecycle(t)
+	if err := os.RemoveAll(workspace); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	if _, err := lifecycle.Reconcile(baseline, workspace, lifecycleContract(t, now.Add(time.Hour)), now); err == nil {
+		t.Fatal("missing frozen workspace was reconciled")
+	}
+	if lifecycle.State() != StateFailed {
+		t.Fatalf("state = %s, want FAILED", lifecycle.State())
 	}
 }
 
@@ -161,4 +212,47 @@ func TestLifecycleRejectCannotHideRunningProcess(t *testing.T) {
 	if lifecycle.State() != StateRunning {
 		t.Fatalf("state = %s, want RUNNING", lifecycle.State())
 	}
+}
+
+func frozenLifecycle(t *testing.T) (*Lifecycle, string, *tree.Snapshot) {
+	t.Helper()
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("before"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := tree.Scan(workspace, tree.ScanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifecycle, err := NewLifecycle(&sandboxStub{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.Prepare(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.Freeze(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	return lifecycle, workspace, baseline
+}
+
+func lifecycleContract(t *testing.T, expires time.Time, allow ...string) *contracts.Contract {
+	t.Helper()
+	contract, err := contracts.New(contracts.Spec{
+		Version:   contracts.VersionV1,
+		RunID:     "lifecycle-test",
+		ActorID:   "hostile-fixture",
+		ExpiresAt: expires,
+		Filesystem: contracts.FilesystemPolicy{Write: contracts.AccessRules{
+			Allow: allow,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return contract
 }

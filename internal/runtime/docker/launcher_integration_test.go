@@ -10,14 +10,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MrGray17/Mirage/internal/contracts"
 	hostileruntime "github.com/MrGray17/Mirage/internal/runtime"
 	runtimedocker "github.com/MrGray17/Mirage/internal/runtime/docker"
+	"github.com/MrGray17/Mirage/internal/runtime/reconcile"
+	"github.com/MrGray17/Mirage/internal/runtime/tree"
 	"github.com/MrGray17/Mirage/internal/runtime/workspace"
 )
 
 func TestRootlessDockerContainsHostileFixture(t *testing.T) {
-	if goruntime.GOOS != "linux" || os.Getenv("MIRAGE_M41_INTEGRATION") != "1" {
-		t.Skip("set MIRAGE_M41_INTEGRATION=1 on a Linux rootless Docker host")
+	if goruntime.GOOS != "linux" || os.Getenv("MIRAGE_M42_INTEGRATION") != "1" {
+		t.Skip("set MIRAGE_M42_INTEGRATION=1 on a Linux rootless Docker host")
 	}
 	image := strings.TrimSpace(os.Getenv("MIRAGE_HOSTILE_IMAGE"))
 	if image == "" {
@@ -60,6 +63,19 @@ func TestRootlessDockerContainsHostileFixture(t *testing.T) {
 	if err != nil {
 		_ = disposable.Cleanup()
 		t.Fatalf("new lifecycle: %v", err)
+	}
+	contract, err := contracts.New(contracts.Spec{
+		Version:   contracts.VersionV1,
+		RunID:     "m42-live-hostile-fixture",
+		ActorID:   "hostile-fixture",
+		ExpiresAt: time.Now().UTC().Add(5 * time.Minute),
+		Filesystem: contracts.FilesystemPolicy{Write: contracts.AccessRules{
+			Allow: []string{"/workspace/README.md"},
+		}},
+	})
+	if err != nil {
+		_ = disposable.Cleanup()
+		t.Fatalf("create fixture contract: %v", err)
 	}
 
 	cleaned := false
@@ -152,8 +168,23 @@ func TestRootlessDockerContainsHostileFixture(t *testing.T) {
 		t.Fatalf("path escape reached host filesystem: %v", err)
 	}
 
-	if err := lifecycle.Reject(); err != nil {
-		t.Fatalf("reject frozen M4.1 runtime: %v", err)
+	decision, err := lifecycle.Reconcile(disposable.Baseline(), disposable.Path(), contract, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("reconcile frozen runtime: %v", err)
+	}
+	if decision.Allowed || lifecycle.State() != hostileruntime.StateRejected {
+		t.Fatalf("hostile final tree was not rejected: decision=%#v state=%s", decision, lifecycle.State())
+	}
+	violations := decision.Violations()
+	if !hasViolation(violations, "/workspace/forbidden.txt", "filesystem.default_deny") {
+		t.Errorf("forbidden direct write absent from violations: %#v", violations)
+	}
+	if !hasViolation(violations, "/workspace/hostile-link", "filesystem.symlink_denied") {
+		t.Errorf("hostile symlink absent from violations: %#v", violations)
+	}
+	plan, _ := lifecycle.Reconciliation()
+	if plan == nil || !hasMutation(plan.Mutations(), "/workspace/README.md") {
+		t.Fatalf("allowed README mutation absent from authoritative plan: %#v", plan)
 	}
 	destroyCtx, cancelDestroy := context.WithTimeout(context.Background(), 30*time.Second)
 	if err := lifecycle.Destroy(destroyCtx); err != nil {
@@ -165,6 +196,24 @@ func TestRootlessDockerContainsHostileFixture(t *testing.T) {
 		t.Fatalf("cleanup workspace: %v", err)
 	}
 	cleaned = true
+}
+
+func hasViolation(violations []reconcile.Violation, resource, ruleID string) bool {
+	for _, violation := range violations {
+		if violation.Resource == resource && violation.RuleID == ruleID {
+			return true
+		}
+	}
+	return false
+}
+
+func hasMutation(mutations []tree.Mutation, resource string) bool {
+	for _, mutation := range mutations {
+		if mutation.Resource == resource {
+			return true
+		}
+	}
+	return false
 }
 
 func reportHasLine(report []byte, wanted string) bool {

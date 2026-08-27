@@ -1,6 +1,6 @@
-// Package runtime coordinates the lifecycle of an untrusted process sandbox.
-// It deliberately does not implement reconciliation or commit authority; M4.1
-// stops at a proven-frozen disposable workspace.
+// Package runtime coordinates the lifecycle of an untrusted process sandbox
+// through trusted frozen-tree reconciliation. M4.2 still grants no authority
+// to mutate the real repository.
 package runtime
 
 import (
@@ -8,6 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
+
+	"github.com/MrGray17/Mirage/internal/contracts"
+	"github.com/MrGray17/Mirage/internal/runtime/reconcile"
+	"github.com/MrGray17/Mirage/internal/runtime/tree"
 )
 
 var (
@@ -70,9 +75,11 @@ type Sandbox interface {
 
 // Lifecycle serializes sandbox actions with trusted state transitions.
 type Lifecycle struct {
-	mu      sync.Mutex
-	sandbox Sandbox
-	state   State
+	mu       sync.Mutex
+	sandbox  Sandbox
+	state    State
+	plan     *tree.Plan
+	decision reconcile.Decision
 }
 
 func NewLifecycle(sandbox Sandbox) (*Lifecycle, error) {
@@ -138,39 +145,36 @@ func (l *Lifecycle) Freeze(ctx context.Context) error {
 	return nil
 }
 
-// BeginReconciliation is the M4.2 handoff point. No scanner is implemented in
-// M4.1; this transition exists so later reconciliation cannot start before a
-// proven freeze.
-func (l *Lifecycle) BeginReconciliation() error {
+// Reconcile is the only path from FROZEN to VERIFIED. Scanner or acquisition
+// uncertainty is terminal FAILED; an established policy denial is REJECTED.
+func (l *Lifecycle) Reconcile(baseline *tree.Snapshot, frozenWorkspace string, contract *contracts.Contract, at time.Time) (reconcile.Decision, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if err := l.require(StateFrozen, "begin reconciliation"); err != nil {
-		return err
+	if err := l.require(StateFrozen, "reconcile"); err != nil {
+		return reconcile.Decision{}, err
 	}
 	l.state = StateReconciling
-	return nil
+	plan, decision, err := reconcile.Verify(baseline, frozenWorkspace, contract, at)
+	if err != nil {
+		l.state = StateFailed
+		return reconcile.Decision{}, fmt.Errorf("reconcile hostile workspace: %w", err)
+	}
+	l.plan = plan
+	l.decision = decision
+	if decision.Allowed {
+		l.state = StateVerified
+	} else {
+		l.state = StateRejected
+	}
+	return decision, nil
 }
 
-// MarkVerified is reserved for the future trusted reconciler. M4.1 callers do
-// not invoke it.
-func (l *Lifecycle) MarkVerified() error {
+// Reconciliation returns immutable plan and decision evidence, if scanning
+// completed. The plan's contents are exposed only through defensive copies.
+func (l *Lifecycle) Reconciliation() (*tree.Plan, reconcile.Decision) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if err := l.require(StateReconciling, "mark verified"); err != nil {
-		return err
-	}
-	l.state = StateVerified
-	return nil
-}
-
-func (l *Lifecycle) MarkCommitted() error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if err := l.require(StateVerified, "mark committed"); err != nil {
-		return err
-	}
-	l.state = StateCommitted
-	return nil
+	return l.plan, l.decision
 }
 
 // Reject is valid before execution, after freeze, during reconciliation, or

@@ -698,9 +698,13 @@ COMMITTED / REJECTED / FAILED
 
 `FROZEN` is reachable only after the trusted sandbox backend proves the
 untrusted process tree can no longer mutate the disposable workspace. M4.1
-implements lifecycle through this freeze proof and then always rejects; the
-scanner, normalized diff, verification, and commit transitions remain M4.2+.
-The runtime is disposable. Durable truth lives outside it.
+implements lifecycle through this freeze proof. M4.2 adds a bounded no-follow
+tree scanner, canonical baseline-to-final mutations, exact contract
+verification, and a plan identity bound to the contract. Acquisition
+uncertainty becomes `FAILED`, established denial becomes `REJECTED`, and only a
+fully authorized plan reaches `VERIFIED`. `COMMITTED` remains unreachable until
+the later real-workspace freshness and exact-plan application slice. The
+runtime is disposable. Durable truth lives outside it.
 
 ---
 
