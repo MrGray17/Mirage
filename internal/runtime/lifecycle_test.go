@@ -3,13 +3,15 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/MrGray17/Mirage/internal/contracts"
-	"github.com/MrGray17/Mirage/internal/runtime/tree"
+	"github.com/MrGray17/Mirage/internal/runtime/realcommit"
+	"github.com/MrGray17/Mirage/internal/runtime/workspace"
 )
 
 type sandboxStub struct {
@@ -18,6 +20,21 @@ type sandboxStub struct {
 	freezeErr  error
 	destroyErr error
 	calls      []string
+	identity   string
+	real       string
+	disposable string
+	token      string
+}
+
+func (s *sandboxStub) Identity() string {
+	if s.identity == "" {
+		return "sandbox:test"
+	}
+	return s.identity
+}
+
+func (s *sandboxStub) BoundWorkspace() (string, string, string) {
+	return s.real, s.disposable, s.token
 }
 
 func (s *sandboxStub) Prepare(context.Context) error {
@@ -91,7 +108,7 @@ func TestLifecycleFreezeFailureIsNeverFrozen(t *testing.T) {
 	if lifecycle.State() != StateFailed {
 		t.Fatalf("state = %s, want FAILED", lifecycle.State())
 	}
-	if _, err := lifecycle.Reconcile(nil, "", nil); !errors.Is(err, ErrInvalidTransition) {
+	if _, err := lifecycle.Reconcile(); !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("reconcile error = %v", err)
 	}
 }
@@ -112,29 +129,16 @@ func TestLifecycleStartFailureCannotBeReconciled(t *testing.T) {
 	if lifecycle.State() != StateFailed {
 		t.Fatalf("state = %s, want FAILED", lifecycle.State())
 	}
-	if _, err := lifecycle.Reconcile(nil, "", nil); !errors.Is(err, ErrInvalidTransition) {
+	if _, err := lifecycle.Reconcile(); !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("reconcile error = %v", err)
 	}
 }
 
 func TestLifecycleVerificationRequiresFrozenExactReconciliation(t *testing.T) {
-	stub := &sandboxStub{}
 	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
-	lifecycle, err := NewLifecycleWithClock(stub, func() time.Time { return now })
-	if err != nil {
-		t.Fatalf("new lifecycle: %v", err)
-	}
-	if _, err := lifecycle.Reconcile(nil, "", nil); !errors.Is(err, ErrInvalidTransition) {
+	lifecycle, disposable := boundLifecycle(t, func() time.Time { return now }, now.Add(time.Hour), "/workspace/README.md")
+	if _, err := lifecycle.Reconcile(); !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("early verify error = %v", err)
-	}
-	workspace := t.TempDir()
-	readme := filepath.Join(workspace, "README.md")
-	if err := os.WriteFile(readme, []byte("before"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	baseline, err := tree.Scan(workspace, tree.ScanOptions{})
-	if err != nil {
-		t.Fatal(err)
 	}
 	if err := lifecycle.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
@@ -145,11 +149,10 @@ func TestLifecycleVerificationRequiresFrozenExactReconciliation(t *testing.T) {
 	if err := lifecycle.Freeze(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(readme, []byte("after"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(disposable.Path(), "README.md"), []byte("after"), 0o666); err != nil {
 		t.Fatal(err)
 	}
-	contract := lifecycleContract(t, now.Add(time.Hour), "/workspace/README.md")
-	decision, err := lifecycle.Reconcile(baseline, workspace, contract)
+	decision, err := lifecycle.Reconcile()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,12 +169,11 @@ func TestLifecycleVerificationRequiresFrozenExactReconciliation(t *testing.T) {
 }
 
 func TestLifecyclePolicyDenialIsRejectedNotFailed(t *testing.T) {
-	lifecycle, workspace, baseline := frozenLifecycle(t)
-	if err := os.WriteFile(filepath.Join(workspace, "forbidden.txt"), []byte("hostile"), 0o644); err != nil {
+	lifecycle, disposable := frozenLifecycle(t)
+	if err := os.WriteFile(filepath.Join(disposable.Path(), "forbidden.txt"), []byte("hostile"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
-	decision, err := lifecycle.Reconcile(baseline, workspace, lifecycleContract(t, now.Add(time.Hour)))
+	decision, err := lifecycle.Reconcile()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,12 +183,11 @@ func TestLifecyclePolicyDenialIsRejectedNotFailed(t *testing.T) {
 }
 
 func TestLifecycleScanUncertaintyFailsClosed(t *testing.T) {
-	lifecycle, workspace, baseline := frozenLifecycle(t)
-	if err := os.RemoveAll(workspace); err != nil {
+	lifecycle, disposable := frozenLifecycle(t)
+	if err := os.RemoveAll(disposable.Path()); err != nil {
 		t.Fatal(err)
 	}
-	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
-	if _, err := lifecycle.Reconcile(baseline, workspace, lifecycleContract(t, now.Add(time.Hour))); err == nil {
+	if _, err := lifecycle.Reconcile(); err == nil {
 		t.Fatal("missing frozen workspace was reconciled")
 	}
 	if lifecycle.State() != StateFailed {
@@ -258,17 +259,13 @@ func TestLifecycleClockRollbackBeforeFreezeStillStopsProcessTree(t *testing.T) {
 
 func TestLifecycleClockRollbackBeforeReconciliationCannotRevalidateExpiredContract(t *testing.T) {
 	base := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
-	stub := &sandboxStub{}
-	lifecycle, err := NewLifecycleWithClock(stub, sequenceClock(t,
+	lifecycle, disposable := boundLifecycle(t, sequenceClock(t,
 		base,
 		base.Add(time.Minute),
 		base.Add(2*time.Minute),
 		base.Add(10*time.Minute),
 		base.Add(3*time.Minute),
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
+	), base.Add(5*time.Minute))
 	if err := lifecycle.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -278,13 +275,8 @@ func TestLifecycleClockRollbackBeforeReconciliationCannotRevalidateExpiredContra
 	if err := lifecycle.Freeze(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	workspace := t.TempDir()
-	baseline, err := tree.Scan(workspace, tree.ScanOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	contract := lifecycleContract(t, base.Add(5*time.Minute))
-	if _, err := lifecycle.Reconcile(baseline, workspace, contract); !errors.Is(err, ErrClockRollback) {
+	_ = disposable
+	if _, err := lifecycle.Reconcile(); !errors.Is(err, ErrClockRollback) {
 		t.Fatalf("reconcile error = %v", err)
 	}
 	if lifecycle.State() != StateFailed {
@@ -324,21 +316,303 @@ func TestLifecycleRejectCannotHideRunningProcess(t *testing.T) {
 	}
 }
 
-func frozenLifecycle(t *testing.T) (*Lifecycle, string, *tree.Snapshot) {
-	t.Helper()
-	workspace := t.TempDir()
-	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("before"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	baseline, err := tree.Scan(workspace, tree.ScanOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestLifecycleCommitsOneVerifiedContentChangeAndPreservesRealMode(t *testing.T) {
 	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
-	lifecycle, err := NewLifecycleWithClock(&sandboxStub{}, func() time.Time { return now })
+	lifecycle, disposable := boundLifecycle(t, func() time.Time { return now }, now.Add(time.Hour), "/workspace/README.md")
+	runToStarted(t, lifecycle)
+	if err := os.WriteFile(filepath.Join(disposable.Path(), "README.md"), []byte("authorized update\n"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	freezeAndVerify(t, lifecycle)
+	commitPlan, err := lifecycle.PreCommit()
+	if err != nil {
+		t.Fatalf("precommit: %v", err)
+	}
+	if commitPlan.ManifestHash() == "" || commitPlan.AuthorityHash() == "" || commitPlan.RealBaselineIdentity() == "" || commitPlan.RealMode() != 0o600 {
+		t.Fatalf("incomplete real commit authority: %#v", commitPlan)
+	}
+	if err := lifecycle.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if lifecycle.State() != StateCommitted {
+		t.Fatalf("state = %s, want COMMITTED", lifecycle.State())
+	}
+	realREADME := filepath.Join(disposable.RealWorkspace(), "README.md")
+	contents, err := os.ReadFile(realREADME)
+	if err != nil || string(contents) != "authorized update\n" {
+		t.Fatalf("real contents = %q, %v", contents, err)
+	}
+	info, err := os.Lstat(realREADME)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		t.Fatalf("real mode = %v, %v", info, err)
+	}
+	entries, err := os.ReadDir(disposable.RealWorkspace())
+	if err != nil || len(entries) != 1 || entries[0].Name() != "README.md" {
+		t.Fatalf("real workspace entries = %v, %v", entries, err)
+	}
+}
+
+func TestLifecycleRejectsRealChangeImmediatelyBeforeCommit(t *testing.T) {
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	lifecycle, disposable := verifiedContentLifecycle(t, func() time.Time { return now }, now.Add(time.Hour))
+	if _, err := lifecycle.PreCommit(); err != nil {
+		t.Fatal(err)
+	}
+	realREADME := filepath.Join(disposable.RealWorkspace(), "README.md")
+	if err := os.WriteFile(realREADME, []byte("external winner"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.Commit(); !errors.Is(err, ErrRealStateConflict) {
+		t.Fatalf("commit error = %v, want real-state conflict", err)
+	}
+	if lifecycle.State() != StateConflicted {
+		t.Fatalf("state = %s, want CONFLICTED", lifecycle.State())
+	}
+	contents, err := os.ReadFile(realREADME)
+	if err != nil || string(contents) != "external winner" {
+		t.Fatalf("conflict overwrote reality: %q, %v", contents, err)
+	}
+}
+
+func TestLifecycleRejectsShadowChangeAfterVerification(t *testing.T) {
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	for _, afterPrecommit := range []bool{false, true} {
+		name := "before precommit"
+		if afterPrecommit {
+			name = "immediately before commit"
+		}
+		t.Run(name, func(t *testing.T) {
+			lifecycle, disposable := verifiedContentLifecycle(t, func() time.Time { return now }, now.Add(time.Hour))
+			if afterPrecommit {
+				if _, err := lifecycle.PreCommit(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(disposable.Path(), "README.md"), []byte("shadow tamper"), 0o666); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			if afterPrecommit {
+				err = lifecycle.Commit()
+			} else {
+				_, err = lifecycle.PreCommit()
+			}
+			if !errors.Is(err, ErrShadowChanged) {
+				t.Fatalf("shadow tamper error = %v", err)
+			}
+			if lifecycle.State() != StateRejected {
+				t.Fatalf("state = %s, want REJECTED", lifecycle.State())
+			}
+			assertRealREADME(t, disposable, "before", 0o600)
+		})
+	}
+}
+
+func TestLifecycleRejectsExpiredOrRolledBackClockBeforeCommit(t *testing.T) {
+	base := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	t.Run("expired", func(t *testing.T) {
+		current := base
+		lifecycle, disposable := verifiedContentLifecycle(t, func() time.Time { return current }, base.Add(time.Minute))
+		current = base.Add(2 * time.Minute)
+		if _, err := lifecycle.PreCommit(); !errors.Is(err, ErrContractExpired) {
+			t.Fatalf("precommit error = %v", err)
+		}
+		if lifecycle.State() != StateRejected {
+			t.Fatalf("state = %s, want REJECTED", lifecycle.State())
+		}
+		assertRealREADME(t, disposable, "before", 0o600)
+	})
+	t.Run("rollback immediately before commit", func(t *testing.T) {
+		current := base
+		lifecycle, disposable := verifiedContentLifecycle(t, func() time.Time { return current }, base.Add(time.Hour))
+		if _, err := lifecycle.PreCommit(); err != nil {
+			t.Fatal(err)
+		}
+		current = base.Add(-time.Second)
+		if err := lifecycle.Commit(); !errors.Is(err, ErrClockRollback) {
+			t.Fatalf("commit error = %v", err)
+		}
+		if lifecycle.State() != StateFailed {
+			t.Fatalf("state = %s, want FAILED", lifecycle.State())
+		}
+		assertRealREADME(t, disposable, "before", 0o600)
+	})
+}
+
+func TestLifecycleRechecksTrustedTimeImmediatelyBeforeReplacement(t *testing.T) {
+	base := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	t.Run("expires during apply", func(t *testing.T) {
+		clock := sequenceClock(t,
+			base,                    // manifest
+			base,                    // prepare
+			base,                    // start
+			base,                    // freeze
+			base,                    // reconcile
+			base,                    // precommit
+			base,                    // commit derivation
+			base.Add(2*time.Minute), // immediately before rename
+		)
+		lifecycle, disposable := verifiedContentLifecycle(t, clock, base.Add(time.Minute))
+		if _, err := lifecycle.PreCommit(); err != nil {
+			t.Fatal(err)
+		}
+		if err := lifecycle.Commit(); !errors.Is(err, ErrContractExpired) {
+			t.Fatalf("commit error = %v, want replacement-time expiry", err)
+		}
+		if lifecycle.State() != StateRejected {
+			t.Fatalf("state = %s, want REJECTED", lifecycle.State())
+		}
+		assertRealREADME(t, disposable, "before", 0o600)
+		assertNoLifecycleStaging(t, disposable.RealWorkspace())
+	})
+	t.Run("rolls back during apply", func(t *testing.T) {
+		clock := sequenceClock(t,
+			base,                   // manifest
+			base,                   // prepare
+			base,                   // start
+			base,                   // freeze
+			base,                   // reconcile
+			base,                   // precommit
+			base,                   // commit derivation
+			base.Add(-time.Second), // immediately before rename
+		)
+		lifecycle, disposable := verifiedContentLifecycle(t, clock, base.Add(time.Hour))
+		if _, err := lifecycle.PreCommit(); err != nil {
+			t.Fatal(err)
+		}
+		if err := lifecycle.Commit(); !errors.Is(err, ErrClockRollback) {
+			t.Fatalf("commit error = %v, want replacement-time rollback", err)
+		}
+		if lifecycle.State() != StateFailed {
+			t.Fatalf("state = %s, want FAILED", lifecycle.State())
+		}
+		assertRealREADME(t, disposable, "before", 0o600)
+		assertNoLifecycleStaging(t, disposable.RealWorkspace())
+	})
+}
+
+func TestCommitFailureStateCleanupAndUncertaintyDominateSemanticOutcome(t *testing.T) {
+	cleanup := fmt.Errorf("%w: remove staging", realcommit.ErrCleanup)
+	for _, test := range []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "expired plus cleanup failure",
+			err:  errors.Join(ErrContractExpired, cleanup),
+		},
+		{
+			name: "conflict plus cleanup failure",
+			err:  errors.Join(ErrRealStateConflict, cleanup),
+		},
+		{
+			name: "conflict plus revalidation uncertainty",
+			err:  errors.Join(realcommit.ErrConflict, realcommit.ErrRevalidation),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if state := commitFailureState(test.err); state != StateFailed {
+				t.Fatalf("state = %s, want FAILED for %v", state, test.err)
+			}
+		})
+	}
+	if state := commitFailureState(ErrContractExpired); state != StateRejected {
+		t.Fatalf("clean expiry state = %s, want REJECTED", state)
+	}
+	if state := commitFailureState(realcommit.ErrConflict); state != StateConflicted {
+		t.Fatalf("clean conflict state = %s, want CONFLICTED", state)
+	}
+}
+
+func TestLifecycleRejectsTwoFileCommitPlanWithoutTouchingReality(t *testing.T) {
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	lifecycle, disposable := boundLifecycleWithSetup(t, func() time.Time { return now }, now.Add(time.Hour), func(t *testing.T, real string) {
+		writeLifecycleFile(t, real, "README.md", "before", 0o600)
+		writeLifecycleFile(t, real, "notes.txt", "notes before", 0o640)
+	}, "/workspace/README.md", "/workspace/notes.txt")
+	runToStarted(t, lifecycle)
+	writeLifecycleFile(t, disposable.Path(), "README.md", "after", 0o666)
+	writeLifecycleFile(t, disposable.Path(), "notes.txt", "notes after", 0o666)
+	if err := lifecycle.Freeze(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	decision, err := lifecycle.Reconcile()
 	if err != nil {
 		t.Fatal(err)
 	}
+	if decision.Allowed || lifecycle.State() != StateRejected {
+		t.Fatalf("decision = %#v, state = %s", decision, lifecycle.State())
+	}
+	assertRealREADME(t, disposable, "before", 0o600)
+	contents, err := os.ReadFile(filepath.Join(disposable.RealWorkspace(), "notes.txt"))
+	if err != nil || string(contents) != "notes before" {
+		t.Fatalf("real notes = %q, %v", contents, err)
+	}
+}
+
+func verifiedContentLifecycle(t *testing.T, now func() time.Time, expires time.Time) (*Lifecycle, *workspace.Disposable) {
+	t.Helper()
+	lifecycle, disposable := boundLifecycle(t, now, expires, "/workspace/README.md")
+	runToStarted(t, lifecycle)
+	if err := os.WriteFile(filepath.Join(disposable.Path(), "README.md"), []byte("authorized update"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	freezeAndVerify(t, lifecycle)
+	return lifecycle, disposable
+}
+
+func runToStarted(t *testing.T, lifecycle *Lifecycle) {
+	t.Helper()
+	if err := lifecycle.Prepare(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func freezeAndVerify(t *testing.T, lifecycle *Lifecycle) {
+	t.Helper()
+	if err := lifecycle.Freeze(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	decision, err := lifecycle.Reconcile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !decision.Allowed || lifecycle.State() != StateVerified {
+		t.Fatalf("decision = %#v, state = %s", decision, lifecycle.State())
+	}
+}
+
+func assertRealREADME(t *testing.T, disposable *workspace.Disposable, contents string, mode os.FileMode) {
+	t.Helper()
+	path := filepath.Join(disposable.RealWorkspace(), "README.md")
+	observed, err := os.ReadFile(path)
+	if err != nil || string(observed) != contents {
+		t.Fatalf("real README = %q, %v", observed, err)
+	}
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode().Perm() != mode {
+		t.Fatalf("real README mode = %v, %v", info, err)
+	}
+}
+
+func assertNoLifecycleStaging(t *testing.T, root string) {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(root, workspace.CommitStagingPrefix+"*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("commit staging remains after denied replacement: %v", matches)
+	}
+}
+
+func frozenLifecycle(t *testing.T) (*Lifecycle, *workspace.Disposable) {
+	t.Helper()
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	lifecycle, disposable := boundLifecycle(t, func() time.Time { return now }, now.Add(time.Hour))
 	if err := lifecycle.Prepare(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +622,83 @@ func frozenLifecycle(t *testing.T) (*Lifecycle, string, *tree.Snapshot) {
 	if err := lifecycle.Freeze(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	return lifecycle, workspace, baseline
+	return lifecycle, disposable
+}
+
+func boundLifecycle(t *testing.T, now func() time.Time, expires time.Time, allow ...string) (*Lifecycle, *workspace.Disposable) {
+	t.Helper()
+	return boundLifecycleWithSetup(t, now, expires, func(t *testing.T, real string) {
+		writeLifecycleFile(t, real, "README.md", "before", 0o600)
+	}, allow...)
+}
+
+func boundLifecycleWithSetup(t *testing.T, now func() time.Time, expires time.Time, setup func(*testing.T, string), allow ...string) (*Lifecycle, *workspace.Disposable) {
+	t.Helper()
+	real := lifecycleRealWorkspace(t)
+	setup(t, real)
+	disposable, err := workspace.Prepare(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := disposable.Cleanup(); err != nil {
+			t.Errorf("cleanup disposable: %v", err)
+		}
+	})
+	binding, err := disposable.Binding()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub := &sandboxStub{
+		real:       binding.RealWorkspace(),
+		disposable: binding.DisposableWorkspace(),
+		token:      binding.Token(),
+	}
+	manifest, err := NewRunManifest(lifecycleContract(t, expires, allow...), binding, stub, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifecycle, err := NewBoundLifecycle(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return lifecycle, disposable
+}
+
+func writeLifecycleFile(t *testing.T, root, relative, contents string, mode os.FileMode) {
+	t.Helper()
+	path := filepath.Join(root, relative)
+	if err := os.WriteFile(path, []byte(contents), mode); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func lifecycleRealWorkspace(t *testing.T) string {
+	t.Helper()
+	base, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := os.MkdirTemp(base, ".mirage-lifecycle-real-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	absolute, err := filepath.Abs(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(absolute); err != nil {
+			t.Errorf("cleanup real fixture: %v", err)
+		}
+	})
+	return absolute
 }
 
 func sequenceClock(t *testing.T, readings ...time.Time) func() time.Time {

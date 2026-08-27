@@ -485,8 +485,8 @@ itself.
 
 TIME-001 gives each run one trusted wall-clock authority. The mediated M3
 coordinator and M4 hostile lifecycle use the same trusted-time implementation;
-the current prototypes are separate coordinators, and the M4.3 run manifest
-must bind one authority when they are combined. It records the greatest UTC
+the current prototypes are separate coordinators. The M4.3 hostile lifecycle
+binds one clock object into its immutable run manifest. It records the greatest UTC
 wall time observed at run/lifecycle creation, effect authorization, event
 append, runtime prepare, start, freeze, reconciliation, verification, and
 commit where those stages exist. Equal readings are valid; an earlier reading
@@ -698,7 +698,13 @@ RECONCILING
     ↓
 VERIFIED
     ↓
-COMMITTED / REJECTED / FAILED
+PRECOMMITTING
+    ↓
+COMMIT_READY
+    ↓
+COMMITTING
+    ↓
+COMMITTED / CONFLICTED / REJECTED / FAILED
 ```
 
 `FROZEN` is reachable only after the trusted sandbox backend proves the
@@ -707,9 +713,10 @@ implements lifecycle through this freeze proof. M4.2 adds a bounded no-follow
 tree scanner, canonical baseline-to-final mutations, exact contract
 verification, and a plan identity bound to the contract. Acquisition
 uncertainty becomes `FAILED`, established denial becomes `REJECTED`, and only a
-fully authorized plan reaches `VERIFIED`. `COMMITTED` remains unreachable until
-the later real-workspace freshness and exact-plan application slice. The
-runtime is disposable. Durable truth lives outside it.
+fully authorized plan reaches `VERIFIED`. M4.3 adds the separately reviewed,
+single-existing-file content commit described in section 11.5. All other
+mutation shapes remain non-committable. The runtime is disposable. Durable
+truth lives outside it.
 
 ---
 
@@ -793,6 +800,51 @@ Delete the overlay. Real state remains untouched.
 ## 11.5 Commit
 
 Apply only the approved normalized diff after resource preconditions are revalidated.
+
+The M4.3 hostile-runtime slice binds the immutable contract, shared trusted
+clock, real baseline, permission-normalized disposable baseline, physical
+workspace identity, and normalized sandbox configuration into one run
+manifest before hostile execution. Reconciliation authority binds that
+manifest, the contract hash, and the verified shadow plan hash. Contract v1
+`WRITE` is narrowed for this slice to exactly one content-only `MODIFY` of one
+existing independent regular file. `CREATE`, `DELETE`, `MODE_CHANGE`, symlink,
+hard-link, special-object, root-mode, marker, zero-change, and multi-change
+plans cannot reach the real commit path. Source setuid, setgid, and sticky mode
+bits are unsupported and rejected instead of being normalized away. A source
+tree containing an unresolved `.mirage-commit-*` artifact also fails closed and
+requires explicit recovery before a later run can start.
+
+Before precommit and again immediately before apply, Mirage re-observes the
+complete supported real tree against its distinct real baseline, re-observes
+the disposable tree against the verified final identity, and recomputes the
+shadow plan hash. The applier then independently reopens the one real target,
+checks its content digest and real permission mode, creates a same-directory
+staging file only inside the trusted commit phase, writes the exact plan-bound
+bytes, restores the real baseline permission mode, and revalidates the target
+again immediately before same-directory replacement. After that work, the
+authority-bearing lifecycle observes trusted time and rechecks contract expiry,
+manifest identity, decision authority, and real-plan binding at the last
+possible point before rename. A real mismatch is
+`CONFLICTED`; expired or changed authority/shadow evidence is `REJECTED`;
+acquisition uncertainty is `FAILED`. These paths do not replace the target.
+
+M4.3 preserves regular-file content and permission mode only. It does not
+preserve or authorize ownership, ACLs, extended attributes, inode identity,
+timestamps, sparse layout, or other filesystem metadata. It does not implement
+multi-file atomicity, a durable commit journal, directory `fsync`, or crash
+recovery. Cleanup failure can leave a Mirage-named staging artifact, although
+the target remains unmodified; such a run is `FAILED` and never reported as
+committed. A later workspace preparation rejects that unresolved artifact
+rather than copying it into another sandbox.
+
+The trusted-host assumption remains material. A non-cooperating host process
+can still race the complete-tree scan, targeted revalidation, staging, and
+final rename; shadow changes after the last revalidation cannot change the
+already derived plan bytes, but can invalidate the claim that the shadow stayed
+frozen. Same-directory rename provides an atomic directory-entry replacement
+on the supported Linux filesystems, not an atomic compare-and-swap with the
+earlier observations. M4.3 narrows these windows and binds what is applied; it
+does not eliminate them.
 
 Inside the trusted `ApplyCommit` phase, M2 prepares the replacement in the real
 file's directory, then re-observes the real file immediately before

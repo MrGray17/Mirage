@@ -68,10 +68,6 @@ func run(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return errors.Join(err, disposable.Cleanup())
 	}
-	lifecycle, err := hostileruntime.NewLifecycle(launcher)
-	if err != nil {
-		return errors.Join(err, disposable.Cleanup())
-	}
 	contractIssuedAt := time.Now().UTC()
 	contract, err := contracts.New(contracts.Spec{
 		Version:   contracts.VersionV1,
@@ -83,7 +79,19 @@ func run(args []string, stdout, stderr io.Writer) error {
 		}},
 	})
 	if err != nil {
-		return errors.Join(err, cleanupRuntime(lifecycle, disposable))
+		return errors.Join(err, disposable.Cleanup())
+	}
+	workspaceBinding, err := disposable.Binding()
+	if err != nil {
+		return errors.Join(err, disposable.Cleanup())
+	}
+	manifest, err := hostileruntime.NewRunManifest(contract, workspaceBinding, launcher, time.Now)
+	if err != nil {
+		return errors.Join(err, disposable.Cleanup())
+	}
+	lifecycle, err := hostileruntime.NewBoundLifecycle(manifest)
+	if err != nil {
+		return errors.Join(err, disposable.Cleanup())
 	}
 
 	commandCtx, cancelSignal := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -128,7 +136,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "runtime=%s process_tree=stopped\n", lifecycle.State())
 
-	decision, err := lifecycle.Reconcile(disposable.Baseline(), disposable.Path(), contract)
+	decision, err := lifecycle.Reconcile()
 	if err != nil {
 		return errors.Join(err, cleanupRuntime(lifecycle, disposable))
 	}
@@ -138,8 +146,9 @@ func run(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stdout, "violation operation=%s resource=%s rule=%s\n", violation.Operation, violation.Resource, violation.RuleID)
 	}
 	if decision.Allowed {
-		// M4.2 can verify and bind a plan, but the real-tree commit phase remains
-		// deliberately absent. A verified fixture is still explicitly rejected.
+		// The hostile-fixture command is an attack/rejection demonstration, not
+		// an operator commit interface. M4.3 commit authority is exercised only
+		// by a bound lifecycle whose verified plan meets the single-file slice.
 		if err := lifecycle.Reject(); err != nil {
 			return errors.Join(err, cleanupRuntime(lifecycle, disposable))
 		}
@@ -147,7 +156,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	if err := cleanupRuntime(lifecycle, disposable); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "runtime=%s commit=disabled reason=m4.2-has-no-real-workspace-commit\n", lifecycle.State())
+	fmt.Fprintf(stdout, "runtime=%s commit=disabled reason=hostile-fixture-is-rejection-only\n", lifecycle.State())
 	return nil
 }
 

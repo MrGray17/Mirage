@@ -25,6 +25,7 @@ type Violation struct {
 
 type Decision struct {
 	Allowed       bool
+	ManifestHash  string
 	ContractHash  string
 	PlanHash      string
 	AuthorityHash string
@@ -35,12 +36,19 @@ func (d Decision) Violations() []Violation {
 	return append([]Violation(nil), d.violations...)
 }
 
+func (d Decision) BoundTo(manifestHash, contractHash, planHash string) bool {
+	return d.ManifestHash == manifestHash &&
+		d.ContractHash == contractHash &&
+		d.PlanHash == planHash &&
+		d.AuthorityHash == authorityHash(manifestHash, contractHash, planHash)
+}
+
 // Verify scans the final frozen tree without exclusions, derives the complete
 // normalized mutation plan, and requires exact WRITE authority for every
 // mutation. A policy rejection is returned as a Decision, not as uncertainty.
-func Verify(baseline *tree.Snapshot, frozenWorkspace string, contract *contracts.Contract, at time.Time) (*tree.Plan, Decision, error) {
-	if baseline == nil || contract == nil || frozenWorkspace == "" {
-		return nil, Decision{}, fmt.Errorf("%w: baseline, workspace, and contract are required", ErrInvalidReconciliation)
+func Verify(manifestHash string, baseline *tree.Snapshot, frozenWorkspace string, contract *contracts.Contract, at time.Time) (*tree.Plan, Decision, error) {
+	if manifestHash == "" || baseline == nil || contract == nil || frozenWorkspace == "" {
+		return nil, Decision{}, fmt.Errorf("%w: manifest, baseline, workspace, and contract are required", ErrInvalidReconciliation)
 	}
 	if err := tree.ValidateBaseline(baseline); err != nil {
 		return nil, Decision{}, fmt.Errorf("%w: baseline: %v", ErrInvalidReconciliation, err)
@@ -54,10 +62,11 @@ func Verify(baseline *tree.Snapshot, frozenWorkspace string, contract *contracts
 		return nil, Decision{}, fmt.Errorf("diff frozen workspace: %w", err)
 	}
 	decision := Decision{
+		ManifestHash: manifestHash,
 		ContractHash: contract.Hash(),
 		PlanHash:     plan.Hash(),
 	}
-	decision.AuthorityHash = authorityHash(decision.ContractHash, decision.PlanHash)
+	decision.AuthorityHash = authorityHash(decision.ManifestHash, decision.ContractHash, decision.PlanHash)
 
 	if at.IsZero() {
 		decision.violations = append(decision.violations, Violation{
@@ -75,7 +84,8 @@ func Verify(baseline *tree.Snapshot, frozenWorkspace string, contract *contracts
 		return plan, decision, nil
 	}
 
-	for _, mutation := range plan.Mutations() {
+	mutations := plan.Mutations()
+	for _, mutation := range mutations {
 		if violation, denied := intrinsicViolation(mutation); denied {
 			decision.violations = append(decision.violations, violation)
 			continue
@@ -91,6 +101,13 @@ func Verify(baseline *tree.Snapshot, frozenWorkspace string, contract *contracts
 			})
 		}
 	}
+	if len(mutations) != 1 {
+		decision.violations = append(decision.violations, Violation{
+			RuleID:   "filesystem.single_modify_required",
+			Reason:   "M4.3 requires exactly one existing regular-file content modification",
+			Evidence: fmt.Sprintf("mutations=%d", len(mutations)),
+		})
+	}
 	decision.Allowed = len(decision.violations) == 0
 	return plan, decision, nil
 }
@@ -104,18 +121,22 @@ func intrinsicViolation(mutation tree.Mutation) (Violation, bool) {
 		return violation, true
 	case mutation.Operation == tree.OperationSymlink:
 		violation.RuleID = "filesystem.symlink_denied"
-		violation.Reason = "symlinks are unsupported in the M4.2 commit model"
+		violation.Reason = "symlinks are unsupported in the M4 commit model"
 		return violation, true
 	case mutation.Operation == tree.OperationUnsupported:
 		violation.RuleID = "filesystem.unsupported_object"
 		violation.Reason = "hard links and special filesystem objects are unsupported"
+		return violation, true
+	case mutation.Operation != tree.OperationModify || mutation.BeforeKind != tree.KindFile || mutation.AfterKind != tree.KindFile || mutation.BeforeMode != mutation.AfterMode:
+		violation.RuleID = "filesystem.v1_write_content_modify_only"
+		violation.Reason = "contract v1 WRITE authorizes only content modification of an existing independent regular file"
 		return violation, true
 	default:
 		return Violation{}, false
 	}
 }
 
-func authorityHash(contractHash, planHash string) string {
-	digest := sha256.Sum256([]byte(contractHash + "\n" + planHash))
+func authorityHash(manifestHash, contractHash, planHash string) string {
+	digest := sha256.Sum256([]byte(manifestHash + "\n" + contractHash + "\n" + planHash))
 	return fmt.Sprintf("sha256:%x", digest)
 }
