@@ -23,6 +23,7 @@ var (
 	ErrInvalidPlan      = errors.New("invalid real commit plan")
 	ErrConflict         = errors.New("real commit baseline conflict")
 	ErrRevalidation     = errors.New("real commit revalidation failed")
+	ErrCleanup          = errors.New("real commit cleanup failed")
 	errObservedConflict = errors.New("real commit target changed")
 )
 
@@ -127,8 +128,8 @@ func Apply(plan *Plan, beforeReplace func() error) (returnErr error) {
 	replaced := false
 	defer func() {
 		closeErr := root.Close()
-		if !replaced {
-			returnErr = errors.Join(returnErr, closeErr)
+		if !replaced && closeErr != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("%w: close real workspace root: %v", ErrCleanup, closeErr))
 		}
 	}()
 
@@ -147,14 +148,14 @@ func Apply(plan *Plan, beforeReplace func() error) (returnErr error) {
 	defer func() {
 		if cleanup {
 			if err := root.Remove(temporary); err != nil && !errors.Is(err, os.ErrNotExist) {
-				returnErr = errors.Join(returnErr, fmt.Errorf("remove commit staging file: %w", err))
+				returnErr = errors.Join(returnErr, fmt.Errorf("%w: remove commit staging file: %v", ErrCleanup, err))
 			}
 		}
 	}()
 	defer func() {
 		closeErr := staged.Close()
-		if !replaced {
-			returnErr = errors.Join(returnErr, closeErr)
+		if !replaced && closeErr != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("%w: close commit staging file: %v", ErrCleanup, closeErr))
 		}
 	}()
 	written, err := staged.Write(plan.contents)

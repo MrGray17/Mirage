@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -62,6 +63,40 @@ func TestApplyCallbackFailureLeavesTargetUnchangedAndCleansStaging(t *testing.T)
 		t.Fatalf("callback failure changed target: %q, %v", contents, readErr)
 	}
 	assertNoStaging(t, root)
+}
+
+func TestApplyReportsCleanupFailureAlongsideAuthorityDenial(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("directory permission cleanup failure requires Linux semantics")
+	}
+	root := t.TempDir()
+	target := filepath.Join(root, "README.md")
+	before := []byte("before")
+	if err := os.WriteFile(target, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plan := newTestPlan(t, root, before, []byte("authorized"), 0o600)
+	authorityErr := errors.New("contract expired at replacement")
+	err := Apply(plan, func() error {
+		if err := os.Chmod(root, 0o500); err != nil {
+			return fmt.Errorf("deny staging cleanup for test: %w", err)
+		}
+		return authorityErr
+	})
+	if restoreErr := os.Chmod(root, 0o700); restoreErr != nil {
+		t.Fatal(restoreErr)
+	}
+	if !errors.Is(err, authorityErr) || !errors.Is(err, ErrCleanup) {
+		t.Fatalf("apply error = %v, want authority denial plus cleanup failure", err)
+	}
+	contents, readErr := os.ReadFile(target)
+	if readErr != nil || string(contents) != string(before) {
+		t.Fatalf("cleanup failure changed target: %q, %v", contents, readErr)
+	}
+	matches, globErr := filepath.Glob(filepath.Join(root, ".mirage-commit-*.tmp"))
+	if globErr != nil || len(matches) != 1 {
+		t.Fatalf("orphan staging evidence = %v, %v", matches, globErr)
+	}
 }
 
 func TestApplyRejectsChangedRealTargetWithoutMutation(t *testing.T) {

@@ -461,6 +461,8 @@ func snapshotEntry(snapshot *tree.Snapshot, resource string) (tree.Entry, bool) 
 
 func commitFailureState(err error) State {
 	switch {
+	case errors.Is(err, realcommit.ErrCleanup), errors.Is(err, realcommit.ErrRevalidation):
+		return StateFailed
 	case errors.Is(err, ErrRealStateConflict), errors.Is(err, realcommit.ErrConflict):
 		return StateConflicted
 	case errors.Is(err, ErrContractExpired), errors.Is(err, ErrShadowChanged), errors.Is(err, ErrCommitAuthority), errors.Is(err, ErrUnsupportedCommit):

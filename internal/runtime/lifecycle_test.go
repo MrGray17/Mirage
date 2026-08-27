@@ -3,12 +3,14 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/MrGray17/Mirage/internal/contracts"
+	"github.com/MrGray17/Mirage/internal/runtime/realcommit"
 	"github.com/MrGray17/Mirage/internal/runtime/workspace"
 )
 
@@ -487,6 +489,39 @@ func TestLifecycleRechecksTrustedTimeImmediatelyBeforeReplacement(t *testing.T) 
 		assertRealREADME(t, disposable, "before", 0o600)
 		assertNoLifecycleStaging(t, disposable.RealWorkspace())
 	})
+}
+
+func TestCommitFailureStateCleanupAndUncertaintyDominateSemanticOutcome(t *testing.T) {
+	cleanup := fmt.Errorf("%w: remove staging", realcommit.ErrCleanup)
+	for _, test := range []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "expired plus cleanup failure",
+			err:  errors.Join(ErrContractExpired, cleanup),
+		},
+		{
+			name: "conflict plus cleanup failure",
+			err:  errors.Join(ErrRealStateConflict, cleanup),
+		},
+		{
+			name: "conflict plus revalidation uncertainty",
+			err:  errors.Join(realcommit.ErrConflict, realcommit.ErrRevalidation),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if state := commitFailureState(test.err); state != StateFailed {
+				t.Fatalf("state = %s, want FAILED for %v", state, test.err)
+			}
+		})
+	}
+	if state := commitFailureState(ErrContractExpired); state != StateRejected {
+		t.Fatalf("clean expiry state = %s, want REJECTED", state)
+	}
+	if state := commitFailureState(realcommit.ErrConflict); state != StateConflicted {
+		t.Fatalf("clean conflict state = %s, want CONFLICTED", state)
+	}
 }
 
 func TestLifecycleRejectsTwoFileCommitPlanWithoutTouchingReality(t *testing.T) {

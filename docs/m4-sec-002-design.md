@@ -165,8 +165,9 @@ M4.3 resolves the approved gates with the smallest real mutation slice:
   exact plan-bound bytes;
 - observed real divergence becomes `CONFLICTED`; expiry or changed shadow/
   authority becomes `REJECTED`; acquisition uncertainty becomes `FAILED`.
-  None of those paths replaces the real target. A successful commit changes
-  only the authorized bytes and preserves the baseline permission mode.
+  None of those paths replaces the real target. Within the supported M4.3
+  state model, committed content is exactly the authorized bytes and the
+  baseline Unix permission mode is preserved.
 
 The exact supported metadata guarantee is content plus Unix permission mode
 for one regular file. M4.3 does not preserve ownership, ACLs, xattrs, inode,
