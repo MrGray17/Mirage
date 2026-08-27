@@ -24,7 +24,19 @@ func TestRootlessDockerContainsHostileFixture(t *testing.T) {
 		t.Fatal("MIRAGE_HOSTILE_IMAGE must name a preloaded digest-pinned image")
 	}
 
-	real := t.TempDir()
+	real, err := os.MkdirTemp(".", ".mirage-live-real-")
+	if err != nil {
+		t.Fatalf("create live real workspace: %v", err)
+	}
+	real, err = filepath.Abs(real)
+	if err != nil {
+		t.Fatalf("resolve live real workspace: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(real); err != nil {
+			t.Errorf("remove live real workspace: %v", err)
+		}
+	})
 	realREADME := filepath.Join(real, "README.md")
 	if err := os.WriteFile(realREADME, []byte("trusted real contents\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -82,7 +94,8 @@ func TestRootlessDockerContainsHostileFixture(t *testing.T) {
 	var report []byte
 	for time.Now().Before(deadline) {
 		report, _ = os.ReadFile(reportPath)
-		if strings.Contains(string(report), "child_pid=") && strings.Contains(string(report), "network=") {
+		if reportHasPrefix(report, "child_pid=") &&
+			(reportHasLine(report, "network_probe=READY") || reportHasLine(report, "network_probe=UNAVAILABLE")) {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -106,17 +119,24 @@ func TestRootlessDockerContainsHostileFixture(t *testing.T) {
 		"readme_modify=attempted",
 		"forbidden_create=attempted",
 		"path_escape=blocked",
+		"host_home_probe=READY",
 		"host_home=absent",
 		"dot_env=absent",
 		"docker_socket=absent",
-		"network=blocked",
+		"network_probe=READY",
+		"network=BLOCKED",
 		"symlink_create=attempted",
-		"child_pid=",
 	}
 	for _, evidence := range requiredEvidence {
-		if !strings.Contains(string(report), evidence) {
+		if !reportHasLine(report, evidence) {
 			t.Errorf("hostile report lacks %q:\n%s", evidence, report)
 		}
+	}
+	if reportHasLine(report, "network_probe=UNAVAILABLE") {
+		t.Errorf("hostile image did not provide the required network probe:\n%s", report)
+	}
+	if !reportHasPrefix(report, "child_pid=") {
+		t.Errorf("hostile report lacks a child process identity:\n%s", report)
 	}
 	if info, err := os.Lstat(filepath.Join(disposable.Path(), "hostile-link")); err != nil || info.Mode()&os.ModeSymlink == 0 {
 		t.Errorf("hostile symlink not present after freeze: %v", err)
@@ -145,4 +165,22 @@ func TestRootlessDockerContainsHostileFixture(t *testing.T) {
 		t.Fatalf("cleanup workspace: %v", err)
 	}
 	cleaned = true
+}
+
+func reportHasLine(report []byte, wanted string) bool {
+	for _, line := range strings.Split(strings.TrimSpace(string(report)), "\n") {
+		if strings.TrimSpace(line) == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func reportHasPrefix(report []byte, prefix string) bool {
+	for _, line := range strings.Split(strings.TrimSpace(string(report)), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), prefix) {
+			return true
+		}
+	}
+	return false
 }

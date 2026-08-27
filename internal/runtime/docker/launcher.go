@@ -347,7 +347,7 @@ func (l *Launcher) verifyDaemon(ctx context.Context) error {
 }
 
 func (l *Launcher) createArguments() []string {
-	mount := "type=bind,src=" + l.config.Workspace + ",dst=" + containerWorkspacePath + ",rw,bind-propagation=rprivate"
+	mount := "type=bind,src=" + l.config.Workspace + ",dst=" + containerWorkspacePath + ",bind-propagation=rprivate"
 	return []string{
 		"create",
 		"--name", l.config.ContainerName,
@@ -356,12 +356,12 @@ func (l *Launcher) createArguments() []string {
 		"--workdir", containerWorkspacePath,
 		"--read-only",
 		"--network", "none",
-		"--pid", "private",
 		"--ipc", "private",
 		"--cgroupns", "private",
 		"--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges=true",
 		"--security-opt", "seccomp=builtin",
+		"--no-healthcheck",
 		"--pids-limit", strconv.FormatInt(l.config.PIDLimit, 10),
 		"--memory", strconv.FormatInt(l.config.MemoryBytes, 10),
 		"--memory-swap", strconv.FormatInt(l.config.MemoryBytes, 10),
@@ -397,14 +397,15 @@ func (l *Launcher) verifyContainer(ctx context.Context) error {
 	}
 	if inspected.Config.Image != l.config.Image ||
 		len(inspected.Config.Entrypoint) != 1 || inspected.Config.Entrypoint[0] != "/bin/sh" ||
-		len(inspected.Config.Cmd) != 2 || inspected.Config.Cmd[0] != "-c" || inspected.Config.Cmd[1] != hostilefixture.Script {
+		len(inspected.Config.Cmd) != 2 || inspected.Config.Cmd[0] != "-c" || inspected.Config.Cmd[1] != hostilefixture.Script ||
+		inspected.Config.Healthcheck == nil || len(inspected.Config.Healthcheck.Test) != 1 || inspected.Config.Healthcheck.Test[0] != "NONE" {
 		return fmt.Errorf("%w: hostile image or fixture command changed", ErrIsolation)
 	}
-	if host.Privileged || !host.ReadonlyRootfs || host.NetworkMode != "none" || host.PidMode != "private" || host.IpcMode != "private" || host.CgroupnsMode != "private" {
+	if host.Privileged || !host.ReadonlyRootfs || host.NetworkMode != "none" || !privatePIDMode(host.PidMode) || host.IpcMode != "private" || host.CgroupnsMode != "private" {
 		return fmt.Errorf("%w: namespace or root-filesystem isolation changed", ErrIsolation)
 	}
 	if !containsFold(host.CapDrop, "ALL") ||
-		!containsSecurityOption(host.SecurityOpt, "no-new-privileges") ||
+		!hasNoNewPrivileges(host.SecurityOpt) ||
 		!containsExactFold(host.SecurityOpt, "seccomp=builtin") {
 		return fmt.Errorf("%w: capability or privilege isolation changed", ErrIsolation)
 	}
@@ -513,11 +514,14 @@ type daemonInfo struct {
 
 type containerInspect struct {
 	Config struct {
-		User       string   `json:"User"`
-		WorkingDir string   `json:"WorkingDir"`
-		Image      string   `json:"Image"`
-		Entrypoint []string `json:"Entrypoint"`
-		Cmd        []string `json:"Cmd"`
+		User        string   `json:"User"`
+		WorkingDir  string   `json:"WorkingDir"`
+		Image       string   `json:"Image"`
+		Entrypoint  []string `json:"Entrypoint"`
+		Cmd         []string `json:"Cmd"`
+		Healthcheck *struct {
+			Test []string `json:"Test"`
+		} `json:"Healthcheck"`
 	} `json:"Config"`
 	HostConfig struct {
 		ReadonlyRootfs  bool              `json:"ReadonlyRootfs"`
@@ -716,6 +720,21 @@ func containsExactFold(values []string, wanted string) bool {
 		}
 	}
 	return false
+}
+
+func hasNoNewPrivileges(options []string) bool {
+	for _, option := range options {
+		switch strings.ToLower(strings.TrimSpace(option)) {
+		case "no-new-privileges", "no-new-privileges=true", "no-new-privileges:true":
+			return true
+		}
+	}
+	return false
+}
+
+func privatePIDMode(mode string) bool {
+	mode = strings.TrimSpace(mode)
+	return mode == "" || strings.EqualFold(mode, "private")
 }
 
 func containsSecurityOption(options []string, wanted string) bool {

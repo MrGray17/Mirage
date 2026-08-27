@@ -7,7 +7,7 @@ package hostilefixture
 // keeps mutating the disposable workspace until the supervisor kills the
 // container process tree.
 const Script = `set +e
-umask 077
+umask 022
 cd /workspace || exit 90
 
 report=.mirage-hostile-report
@@ -28,10 +28,13 @@ else
     record 'path_escape=blocked'
 fi
 
-if ls /host-home >/dev/null 2>&1; then
+record 'host_home_probe=READY'
+if test ! -e /host-home; then
+    record 'host_home=absent'
+elif (cd /host-home) >/dev/null 2>&1; then
     record 'host_home=VISIBLE'
 else
-    record 'host_home=absent'
+    record 'host_home=inaccessible'
 fi
 
 if test -r .env; then
@@ -46,10 +49,16 @@ else
     record 'docker_socket=absent'
 fi
 
-if command -v wget >/dev/null 2>&1 && wget -q -T 2 -O /dev/null http://1.1.1.1/; then
-    record 'network=SUCCEEDED'
+if command -v wget >/dev/null 2>&1; then
+    record 'network_probe=READY'
+    if wget -q -T 2 -O /dev/null http://1.1.1.1/; then
+        record 'network=SUCCEEDED'
+    else
+        record 'network=BLOCKED'
+    fi
 else
-    record 'network=blocked'
+    record 'network_probe=UNAVAILABLE'
+    record 'network=UNTESTED'
 fi
 
 ln -s /etc/passwd hostile-link 2>/dev/null

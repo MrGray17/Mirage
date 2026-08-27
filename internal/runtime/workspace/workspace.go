@@ -22,6 +22,7 @@ const managedFile = "README.md"
 var (
 	ErrInvalidSource = errors.New("invalid M4.1 source workspace")
 	ErrUnsafeSource  = errors.New("unsafe M4.1 source resource")
+	ErrUnsafeTemp    = errors.New("unsafe M4.1 temporary root")
 	ErrCleanup       = errors.New("M4.1 disposable workspace cleanup failed")
 )
 
@@ -39,9 +40,25 @@ type Disposable struct {
 }
 
 func Prepare(realWorkspace string) (*Disposable, error) {
+	return prepareAtTempRoot(realWorkspace, os.TempDir())
+}
+
+func prepareAtTempRoot(realWorkspace, tempRoot string) (*Disposable, error) {
 	real, err := resolveSource(realWorkspace)
 	if err != nil {
 		return nil, err
+	}
+	temporary, err := resolveTempRoot(tempRoot)
+	if err != nil {
+		return nil, err
+	}
+	if pathsOverlap(real, temporary) {
+		return nil, fmt.Errorf(
+			"%w: real workspace %q and temporary root %q overlap",
+			ErrUnsafeTemp,
+			real,
+			temporary,
+		)
 	}
 	contents, err := readBoundedRegularFile(real)
 	if err != nil {
@@ -52,7 +69,7 @@ func Prepare(realWorkspace string) (*Disposable, error) {
 		return nil, fmt.Errorf("create disposable workspace token: %w", err)
 	}
 
-	outer, err := os.MkdirTemp("", "mirage-m41-")
+	outer, err := os.MkdirTemp(temporary, "mirage-m41-")
 	if err != nil {
 		return nil, fmt.Errorf("create protected disposable root: %w", err)
 	}
@@ -134,7 +151,42 @@ func resolveSource(path string) (string, error) {
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return "", fmt.Errorf("%w: path is not a non-symlink directory", ErrInvalidSource)
 	}
-	return absolute, nil
+	resolved, err := physicalPath(absolute)
+	if err != nil {
+		return "", fmt.Errorf("%w: resolve physical path: %w", ErrInvalidSource, err)
+	}
+	resolved = filepath.Clean(resolved)
+	info, err = os.Lstat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("%w: inspect physical path: %w", ErrInvalidSource, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return "", fmt.Errorf("%w: physical path is not a directory", ErrInvalidSource)
+	}
+	return resolved, nil
+}
+
+func resolveTempRoot(path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", fmt.Errorf("%w: path is empty", ErrUnsafeTemp)
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("%w: resolve path: %w", ErrUnsafeTemp, err)
+	}
+	resolved, err := physicalPath(filepath.Clean(absolute))
+	if err != nil {
+		return "", fmt.Errorf("%w: resolve physical path: %w", ErrUnsafeTemp, err)
+	}
+	resolved = filepath.Clean(resolved)
+	info, err := os.Lstat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("%w: inspect physical path: %w", ErrUnsafeTemp, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return "", fmt.Errorf("%w: physical path is not a directory", ErrUnsafeTemp)
+	}
+	return resolved, nil
 }
 
 func readBoundedRegularFile(workspace string) (contents []byte, returnErr error) {

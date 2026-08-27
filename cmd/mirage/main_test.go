@@ -36,7 +36,7 @@ func TestRunFailsClosedAndCleansWorkspaceOnNonLinuxHost(t *testing.T) {
 	if runtime.GOOS == "linux" {
 		t.Skip("non-Linux fail-closed behavior")
 	}
-	real := t.TempDir()
+	real := mainTestWorkspace(t)
 	if err := os.WriteFile(filepath.Join(real, "README.md"), []byte("real\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -53,6 +53,24 @@ func TestRunFailsClosedAndCleansWorkspaceOnNonLinuxHost(t *testing.T) {
 			t.Errorf("failed launch leaked disposable workspace %s", path)
 		}
 	}
+}
+
+func mainTestWorkspace(t *testing.T) string {
+	t.Helper()
+	directory, err := os.MkdirTemp(".", ".mirage-main-test-")
+	if err != nil {
+		t.Fatalf("create main test workspace: %v", err)
+	}
+	absolute, err := filepath.Abs(directory)
+	if err != nil {
+		t.Fatalf("resolve main test workspace: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(absolute); err != nil {
+			t.Errorf("remove main test workspace: %v", err)
+		}
+	})
+	return absolute
 }
 
 func m41TemporaryDirectories(t *testing.T) map[string]struct{} {

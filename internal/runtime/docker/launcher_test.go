@@ -168,12 +168,12 @@ func TestPrepareCreatesAndRevalidatesLockedDownContainer(t *testing.T) {
 		{"--user", defaultContainerUser},
 		{"--read-only"},
 		{"--network", "none"},
-		{"--pid", "private"},
 		{"--ipc", "private"},
 		{"--cgroupns", "private"},
 		{"--cap-drop", "ALL"},
 		{"--security-opt", "no-new-privileges=true"},
 		{"--security-opt", "seccomp=builtin"},
+		{"--no-healthcheck"},
 		{"--pids-limit", "64"},
 		{"--memory", "268435456"},
 		{"--memory-swap", "268435456"},
@@ -188,6 +188,14 @@ func TestPrepareCreatesAndRevalidatesLockedDownContainer(t *testing.T) {
 	}
 	if strings.Count(strings.Join(create, "\x00"), "type=bind,src=") != 1 {
 		t.Fatalf("create command has unexpected bind mounts: %v", create)
+	}
+	for _, argument := range create {
+		if strings.Contains(argument, ",rw,") {
+			t.Fatalf("create command contains invalid bare rw mount field: %v", create)
+		}
+	}
+	if containsSequence(create, []string{"--pid"}) {
+		t.Fatalf("create command overrides Docker's private PID default: %v", create)
 	}
 }
 
@@ -218,6 +226,29 @@ func TestPrepareRemovesContainerWhenEffectiveIsolationDiffers(t *testing.T) {
 	}
 }
 
+func TestPrepareRejectsSharedPIDNamespace(t *testing.T) {
+	config := dockerTestConfig(t)
+	inspect := secureContainerInspect(t, config)
+	inspect.HostConfig.PidMode = "host"
+	runner := &fakeRunner{responses: []fakeResponse{
+		{output: []byte("rootless\n")},
+		{output: []byte(`"unix:///run/user/1000/docker.sock"`)},
+		{output: mustJSON(t, secureDaemonInfo())},
+		{output: []byte(`"sha256:image"`)},
+		{output: nil},
+		{output: []byte("0123456789ab\n")},
+		{output: mustJSON(t, inspect)},
+		{output: []byte("0123456789ab\n")},
+	}}
+	launcher, err := newWithRunner(config, runner)
+	if err != nil {
+		t.Fatalf("new launcher: %v", err)
+	}
+	if err := launcher.Prepare(context.Background()); !errors.Is(err, ErrIsolation) {
+		t.Fatalf("prepare error = %v", err)
+	}
+}
+
 func TestPrepareRejectsUnconfinedEffectiveSeccomp(t *testing.T) {
 	config := dockerTestConfig(t)
 	inspect := secureContainerInspect(t, config)
@@ -242,6 +273,81 @@ func TestPrepareRejectsUnconfinedEffectiveSeccomp(t *testing.T) {
 	last := runner.calls[len(runner.calls)-1]
 	if !containsSequence(last, []string{"rm", "--force", "0123456789ab"}) {
 		t.Fatalf("cleanup call = %v", last)
+	}
+}
+
+func TestPrepareRejectsDisabledEffectiveNoNewPrivileges(t *testing.T) {
+	for _, disabled := range []string{"no-new-privileges=false", "no-new-privileges:false"} {
+		t.Run(disabled, func(t *testing.T) {
+			config := dockerTestConfig(t)
+			inspect := secureContainerInspect(t, config)
+			inspect.HostConfig.SecurityOpt = []string{disabled, "seccomp=builtin"}
+			runner := &fakeRunner{responses: []fakeResponse{
+				{output: []byte("rootless\n")},
+				{output: []byte(`"unix:///run/user/1000/docker.sock"`)},
+				{output: mustJSON(t, secureDaemonInfo())},
+				{output: []byte(`"sha256:image"`)},
+				{output: nil},
+				{output: []byte("0123456789ab\n")},
+				{output: mustJSON(t, inspect)},
+				{output: []byte("0123456789ab\n")},
+			}}
+			launcher, err := newWithRunner(config, runner)
+			if err != nil {
+				t.Fatalf("new launcher: %v", err)
+			}
+			if err := launcher.Prepare(context.Background()); !errors.Is(err, ErrIsolation) {
+				t.Fatalf("prepare error = %v", err)
+			}
+			last := runner.calls[len(runner.calls)-1]
+			if !containsSequence(last, []string{"rm", "--force", "0123456789ab"}) {
+				t.Fatalf("cleanup call = %v", last)
+			}
+		})
+	}
+}
+
+func TestHasNoNewPrivilegesAcceptsOnlyEnabledForms(t *testing.T) {
+	for _, enabled := range []string{
+		"no-new-privileges",
+		"no-new-privileges=true",
+		"no-new-privileges:true",
+	} {
+		if !hasNoNewPrivileges([]string{enabled}) {
+			t.Errorf("enabled form %q was rejected", enabled)
+		}
+	}
+	for _, disabled := range []string{
+		"no-new-privileges=false",
+		"no-new-privileges:false",
+		"no-new-privileges=",
+	} {
+		if hasNoNewPrivileges([]string{disabled}) {
+			t.Errorf("disabled form %q was accepted", disabled)
+		}
+	}
+}
+
+func TestPrepareRejectsEnabledImageHealthcheck(t *testing.T) {
+	config := dockerTestConfig(t)
+	inspect := secureContainerInspect(t, config)
+	inspect.Config.Healthcheck.Test = []string{"CMD-SHELL", "touch /workspace/healthcheck-ran"}
+	runner := &fakeRunner{responses: []fakeResponse{
+		{output: []byte("rootless\n")},
+		{output: []byte(`"unix:///run/user/1000/docker.sock"`)},
+		{output: mustJSON(t, secureDaemonInfo())},
+		{output: []byte(`"sha256:image"`)},
+		{output: nil},
+		{output: []byte("0123456789ab\n")},
+		{output: mustJSON(t, inspect)},
+		{output: []byte("0123456789ab\n")},
+	}}
+	launcher, err := newWithRunner(config, runner)
+	if err != nil {
+		t.Fatalf("new launcher: %v", err)
+	}
+	if err := launcher.Prepare(context.Background()); !errors.Is(err, ErrIsolation) {
+		t.Fatalf("prepare error = %v", err)
 	}
 }
 
@@ -384,9 +490,12 @@ func secureContainerInspect(t *testing.T, config Config) containerInspect {
 	inspected.Config.Image = normalized.Image
 	inspected.Config.Entrypoint = []string{"/bin/sh"}
 	inspected.Config.Cmd = []string{"-c", hostilefixture.Script}
+	inspected.Config.Healthcheck = &struct {
+		Test []string `json:"Test"`
+	}{Test: []string{"NONE"}}
 	inspected.HostConfig.ReadonlyRootfs = true
 	inspected.HostConfig.NetworkMode = "none"
-	inspected.HostConfig.PidMode = "private"
+	inspected.HostConfig.PidMode = ""
 	inspected.HostConfig.IpcMode = "private"
 	inspected.HostConfig.CgroupnsMode = "private"
 	inspected.HostConfig.CapDrop = []string{"ALL"}

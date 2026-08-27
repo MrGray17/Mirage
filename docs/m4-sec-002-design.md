@@ -20,11 +20,16 @@ The first runtime slice is intentionally non-committable:
   file, not inferred from requested container limits.
 - The hostile process runs as a numeric non-root UID/GID with a read-only root
   filesystem, no network, private PID/IPC/cgroup namespaces, all capabilities
-  dropped, `no-new-privileges`, and bounded CPU, memory, PIDs, file descriptors,
-  shared memory, temporary storage, runtime duration, and Docker log output.
+  dropped, a strictly revalidated enabled `no-new-privileges` value, and bounded
+  CPU, memory, PIDs, file descriptors, shared memory, temporary storage,
+  runtime duration, and Docker log output.
 - The launcher explicitly requests Docker's `seccomp=builtin` profile and
   rejects the effective container configuration unless that exact non-
   unconfined profile is present alongside `no-new-privileges`.
+- Image-defined healthchecks are disabled and the inspected healthcheck must be
+  exactly `NONE`, so only the trusted fixture command executes during M4.1.
+- The system temporary root and real workspace are resolved physically and
+  checked for overlap before any disposable file or directory is created.
 - Docker's effective container configuration is inspected before start. A
   mismatch aborts startup and removes the untrusted container if removal can be
   proven.
@@ -42,8 +47,20 @@ MIRAGE_HOSTILE_IMAGE=<repository@sha256:digest>
 go test -race -count=1 ./internal/runtime/docker
 ```
 
+Point-in-time M4.1 evidence: on 2026-08-27 the live test passed on WSL2 Linux
+with rootless Docker Engine 29.5.3, Go 1.24.4, and the preloaded Linux/amd64
+image `docker.io/library/busybox@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0`.
+This records one known fixture-image contract; it does not turn the opt-in test
+into a continuously exercised CI guarantee.
+
 Passing unit tests proves lifecycle and Docker-policy construction. It does not
 substitute for the opt-in live containment test.
+
+The live fixture reports probe readiness separately from probe outcome. The
+integration test rejects an image without `wget` instead of treating a missing
+network probe as evidence of containment. The inspected `NetworkMode=none`
+remains the authoritative network-isolation control; the attempted request is
+supplemental attack evidence.
 
 The writable bind-mounted workspace does not yet have a hard storage quota.
 That is acceptable only for the fixed, trusted M4.1 fixture, which performs
