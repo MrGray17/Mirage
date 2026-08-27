@@ -168,7 +168,7 @@ func TestRootlessDockerContainsHostileFixture(t *testing.T) {
 		t.Fatalf("path escape reached host filesystem: %v", err)
 	}
 
-	decision, err := lifecycle.Reconcile(disposable.Baseline(), disposable.Path(), contract, time.Now().UTC())
+	decision, err := lifecycle.Reconcile(disposable.Baseline(), disposable.Path(), contract)
 	if err != nil {
 		t.Fatalf("reconcile frozen runtime: %v", err)
 	}

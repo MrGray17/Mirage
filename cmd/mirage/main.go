@@ -72,12 +72,12 @@ func run(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return errors.Join(err, disposable.Cleanup())
 	}
-	trustedStart := time.Now().UTC()
+	contractIssuedAt := time.Now().UTC()
 	contract, err := contracts.New(contracts.Spec{
 		Version:   contracts.VersionV1,
 		RunID:     "hostile-fixture-" + disposable.Token()[:16],
 		ActorID:   "hostile-fixture",
-		ExpiresAt: trustedStart.Add(*duration + 3*operationTimeout),
+		ExpiresAt: contractIssuedAt.Add(*duration + 3*operationTimeout),
 		Filesystem: contracts.FilesystemPolicy{Write: contracts.AccessRules{
 			Allow: []string{"/workspace/README.md"},
 		}},
@@ -128,11 +128,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "runtime=%s process_tree=stopped\n", lifecycle.State())
 
-	verificationTime := time.Now().UTC()
-	if verificationTime.Before(trustedStart) {
-		verificationTime = time.Time{}
-	}
-	decision, err := lifecycle.Reconcile(disposable.Baseline(), disposable.Path(), contract, verificationTime)
+	decision, err := lifecycle.Reconcile(disposable.Baseline(), disposable.Path(), contract)
 	if err != nil {
 		return errors.Join(err, cleanupRuntime(lifecycle, disposable))
 	}

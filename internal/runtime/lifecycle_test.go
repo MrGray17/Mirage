@@ -91,7 +91,7 @@ func TestLifecycleFreezeFailureIsNeverFrozen(t *testing.T) {
 	if lifecycle.State() != StateFailed {
 		t.Fatalf("state = %s, want FAILED", lifecycle.State())
 	}
-	if _, err := lifecycle.Reconcile(nil, "", nil, time.Time{}); !errors.Is(err, ErrInvalidTransition) {
+	if _, err := lifecycle.Reconcile(nil, "", nil); !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("reconcile error = %v", err)
 	}
 }
@@ -112,18 +112,19 @@ func TestLifecycleStartFailureCannotBeReconciled(t *testing.T) {
 	if lifecycle.State() != StateFailed {
 		t.Fatalf("state = %s, want FAILED", lifecycle.State())
 	}
-	if _, err := lifecycle.Reconcile(nil, "", nil, time.Time{}); !errors.Is(err, ErrInvalidTransition) {
+	if _, err := lifecycle.Reconcile(nil, "", nil); !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("reconcile error = %v", err)
 	}
 }
 
 func TestLifecycleVerificationRequiresFrozenExactReconciliation(t *testing.T) {
 	stub := &sandboxStub{}
-	lifecycle, err := NewLifecycle(stub)
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	lifecycle, err := NewLifecycleWithClock(stub, func() time.Time { return now })
 	if err != nil {
 		t.Fatalf("new lifecycle: %v", err)
 	}
-	if _, err := lifecycle.Reconcile(nil, "", nil, time.Time{}); !errors.Is(err, ErrInvalidTransition) {
+	if _, err := lifecycle.Reconcile(nil, "", nil); !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("early verify error = %v", err)
 	}
 	workspace := t.TempDir()
@@ -147,9 +148,8 @@ func TestLifecycleVerificationRequiresFrozenExactReconciliation(t *testing.T) {
 	if err := os.WriteFile(readme, []byte("after"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
 	contract := lifecycleContract(t, now.Add(time.Hour), "/workspace/README.md")
-	decision, err := lifecycle.Reconcile(baseline, workspace, contract, now)
+	decision, err := lifecycle.Reconcile(baseline, workspace, contract)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func TestLifecyclePolicyDenialIsRejectedNotFailed(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
-	decision, err := lifecycle.Reconcile(baseline, workspace, lifecycleContract(t, now.Add(time.Hour)), now)
+	decision, err := lifecycle.Reconcile(baseline, workspace, lifecycleContract(t, now.Add(time.Hour)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,11 +186,121 @@ func TestLifecycleScanUncertaintyFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
-	if _, err := lifecycle.Reconcile(baseline, workspace, lifecycleContract(t, now.Add(time.Hour)), now); err == nil {
+	if _, err := lifecycle.Reconcile(baseline, workspace, lifecycleContract(t, now.Add(time.Hour))); err == nil {
 		t.Fatal("missing frozen workspace was reconciled")
 	}
 	if lifecycle.State() != StateFailed {
 		t.Fatalf("state = %s, want FAILED", lifecycle.State())
+	}
+}
+
+func TestLifecycleClockRollbackBeforePrepareFailsClosed(t *testing.T) {
+	base := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	stub := &sandboxStub{}
+	lifecycle, err := NewLifecycleWithClock(stub, sequenceClock(t, base, base.Add(-time.Second)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.Prepare(context.Background()); !errors.Is(err, ErrClockRollback) {
+		t.Fatalf("prepare error = %v", err)
+	}
+	if lifecycle.State() != StateFailed || len(stub.calls) != 0 {
+		t.Fatalf("state = %s, calls = %v", lifecycle.State(), stub.calls)
+	}
+}
+
+func TestLifecycleClockRollbackBeforeStartFailsClosed(t *testing.T) {
+	base := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	stub := &sandboxStub{}
+	lifecycle, err := NewLifecycleWithClock(stub, sequenceClock(t, base, base.Add(time.Minute), base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.Prepare(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.Start(context.Background()); !errors.Is(err, ErrClockRollback) {
+		t.Fatalf("start error = %v", err)
+	}
+	if lifecycle.State() != StateFailed || len(stub.calls) != 1 || stub.calls[0] != "prepare" {
+		t.Fatalf("state = %s, calls = %v", lifecycle.State(), stub.calls)
+	}
+}
+
+func TestLifecycleClockRollbackBeforeFreezeStillStopsProcessTree(t *testing.T) {
+	base := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	stub := &sandboxStub{}
+	lifecycle, err := NewLifecycleWithClock(stub, sequenceClock(t,
+		base,
+		base.Add(time.Minute),
+		base.Add(2*time.Minute),
+		base.Add(time.Minute),
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.Prepare(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.Freeze(context.Background()); !errors.Is(err, ErrClockRollback) {
+		t.Fatalf("freeze error = %v", err)
+	}
+	if lifecycle.State() != StateFailed {
+		t.Fatalf("state = %s", lifecycle.State())
+	}
+	if len(stub.calls) != 3 || stub.calls[2] != "freeze" {
+		t.Fatalf("rollback bypassed process-tree stop: %v", stub.calls)
+	}
+}
+
+func TestLifecycleClockRollbackBeforeReconciliationCannotRevalidateExpiredContract(t *testing.T) {
+	base := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	stub := &sandboxStub{}
+	lifecycle, err := NewLifecycleWithClock(stub, sequenceClock(t,
+		base,
+		base.Add(time.Minute),
+		base.Add(2*time.Minute),
+		base.Add(10*time.Minute),
+		base.Add(3*time.Minute),
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.Prepare(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.Freeze(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	baseline, err := tree.Scan(workspace, tree.ScanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contract := lifecycleContract(t, base.Add(5*time.Minute))
+	if _, err := lifecycle.Reconcile(baseline, workspace, contract); !errors.Is(err, ErrClockRollback) {
+		t.Fatalf("reconcile error = %v", err)
+	}
+	if lifecycle.State() != StateFailed {
+		t.Fatalf("state = %s, want FAILED", lifecycle.State())
+	}
+	if plan, decision := lifecycle.Reconciliation(); plan != nil || decision.Allowed {
+		t.Fatalf("rollback created reconciliation authority: plan=%#v decision=%#v", plan, decision)
+	}
+}
+
+func TestLifecycleRejectsUnavailableClockAtCreation(t *testing.T) {
+	if _, err := NewLifecycleWithClock(&sandboxStub{}, nil); !errors.Is(err, ErrTrustedTime) {
+		t.Fatalf("nil clock error = %v", err)
+	}
+	if _, err := NewLifecycleWithClock(&sandboxStub{}, func() time.Time { return time.Time{} }); !errors.Is(err, ErrTrustedTime) {
+		t.Fatalf("zero clock error = %v", err)
 	}
 }
 
@@ -224,7 +334,8 @@ func frozenLifecycle(t *testing.T) (*Lifecycle, string, *tree.Snapshot) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lifecycle, err := NewLifecycle(&sandboxStub{})
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	lifecycle, err := NewLifecycleWithClock(&sandboxStub{}, func() time.Time { return now })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,6 +349,19 @@ func frozenLifecycle(t *testing.T) (*Lifecycle, string, *tree.Snapshot) {
 		t.Fatal(err)
 	}
 	return lifecycle, workspace, baseline
+}
+
+func sequenceClock(t *testing.T, readings ...time.Time) func() time.Time {
+	t.Helper()
+	index := 0
+	return func() time.Time {
+		if index >= len(readings) {
+			t.Fatalf("trusted clock read %d exceeds %d deterministic readings", index+1, len(readings))
+		}
+		reading := readings[index]
+		index++
+		return reading
+	}
 }
 
 func lifecycleContract(t *testing.T, expires time.Time, allow ...string) *contracts.Contract {

@@ -101,7 +101,14 @@ snapshot and makes the frozen tree authoritative for mutation truth:
   to the immutable contract hash;
 - scanner/diff uncertainty moves the lifecycle to `FAILED`; an established
   contract or object-policy denial moves it to `REJECTED`; only a complete
-  authorized plan reaches `VERIFIED`.
+  authorized plan reaches `VERIFIED`;
+- M3 and M4 share one trusted-time implementation. Each hostile lifecycle owns
+  one clock authority and observes it at creation and immediately before
+  prepare, start, freeze, and reconciliation. Callers cannot supply a separate
+  reconciliation timestamp. Any zero reading or observation earlier than the
+  greatest prior observation fails the lifecycle closed as `FAILED`; on a
+  freeze-time clock failure Mirage still invokes process-tree termination, but
+  cannot enter `FROZEN` or become committable.
 
 M4.2 still cannot mutate the real repository. `COMMITTED` is intentionally
 unreachable, and even an allowed hostile-fixture plan is explicitly rejected
@@ -128,6 +135,28 @@ case-fold-collision rejection. Source exclusion is defense in depth, not secret
 discovery: the trusted caller must not select a repository containing credentials
 under novel names. Reconciliation observes frozen final state, not transient
 syscalls that leave no final mutation.
+
+## M4.3 mandatory design gates
+
+M4.2 approval does not authorize real-tree mutation. Before M4.3 implementation,
+the commit design must receive separate approval and resolve all of these:
+
+- one immutable run manifest must bind run identity, sandbox, disposable
+  workspace identity, disposable baseline, contract, real baseline, and the
+  run-owned trusted clock instead of accepting them piecemeal at commit time;
+- contract v1 must explicitly define whether exact-path `WRITE` means all
+  supported mutations (`CREATE`, `MODIFY`, `DELETE`, and `MODE_CHANGE`), or a
+  versioned contract must add operation-granular authority;
+- Mirage must retain a real/source baseline separately from the permission-
+  normalized disposable baseline. Shadow modes such as `0666` and `0777` must
+  never be copied naively onto reality;
+- the commit phase must revalidate the complete supported real baseline, bind
+  the translated real commit plan to the verified shadow plan, and apply only
+  that exact fresh plan with fail-closed conflict semantics;
+- post-verification shadow changes must invalidate commit authority.
+
+Until those gates are implemented and reviewed, `COMMITTED` remains
+intentionally unreachable.
 
 ## 1. Security question
 

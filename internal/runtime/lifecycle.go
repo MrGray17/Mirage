@@ -13,12 +13,17 @@ import (
 	"github.com/MrGray17/Mirage/internal/contracts"
 	"github.com/MrGray17/Mirage/internal/runtime/reconcile"
 	"github.com/MrGray17/Mirage/internal/runtime/tree"
+	"github.com/MrGray17/Mirage/internal/trustedtime"
 )
 
 var (
 	ErrInvalidRuntime    = errors.New("invalid hostile runtime")
 	ErrInvalidTransition = errors.New("invalid hostile runtime transition")
+	ErrTrustedTime       = trustedtime.ErrUnavailable
+	ErrClockRollback     = trustedtime.ErrRollback
 )
+
+type ClockRollbackError = trustedtime.RollbackError
 
 // State is the trusted lifecycle state of one hostile runtime.
 type State uint8
@@ -77,16 +82,31 @@ type Sandbox interface {
 type Lifecycle struct {
 	mu       sync.Mutex
 	sandbox  Sandbox
+	clock    *trustedtime.Clock
 	state    State
 	plan     *tree.Plan
 	decision reconcile.Decision
 }
 
 func NewLifecycle(sandbox Sandbox) (*Lifecycle, error) {
+	return NewLifecycleWithClock(sandbox, time.Now)
+}
+
+// NewLifecycleWithClock constructs one hostile lifecycle with one wall-time
+// authority. The injected source exists for deterministic security tests; all
+// lifecycle observations share the same greatest-observed-time guard.
+func NewLifecycleWithClock(sandbox Sandbox, now func() time.Time) (*Lifecycle, error) {
 	if sandbox == nil {
 		return nil, fmt.Errorf("%w: sandbox is required", ErrInvalidRuntime)
 	}
-	return &Lifecycle{sandbox: sandbox, state: StateCreated}, nil
+	clock, err := trustedtime.New(now)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidRuntime, err)
+	}
+	if _, err := clock.Observe(); err != nil {
+		return nil, fmt.Errorf("%w: establish trusted start time: %w", ErrInvalidRuntime, err)
+	}
+	return &Lifecycle{sandbox: sandbox, clock: clock, state: StateCreated}, nil
 }
 
 func (l *Lifecycle) State() State {
@@ -105,6 +125,10 @@ func (l *Lifecycle) Prepare(ctx context.Context) error {
 		return err
 	}
 	l.state = StatePreparing
+	if _, err := l.clock.Observe(); err != nil {
+		l.state = StateFailed
+		return fmt.Errorf("observe trusted time before prepare: %w", err)
+	}
 	if err := l.sandbox.Prepare(ctx); err != nil {
 		l.state = StateFailed
 		return fmt.Errorf("prepare hostile sandbox: %w", err)
@@ -119,6 +143,10 @@ func (l *Lifecycle) Start(ctx context.Context) error {
 	defer l.mu.Unlock()
 	if err := l.require(StatePreparing, "start"); err != nil {
 		return err
+	}
+	if _, err := l.clock.Observe(); err != nil {
+		l.state = StateFailed
+		return fmt.Errorf("observe trusted time before start: %w", err)
 	}
 	if err := l.sandbox.Start(ctx); err != nil {
 		l.state = StateFailed
@@ -137,9 +165,19 @@ func (l *Lifecycle) Freeze(ctx context.Context) error {
 		return err
 	}
 	l.state = StateFreezing
-	if err := l.sandbox.Freeze(ctx); err != nil {
+	_, timeErr := l.clock.Observe()
+	freezeErr := l.sandbox.Freeze(ctx)
+	if timeErr != nil || freezeErr != nil {
 		l.state = StateFailed
-		return fmt.Errorf("freeze hostile sandbox: %w", err)
+		var trustedErr error
+		if timeErr != nil {
+			trustedErr = fmt.Errorf("observe trusted time before freeze: %w", timeErr)
+		}
+		var sandboxErr error
+		if freezeErr != nil {
+			sandboxErr = fmt.Errorf("freeze hostile sandbox: %w", freezeErr)
+		}
+		return errors.Join(trustedErr, sandboxErr)
 	}
 	l.state = StateFrozen
 	return nil
@@ -147,13 +185,18 @@ func (l *Lifecycle) Freeze(ctx context.Context) error {
 
 // Reconcile is the only path from FROZEN to VERIFIED. Scanner or acquisition
 // uncertainty is terminal FAILED; an established policy denial is REJECTED.
-func (l *Lifecycle) Reconcile(baseline *tree.Snapshot, frozenWorkspace string, contract *contracts.Contract, at time.Time) (reconcile.Decision, error) {
+func (l *Lifecycle) Reconcile(baseline *tree.Snapshot, frozenWorkspace string, contract *contracts.Contract) (reconcile.Decision, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err := l.require(StateFrozen, "reconcile"); err != nil {
 		return reconcile.Decision{}, err
 	}
 	l.state = StateReconciling
+	at, err := l.clock.Observe()
+	if err != nil {
+		l.state = StateFailed
+		return reconcile.Decision{}, fmt.Errorf("observe trusted time before reconciliation: %w", err)
+	}
 	plan, decision, err := reconcile.Verify(baseline, frozenWorkspace, contract, at)
 	if err != nil {
 		l.state = StateFailed
