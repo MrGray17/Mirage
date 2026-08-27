@@ -337,15 +337,33 @@ func (l *Lifecycle) Commit() error {
 		l.state = StateRejected
 		return fmt.Errorf("%w: precommit plan identity changed", ErrCommitAuthority)
 	}
-	if err := realcommit.Apply(fresh); err != nil {
-		if errors.Is(err, realcommit.ErrConflict) {
-			l.state = StateConflicted
-		} else {
-			l.state = StateFailed
-		}
+	if err := realcommit.Apply(fresh, func() error { return l.finalCommitAuthority(fresh) }); err != nil {
+		l.state = commitFailureState(err)
 		return fmt.Errorf("apply real commit plan: %w", err)
 	}
 	l.state = StateCommitted
+	return nil
+}
+
+// finalCommitAuthority is called by the applier after all target and staging
+// work and at the last possible point before the real directory entry changes.
+func (l *Lifecycle) finalCommitAuthority(plan *realcommit.Plan) error {
+	at, err := l.clock.Observe()
+	if err != nil {
+		return fmt.Errorf("observe trusted time immediately before replacement: %w", err)
+	}
+	if l.manifest == nil || l.manifest.contract == nil || l.manifest.contract.ExpiredAt(at) {
+		return fmt.Errorf("%w: authority is not valid at replacement time", ErrContractExpired)
+	}
+	if err := l.validateManifest(); err != nil {
+		return err
+	}
+	if l.plan == nil || !l.decision.BoundTo(l.manifest.identity, l.manifest.contractHash, l.plan.Hash()) {
+		return fmt.Errorf("%w: final manifest, contract, plan, or authority hash mismatch", ErrCommitAuthority)
+	}
+	if plan == nil || plan.ManifestHash() != l.manifest.identity || plan.AuthorityHash() != l.decision.AuthorityHash || plan.RealBaselineIdentity() != l.manifest.RealBaselineIdentity() {
+		return fmt.Errorf("%w: real commit plan binding changed", ErrCommitAuthority)
+	}
 	return nil
 }
 

@@ -82,7 +82,7 @@ func Scan(rootPath string, options ScanOptions) (_ *Snapshot, returnErr error) {
 	if boundErr != nil || hostErr != nil || !stableObject(boundRootInfo, afterBound) || !os.SameFile(boundRootInfo, afterHost) || !afterHost.IsDir() {
 		return nil, fmt.Errorf("%w: root changed during scan", ErrTreeChanged)
 	}
-	return newSnapshotWithRoot(s.entries, uint32(boundRootInfo.Mode().Perm()))
+	return newSnapshotWithRoot(s.entries, portableMode(boundRootInfo.Mode()))
 }
 
 func (s *scanner) scanDirectory(relative string, depth int) error {
@@ -153,7 +153,7 @@ func (s *scanner) scanDirectory(relative string, depth int) error {
 
 		switch kind {
 		case KindDirectory:
-			s.entries = append(s.entries, Entry{Resource: resource, Kind: kind, Mode: uint32(info.Mode().Perm())})
+			s.entries = append(s.entries, Entry{Resource: resource, Kind: kind, Mode: portableMode(info.Mode())})
 			if err := s.scanDirectory(child, depth+1); err != nil {
 				return err
 			}
@@ -164,7 +164,7 @@ func (s *scanner) scanDirectory(relative string, depth int) error {
 			}
 			s.entries = append(s.entries, entry)
 		case KindSymlink:
-			s.entries = append(s.entries, Entry{Resource: resource, Kind: kind, Mode: uint32(info.Mode().Perm())})
+			s.entries = append(s.entries, Entry{Resource: resource, Kind: kind, Mode: portableMode(info.Mode())})
 		default:
 			s.entries = append(s.entries, Entry{Resource: resource, Kind: KindUnsupported, Mode: uint32(info.Mode())})
 		}
@@ -216,7 +216,7 @@ func (s *scanner) readRegular(relative, resource string, initial os.FileInfo) (E
 		if err != nil || !current.Mode().IsRegular() || !os.SameFile(opened, current) {
 			return Entry{}, fmt.Errorf("%w: hard-linked file %q changed during acquisition", ErrTreeChanged, resource)
 		}
-		return Entry{Resource: resource, Kind: KindHardlink, Mode: uint32(opened.Mode().Perm()), Size: opened.Size()}, nil
+		return Entry{Resource: resource, Kind: KindHardlink, Mode: portableMode(opened.Mode()), Size: opened.Size()}, nil
 	}
 	for _, seen := range s.regularObjects {
 		if os.SameFile(opened, seen.info) {
@@ -227,7 +227,7 @@ func (s *scanner) readRegular(relative, resource string, initial os.FileInfo) (E
 			if err != nil || !current.Mode().IsRegular() || !os.SameFile(opened, current) {
 				return Entry{}, fmt.Errorf("%w: hard link %q changed during acquisition", ErrTreeChanged, resource)
 			}
-			return Entry{Resource: resource, Kind: KindHardlink, Mode: uint32(opened.Mode().Perm()), Size: opened.Size(), LinkTarget: seen.resource}, nil
+			return Entry{Resource: resource, Kind: KindHardlink, Mode: portableMode(opened.Mode()), Size: opened.Size(), LinkTarget: seen.resource}, nil
 		}
 	}
 
@@ -256,7 +256,7 @@ func (s *scanner) readRegular(relative, resource string, initial os.FileInfo) (E
 	return Entry{
 		Resource: resource,
 		Kind:     KindFile,
-		Mode:     uint32(opened.Mode().Perm()),
+		Mode:     portableMode(opened.Mode()),
 		Size:     int64(len(contents)),
 		Digest:   fmt.Sprintf("sha256:%x", digest),
 		content:  contents,
@@ -295,15 +295,38 @@ func stableObject(before, after os.FileInfo) bool {
 	return before != nil && after != nil && os.SameFile(before, after) && before.Size() == after.Size() && before.Mode() == after.Mode() && before.ModTime().Equal(after.ModTime())
 }
 
+// portableMode retains the permission bits plus security-relevant Unix mode
+// bits in their conventional 07777 representation. Other object type bits are
+// represented by Kind.
+func portableMode(mode os.FileMode) uint32 {
+	result := uint32(mode.Perm())
+	if mode&os.ModeSetuid != 0 {
+		result |= 0o4000
+	}
+	if mode&os.ModeSetgid != 0 {
+		result |= 0o2000
+	}
+	if mode&os.ModeSticky != 0 {
+		result |= 0o1000
+	}
+	return result
+}
+
 // ValidateBaseline requires a materializable snapshot: only independent
 // regular files and directories are accepted.
 func ValidateBaseline(snapshot *Snapshot) error {
 	if snapshot == nil || snapshot.identity == "" {
 		return ErrInvalidSnapshot
 	}
+	if snapshot.rootMode&^uint32(0o777) != 0 {
+		return fmt.Errorf("%w: workspace root has unsupported security mode %04o", ErrUnsafeBaseline, snapshot.rootMode)
+	}
 	for _, entry := range snapshot.entries {
 		if entry.Kind != KindFile && entry.Kind != KindDirectory {
 			return fmt.Errorf("%w: %s is %s", ErrUnsafeBaseline, entry.Resource, entry.Kind)
+		}
+		if entry.Mode&^uint32(0o777) != 0 {
+			return fmt.Errorf("%w: %s has unsupported security mode %04o", ErrUnsafeBaseline, entry.Resource, entry.Mode)
 		}
 	}
 	return nil

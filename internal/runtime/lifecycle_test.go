@@ -437,6 +437,58 @@ func TestLifecycleRejectsExpiredOrRolledBackClockBeforeCommit(t *testing.T) {
 	})
 }
 
+func TestLifecycleRechecksTrustedTimeImmediatelyBeforeReplacement(t *testing.T) {
+	base := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	t.Run("expires during apply", func(t *testing.T) {
+		clock := sequenceClock(t,
+			base,                    // manifest
+			base,                    // prepare
+			base,                    // start
+			base,                    // freeze
+			base,                    // reconcile
+			base,                    // precommit
+			base,                    // commit derivation
+			base.Add(2*time.Minute), // immediately before rename
+		)
+		lifecycle, disposable := verifiedContentLifecycle(t, clock, base.Add(time.Minute))
+		if _, err := lifecycle.PreCommit(); err != nil {
+			t.Fatal(err)
+		}
+		if err := lifecycle.Commit(); !errors.Is(err, ErrContractExpired) {
+			t.Fatalf("commit error = %v, want replacement-time expiry", err)
+		}
+		if lifecycle.State() != StateRejected {
+			t.Fatalf("state = %s, want REJECTED", lifecycle.State())
+		}
+		assertRealREADME(t, disposable, "before", 0o600)
+		assertNoLifecycleStaging(t, disposable.RealWorkspace())
+	})
+	t.Run("rolls back during apply", func(t *testing.T) {
+		clock := sequenceClock(t,
+			base,                   // manifest
+			base,                   // prepare
+			base,                   // start
+			base,                   // freeze
+			base,                   // reconcile
+			base,                   // precommit
+			base,                   // commit derivation
+			base.Add(-time.Second), // immediately before rename
+		)
+		lifecycle, disposable := verifiedContentLifecycle(t, clock, base.Add(time.Hour))
+		if _, err := lifecycle.PreCommit(); err != nil {
+			t.Fatal(err)
+		}
+		if err := lifecycle.Commit(); !errors.Is(err, ErrClockRollback) {
+			t.Fatalf("commit error = %v, want replacement-time rollback", err)
+		}
+		if lifecycle.State() != StateFailed {
+			t.Fatalf("state = %s, want FAILED", lifecycle.State())
+		}
+		assertRealREADME(t, disposable, "before", 0o600)
+		assertNoLifecycleStaging(t, disposable.RealWorkspace())
+	})
+}
+
 func TestLifecycleRejectsTwoFileCommitPlanWithoutTouchingReality(t *testing.T) {
 	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
 	lifecycle, disposable := boundLifecycleWithSetup(t, func() time.Time { return now }, now.Add(time.Hour), func(t *testing.T, real string) {
@@ -508,6 +560,17 @@ func assertRealREADME(t *testing.T, disposable *workspace.Disposable, contents s
 	info, err := os.Lstat(path)
 	if err != nil || info.Mode().Perm() != mode {
 		t.Fatalf("real README mode = %v, %v", info, err)
+	}
+}
+
+func assertNoLifecycleStaging(t *testing.T, root string) {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(root, workspace.CommitStagingPrefix+"*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("commit staging remains after denied replacement: %v", matches)
 	}
 }
 

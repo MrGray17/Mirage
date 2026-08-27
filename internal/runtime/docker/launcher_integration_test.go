@@ -211,6 +211,168 @@ func TestRootlessDockerContainsHostileFixture(t *testing.T) {
 	cleaned = true
 }
 
+func TestRootlessDockerCommitsOneVerifiedRealFile(t *testing.T) {
+	if goruntime.GOOS != "linux" || os.Getenv("MIRAGE_M42_INTEGRATION") != "1" {
+		t.Skip("set MIRAGE_M42_INTEGRATION=1 on a Linux rootless Docker host")
+	}
+	image := strings.TrimSpace(os.Getenv("MIRAGE_HOSTILE_IMAGE"))
+	if image == "" {
+		t.Fatal("MIRAGE_HOSTILE_IMAGE must name a preloaded digest-pinned image")
+	}
+	nativeRoot, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatalf("resolve native Linux fixture root: %v", err)
+	}
+	if err := os.MkdirAll(nativeRoot, 0o700); err != nil {
+		t.Fatalf("create native Linux fixture root: %v", err)
+	}
+	real, err := os.MkdirTemp(nativeRoot, ".mirage-live-commit-")
+	if err != nil {
+		t.Fatalf("create live real workspace: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(real); err != nil {
+			t.Errorf("remove live real workspace: %v", err)
+		}
+	})
+	realREADME := filepath.Join(real, "README.md")
+	if err := os.WriteFile(realREADME, []byte("trusted real contents\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(realREADME, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	disposable, err := workspace.Prepare(real)
+	if err != nil {
+		t.Fatalf("prepare workspace: %v", err)
+	}
+	launcher, err := runtimedocker.New(runtimedocker.Config{
+		Image:          image,
+		ContainerName:  "mirage-live-commit-" + disposable.Token()[:16],
+		Workspace:      disposable.Path(),
+		RealWorkspace:  disposable.RealWorkspace(),
+		WorkspaceToken: disposable.Token(),
+		Fixture:        runtimedocker.FixtureSingleModify,
+	})
+	if err != nil {
+		_ = disposable.Cleanup()
+		t.Fatalf("new launcher: %v", err)
+	}
+	contract, err := contracts.New(contracts.Spec{
+		Version:   contracts.VersionV1,
+		RunID:     "m43-live-single-modify",
+		ActorID:   "single-modify-fixture",
+		ExpiresAt: time.Now().UTC().Add(5 * time.Minute),
+		Filesystem: contracts.FilesystemPolicy{Write: contracts.AccessRules{
+			Allow: []string{"/workspace/README.md"},
+		}},
+	})
+	if err != nil {
+		_ = disposable.Cleanup()
+		t.Fatal(err)
+	}
+	binding, err := disposable.Binding()
+	if err != nil {
+		_ = disposable.Cleanup()
+		t.Fatal(err)
+	}
+	manifest, err := hostileruntime.NewRunManifest(contract, binding, launcher, time.Now)
+	if err != nil {
+		_ = disposable.Cleanup()
+		t.Fatal(err)
+	}
+	lifecycle, err := hostileruntime.NewBoundLifecycle(manifest)
+	if err != nil {
+		_ = disposable.Cleanup()
+		t.Fatal(err)
+	}
+	cleaned := false
+	t.Cleanup(func() {
+		if cleaned {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := lifecycle.Destroy(ctx); err != nil {
+			t.Errorf("sandbox cleanup failed; workspace retained at %s: %v", disposable.Path(), err)
+			return
+		}
+		if err := disposable.Cleanup(); err != nil {
+			t.Errorf("workspace cleanup: %v", err)
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := lifecycle.Prepare(ctx); err != nil {
+		cancel()
+		t.Fatalf("prepare runtime: %v", err)
+	}
+	if err := lifecycle.Start(ctx); err != nil {
+		cancel()
+		t.Fatalf("start runtime: %v", err)
+	}
+	cancel()
+
+	want := "authorized fixture update\n"
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		contents, _ := os.ReadFile(filepath.Join(disposable.Path(), "README.md"))
+		if string(contents) == want {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	shadowContents, err := os.ReadFile(filepath.Join(disposable.Path(), "README.md"))
+	if err != nil || string(shadowContents) != want {
+		t.Fatalf("single-modify fixture did not finish: %q, %v", shadowContents, err)
+	}
+	freezeCtx, cancelFreeze := context.WithTimeout(context.Background(), 30*time.Second)
+	err = lifecycle.Freeze(freezeCtx)
+	cancelFreeze()
+	if err != nil {
+		t.Fatalf("freeze runtime: %v", err)
+	}
+	realBefore, err := os.ReadFile(realREADME)
+	if err != nil || string(realBefore) != "trusted real contents\n" {
+		t.Fatalf("reality changed before commit: %q, %v", realBefore, err)
+	}
+	decision, err := lifecycle.Reconcile()
+	if err != nil || !decision.Allowed || lifecycle.State() != hostileruntime.StateVerified {
+		t.Fatalf("reconcile decision=%#v state=%s error=%v", decision, lifecycle.State(), err)
+	}
+	if _, err := lifecycle.PreCommit(); err != nil {
+		t.Fatalf("precommit: %v", err)
+	}
+	if err := lifecycle.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if lifecycle.State() != hostileruntime.StateCommitted {
+		t.Fatalf("state = %s, want COMMITTED", lifecycle.State())
+	}
+	realAfter, err := os.ReadFile(realREADME)
+	if err != nil || string(realAfter) != want {
+		t.Fatalf("committed content = %q, %v", realAfter, err)
+	}
+	info, err := os.Lstat(realREADME)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		t.Fatalf("committed mode = %v, %v", info, err)
+	}
+	entries, err := os.ReadDir(real)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "README.md" {
+		t.Fatalf("real workspace entries = %v, %v", entries, err)
+	}
+	destroyCtx, cancelDestroy := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := lifecycle.Destroy(destroyCtx); err != nil {
+		cancelDestroy()
+		t.Fatal(err)
+	}
+	cancelDestroy()
+	if err := disposable.Cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	cleaned = true
+}
+
 func hasViolation(violations []reconcile.Violation, resource, ruleID string) bool {
 	for _, violation := range violations {
 		if violation.Resource == resource && violation.RuleID == ruleID {

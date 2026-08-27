@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	runtimedocker "github.com/MrGray17/Mirage/internal/runtime/docker"
@@ -136,6 +137,58 @@ func TestPrepareRejectsHardlinkedSourceObject(t *testing.T) {
 	}
 	if _, err := Prepare(real); !errors.Is(err, ErrUnsafeSource) {
 		t.Fatalf("prepare error = %v", err)
+	}
+}
+
+func TestPrepareRejectsUnresolvedCommitStagingArtifacts(t *testing.T) {
+	for _, relative := range []string{
+		CommitStagingPrefix + "orphan.tmp",
+		filepath.Join("nested", CommitStagingPrefix+"orphan.tmp"),
+	} {
+		t.Run(relative, func(t *testing.T) {
+			real := workspaceTestDir(t)
+			if err := os.MkdirAll(filepath.Dir(filepath.Join(real, relative)), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(real, relative), []byte("unresolved staged bytes"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Prepare(real); !errors.Is(err, ErrUnsafeSource) || !strings.Contains(err.Error(), "unresolved Mirage commit staging artifact") {
+				t.Fatalf("prepare error = %v", err)
+			}
+		})
+	}
+}
+
+func TestPrepareRejectsUnsupportedSecurityModeBits(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		bit  os.FileMode
+	}{
+		{name: "setuid", bit: os.ModeSetuid},
+		{name: "setgid", bit: os.ModeSetgid},
+		{name: "sticky", bit: os.ModeSticky},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			real := workspaceTestDir(t)
+			target := filepath.Join(real, "script")
+			if err := os.WriteFile(target, []byte("#!/bin/sh\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(target, 0o755|test.bit); err != nil {
+				t.Skipf("security mode unavailable: %v", err)
+			}
+			info, err := os.Lstat(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode()&test.bit == 0 {
+				t.Skip("filesystem did not retain requested security mode")
+			}
+			if _, err := Prepare(real); !errors.Is(err, ErrUnsafeSource) || !strings.Contains(err.Error(), "unsupported security mode") {
+				t.Fatalf("prepare error = %v", err)
+			}
+		})
 	}
 }
 

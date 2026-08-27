@@ -809,7 +809,10 @@ manifest, the contract hash, and the verified shadow plan hash. Contract v1
 `WRITE` is narrowed for this slice to exactly one content-only `MODIFY` of one
 existing independent regular file. `CREATE`, `DELETE`, `MODE_CHANGE`, symlink,
 hard-link, special-object, root-mode, marker, zero-change, and multi-change
-plans cannot reach the real commit path.
+plans cannot reach the real commit path. Source setuid, setgid, and sticky mode
+bits are unsupported and rejected instead of being normalized away. A source
+tree containing an unresolved `.mirage-commit-*` artifact also fails closed and
+requires explicit recovery before a later run can start.
 
 Before precommit and again immediately before apply, Mirage re-observes the
 complete supported real tree against its distinct real baseline, re-observes
@@ -818,7 +821,10 @@ shadow plan hash. The applier then independently reopens the one real target,
 checks its content digest and real permission mode, creates a same-directory
 staging file only inside the trusted commit phase, writes the exact plan-bound
 bytes, restores the real baseline permission mode, and revalidates the target
-again immediately before same-directory replacement. A real mismatch is
+again immediately before same-directory replacement. After that work, the
+authority-bearing lifecycle observes trusted time and rechecks contract expiry,
+manifest identity, decision authority, and real-plan binding at the last
+possible point before rename. A real mismatch is
 `CONFLICTED`; expired or changed authority/shadow evidence is `REJECTED`;
 acquisition uncertainty is `FAILED`. These paths do not replace the target.
 
@@ -828,7 +834,8 @@ timestamps, sparse layout, or other filesystem metadata. It does not implement
 multi-file atomicity, a durable commit journal, directory `fsync`, or crash
 recovery. Cleanup failure can leave a Mirage-named staging artifact, although
 the target remains unmodified; such a run is `FAILED` and never reported as
-committed.
+committed. A later workspace preparation rejects that unresolved artifact
+rather than copying it into another sandbox.
 
 The trusted-host assumption remains material. A non-cooperating host process
 can still race the complete-tree scan, targeted revalidation, staging, and

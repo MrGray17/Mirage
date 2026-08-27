@@ -84,3 +84,15 @@ while :; do
     sleep 1
 done
 `
+
+// SingleModifyScript is the narrow positive M4.3 fixture. It performs exactly
+// one authorized final-state content modification, then remains alive until
+// Mirage proves the entire container process tree stopped.
+const SingleModifyScript = `set -eu
+umask 022
+cd /workspace
+printf 'authorized fixture update\n' > README.md
+while :; do
+    sleep 1
+done
+`

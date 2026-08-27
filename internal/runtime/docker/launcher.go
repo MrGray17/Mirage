@@ -55,7 +55,17 @@ type Config struct {
 	MemoryBytes    int64
 	PIDLimit       int64
 	NanoCPUs       int64
+	Fixture        Fixture
 }
+
+// Fixture selects one of the fixed, trusted M4 test workloads. Arbitrary
+// sandbox commands are deliberately not accepted by this launcher slice.
+type Fixture string
+
+const (
+	FixtureHostile      Fixture = "HOSTILE"
+	FixtureSingleModify Fixture = "SINGLE_MODIFY"
+)
 
 // Launcher owns one container. It is safe for serialized lifecycle calls and
 // also guards its own mutable identity against accidental concurrent use.
@@ -399,7 +409,7 @@ func (l *Launcher) createArguments() []string {
 		"--mount", mount,
 		"--entrypoint", "/bin/sh",
 		l.config.Image,
-		"-c", hostilefixture.Script,
+		"-c", fixtureScript(l.config.Fixture),
 	}
 }
 
@@ -419,7 +429,7 @@ func (l *Launcher) verifyContainer(ctx context.Context) error {
 	}
 	if inspected.Config.Image != l.config.Image ||
 		len(inspected.Config.Entrypoint) != 1 || inspected.Config.Entrypoint[0] != "/bin/sh" ||
-		len(inspected.Config.Cmd) != 2 || inspected.Config.Cmd[0] != "-c" || inspected.Config.Cmd[1] != hostilefixture.Script ||
+		len(inspected.Config.Cmd) != 2 || inspected.Config.Cmd[0] != "-c" || inspected.Config.Cmd[1] != fixtureScript(l.config.Fixture) ||
 		inspected.Config.Healthcheck == nil || len(inspected.Config.Healthcheck.Test) != 1 || inspected.Config.Healthcheck.Test[0] != "NONE" {
 		return fmt.Errorf("%w: hostile image or fixture command changed", ErrIsolation)
 	}
@@ -610,6 +620,12 @@ func normalizeConfig(config Config) (Config, error) {
 	if !digestImagePattern.MatchString(config.Image) {
 		return Config{}, fmt.Errorf("%w: image must use an exact sha256 digest", ErrInvalidConfig)
 	}
+	if config.Fixture == "" {
+		config.Fixture = FixtureHostile
+	}
+	if fixtureScript(config.Fixture) == "" {
+		return Config{}, fmt.Errorf("%w: unsupported trusted fixture %q", ErrInvalidConfig, config.Fixture)
+	}
 	config.ContainerName = strings.TrimSpace(config.ContainerName)
 	if !containerNamePattern.MatchString(config.ContainerName) {
 		return Config{}, fmt.Errorf("%w: invalid container name", ErrInvalidConfig)
@@ -659,6 +675,17 @@ func normalizeConfig(config Config) (Config, error) {
 		return Config{}, fmt.Errorf("%w: sandbox resource limits are outside M4.1 bounds", ErrInvalidConfig)
 	}
 	return config, nil
+}
+
+func fixtureScript(fixture Fixture) string {
+	switch fixture {
+	case FixtureHostile:
+		return hostilefixture.Script
+	case FixtureSingleModify:
+		return hostilefixture.SingleModifyScript
+	default:
+		return ""
+	}
 }
 
 func resolveDirectory(path string) (string, error) {

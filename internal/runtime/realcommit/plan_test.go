@@ -23,7 +23,7 @@ func TestApplyReplacesOnlyContentAndPreservesRealMode(t *testing.T) {
 	}
 	plan := newTestPlan(t, root, before, after, 0o600)
 
-	if err := Apply(plan); err != nil {
+	if err := Apply(plan, allowReplace); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 	contents, err := os.ReadFile(target)
@@ -36,6 +36,30 @@ func TestApplyReplacesOnlyContentAndPreservesRealMode(t *testing.T) {
 	}
 	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
 		t.Fatalf("mode = %v, want regular 0600", info.Mode())
+	}
+	assertNoStaging(t, root)
+}
+
+func TestApplyCallbackFailureLeavesTargetUnchangedAndCleansStaging(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "README.md")
+	before := []byte("before")
+	if err := os.WriteFile(target, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plan := newTestPlan(t, root, before, []byte("authorized"), 0o600)
+	authorityErr := errors.New("authority expired at replacement")
+	called := false
+	err := Apply(plan, func() error {
+		called = true
+		return authorityErr
+	})
+	if !called || !errors.Is(err, authorityErr) {
+		t.Fatalf("callback called = %t, apply error = %v", called, err)
+	}
+	contents, readErr := os.ReadFile(target)
+	if readErr != nil || string(contents) != string(before) {
+		t.Fatalf("callback failure changed target: %q, %v", contents, readErr)
 	}
 	assertNoStaging(t, root)
 }
@@ -53,7 +77,7 @@ func TestApplyRejectsChangedRealTargetWithoutMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := Apply(plan); !errors.Is(err, ErrConflict) {
+	if err := Apply(plan, allowReplace); !errors.Is(err, ErrConflict) {
 		t.Fatalf("apply error = %v, want conflict", err)
 	}
 	contents, err := os.ReadFile(target)
@@ -78,7 +102,7 @@ func TestApplyRejectsChangedRealModeWithoutMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := Apply(plan); !errors.Is(err, ErrConflict) {
+	if err := Apply(plan, allowReplace); !errors.Is(err, ErrConflict) {
 		t.Fatalf("apply error = %v, want mode conflict", err)
 	}
 	contents, err := os.ReadFile(target)
@@ -111,7 +135,7 @@ func TestApplyRejectsReplacedTargetTypeWithoutMutation(t *testing.T) {
 		t.Skipf("symlink unavailable: %v", err)
 	}
 
-	if err := Apply(plan); !errors.Is(err, ErrConflict) {
+	if err := Apply(plan, allowReplace); !errors.Is(err, ErrConflict) {
 		t.Fatalf("apply error = %v, want observed type conflict", err)
 	}
 	contents, err := os.ReadFile(outside)
@@ -136,7 +160,7 @@ func TestApplyTreatsObservedDeletionAsConflict(t *testing.T) {
 	if err := os.Remove(target); err != nil {
 		t.Fatal(err)
 	}
-	if err := Apply(plan); !errors.Is(err, ErrConflict) {
+	if err := Apply(plan, allowReplace); !errors.Is(err, ErrConflict) {
 		t.Fatalf("apply error = %v, want observed deletion conflict", err)
 	}
 	if _, err := os.Lstat(target); !errors.Is(err, os.ErrNotExist) {
@@ -209,3 +233,5 @@ func assertNoStaging(t *testing.T, root string) {
 		}
 	}
 }
+
+func allowReplace() error { return nil }

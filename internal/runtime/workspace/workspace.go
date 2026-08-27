@@ -26,6 +26,10 @@ var (
 	ErrCleanup       = errors.New("M4 disposable workspace cleanup failed")
 )
 
+// CommitStagingPrefix reserves transaction-owned real-workspace artifacts.
+// Their presence at the start of a later run requires explicit recovery.
+const CommitStagingPrefix = ".mirage-commit-"
+
 // Disposable owns a protected outer directory and a container-writable inner
 // workspace. The outer 0700 directory prevents unrelated host users from
 // traversing the world-writable bind source required by a numeric non-root UID
@@ -65,6 +69,9 @@ func prepareAtTempRoot(realWorkspace, tempRoot string) (*Disposable, error) {
 	source, err := tree.Scan(real, tree.ScanOptions{Exclude: excludedSourceResource})
 	if err != nil {
 		return nil, fmt.Errorf("%w: bounded source snapshot: %w", ErrInvalidSource, err)
+	}
+	if resource := reservedCommitArtifact(source); resource != "" {
+		return nil, fmt.Errorf("%w: unresolved Mirage commit staging artifact %s", ErrUnsafeSource, resource)
 	}
 	if err := tree.ValidateBaseline(source); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUnsafeSource, err)
@@ -114,6 +121,19 @@ func prepareAtTempRoot(realWorkspace, tempRoot string) (*Disposable, error) {
 		realBaseline:  source,
 		baseline:      baseline,
 	}, nil
+}
+
+func reservedCommitArtifact(snapshot *tree.Snapshot) string {
+	if snapshot == nil {
+		return ""
+	}
+	for _, entry := range snapshot.Entries() {
+		relative := strings.TrimPrefix(entry.Resource, "/workspace/")
+		if strings.HasPrefix(path.Base(relative), CommitStagingPrefix) {
+			return entry.Resource
+		}
+	}
+	return ""
 }
 
 // Binding is immutable workspace authority created before hostile execution.

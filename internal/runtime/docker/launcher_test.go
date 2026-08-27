@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/MrGray17/Mirage/internal/runtime/hostilefixture"
 )
 
 type fakeResponse struct {
@@ -455,6 +453,26 @@ func TestNewRejectsRealWorkspaceMountAndUnpinnedImage(t *testing.T) {
 	}
 }
 
+func TestLauncherIdentityBindsTheFixedFixture(t *testing.T) {
+	config := dockerTestConfig(t)
+	hostile, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.Fixture = FixtureSingleModify
+	singleModify, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hostile.Identity() == singleModify.Identity() {
+		t.Fatal("different trusted fixture commands share a sandbox identity")
+	}
+	config.Fixture = Fixture("ARBITRARY_COMMAND")
+	if _, err := New(config); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("arbitrary fixture error = %v", err)
+	}
+}
+
 func securePrepareRunner(t *testing.T, config Config) *fakeRunner {
 	t.Helper()
 	return &fakeRunner{responses: []fakeResponse{
@@ -489,7 +507,7 @@ func secureContainerInspect(t *testing.T, config Config) containerInspect {
 	inspected.Config.WorkingDir = containerWorkspacePath
 	inspected.Config.Image = normalized.Image
 	inspected.Config.Entrypoint = []string{"/bin/sh"}
-	inspected.Config.Cmd = []string{"-c", hostilefixture.Script}
+	inspected.Config.Cmd = []string{"-c", fixtureScript(normalized.Fixture)}
 	inspected.Config.Healthcheck = &struct {
 		Test []string `json:"Test"`
 	}{Test: []string{"NONE"}}

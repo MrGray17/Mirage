@@ -28,3 +28,19 @@ func TestScriptContainsEveryM41AttackProbe(t *testing.T) {
 		}
 	}
 }
+
+func TestSingleModifyScriptHasOnlyTheApprovedFinalMutation(t *testing.T) {
+	for _, required := range []string{
+		"printf 'authorized fixture update\\n' > README.md",
+		"while :; do",
+	} {
+		if !strings.Contains(SingleModifyScript, required) {
+			t.Errorf("single-modify fixture is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"forbidden.txt", "ln -s", ".env", "wget", "docker.sock"} {
+		if strings.Contains(SingleModifyScript, forbidden) {
+			t.Errorf("single-modify fixture contains unrelated probe %q", forbidden)
+		}
+	}
+}

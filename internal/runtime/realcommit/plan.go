@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/MrGray17/Mirage/internal/limits"
+	"github.com/MrGray17/Mirage/internal/runtime/workspace"
 )
 
 var (
@@ -112,10 +113,11 @@ func (p *Plan) RealMode() uint32             { return p.realMode }
 func (p *Plan) Contents() []byte             { return append([]byte(nil), p.contents...) }
 
 // Apply performs a final rooted target revalidation, stages only after that
-// trusted commit phase begins, revalidates again, and atomically replaces the
+// trusted commit phase begins, revalidates again, requires lifecycle-owned
+// authority at the last point before replacement, and atomically replaces the
 // one named file while preserving the real baseline permission mode.
-func Apply(plan *Plan) (returnErr error) {
-	if plan == nil || plan.hash == "" {
+func Apply(plan *Plan, beforeReplace func() error) (returnErr error) {
+	if plan == nil || plan.hash == "" || beforeReplace == nil {
 		return ErrInvalidPlan
 	}
 	root, err := os.OpenRoot(plan.realWorkspace)
@@ -177,6 +179,9 @@ func Apply(plan *Plan) (returnErr error) {
 	if err := requireStaged(root, temporary, staged, plan); err != nil {
 		return fmt.Errorf("revalidate trusted staging file immediately before replacement: %w", err)
 	}
+	if err := beforeReplace(); err != nil {
+		return fmt.Errorf("final commit authority check: %w", err)
+	}
 	if err := os.Rename(filepath.Join(plan.realWorkspace, temporary), filepath.Join(plan.realWorkspace, plan.relative)); err != nil {
 		return fmt.Errorf("replace real resource: %w", err)
 	}
@@ -207,7 +212,7 @@ func observeRegular(root *os.Root, relative string) (digest string, mode uint32,
 		}
 		return "", 0, fmt.Errorf("initial observation failed: %w", err)
 	}
-	if !initial.Mode().IsRegular() || initial.Size() < 0 || initial.Size() > limits.MaxTreeFileBytes {
+	if !initial.Mode().IsRegular() || hasUnsupportedSecurityMode(initial.Mode()) || initial.Size() < 0 || initial.Size() > limits.MaxTreeFileBytes {
 		return "", 0, fmt.Errorf("%w: target is not a supported regular file", errObservedConflict)
 	}
 	file, err := root.Open(relative)
@@ -220,7 +225,7 @@ func observeRegular(root *os.Root, relative string) (digest string, mode uint32,
 	if err != nil || currentErr != nil {
 		return "", 0, fmt.Errorf("establish opened target identity: %w", errors.Join(err, currentErr))
 	}
-	if !opened.Mode().IsRegular() || !current.Mode().IsRegular() || !os.SameFile(initial, opened) || !os.SameFile(opened, current) {
+	if !opened.Mode().IsRegular() || !current.Mode().IsRegular() || hasUnsupportedSecurityMode(opened.Mode()) || hasUnsupportedSecurityMode(current.Mode()) || !os.SameFile(initial, opened) || !os.SameFile(opened, current) {
 		return "", 0, fmt.Errorf("%w: opened file is not the still-named regular object", errObservedConflict)
 	}
 	contents, err := io.ReadAll(io.LimitReader(file, limits.MaxTreeFileBytes+1))
@@ -232,7 +237,7 @@ func observeRegular(root *os.Root, relative string) (digest string, mode uint32,
 	if afterErr != nil || currentErr != nil {
 		return "", 0, fmt.Errorf("complete target observation: %w", errors.Join(afterErr, currentErr))
 	}
-	if !os.SameFile(opened, after) || !os.SameFile(opened, current) || opened.Size() != after.Size() || opened.Mode() != after.Mode() || !opened.ModTime().Equal(after.ModTime()) || after.Size() != int64(len(contents)) {
+	if !os.SameFile(opened, after) || !os.SameFile(opened, current) || hasUnsupportedSecurityMode(after.Mode()) || hasUnsupportedSecurityMode(current.Mode()) || opened.Size() != after.Size() || opened.Mode() != after.Mode() || after.Mode() != current.Mode() || !opened.ModTime().Equal(after.ModTime()) || after.Size() != int64(len(contents)) {
 		return "", 0, fmt.Errorf("%w: file changed during revalidation", errObservedConflict)
 	}
 	contentDigest := sha256.Sum256(contents)
@@ -245,7 +250,7 @@ func requireStaged(root *os.Root, relative string, staged *os.File, plan *Plan) 
 	if err != nil || namedErr != nil {
 		return errors.Join(err, namedErr)
 	}
-	if !before.Mode().IsRegular() || !named.Mode().IsRegular() || !os.SameFile(before, named) || uint32(before.Mode().Perm()) != plan.realMode || before.Size() != int64(len(plan.contents)) {
+	if !before.Mode().IsRegular() || !named.Mode().IsRegular() || hasUnsupportedSecurityMode(before.Mode()) || hasUnsupportedSecurityMode(named.Mode()) || !os.SameFile(before, named) || uint32(before.Mode().Perm()) != plan.realMode || before.Size() != int64(len(plan.contents)) {
 		return errors.New("staging path is not the plan-bound regular file")
 	}
 	if _, err := staged.Seek(0, io.SeekStart); err != nil {
@@ -270,6 +275,10 @@ func requireStaged(root *os.Root, relative string, staged *os.File, plan *Plan) 
 	return nil
 }
 
+func hasUnsupportedSecurityMode(mode os.FileMode) bool {
+	return mode&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0
+}
+
 func canonicalRelative(resource string) (string, error) {
 	if !strings.HasPrefix(resource, "/workspace/") || strings.Contains(resource, "\\") || path.Clean(resource) != resource {
 		return "", fmt.Errorf("%w: non-canonical resource %q", ErrInvalidPlan, resource)
@@ -286,5 +295,5 @@ func temporaryRelative(target string) (string, error) {
 	if _, err := rand.Read(bytes); err != nil {
 		return "", err
 	}
-	return filepath.Join(filepath.Dir(target), ".mirage-commit-"+hex.EncodeToString(bytes)+".tmp"), nil
+	return filepath.Join(filepath.Dir(target), workspace.CommitStagingPrefix+hex.EncodeToString(bytes)+".tmp"), nil
 }

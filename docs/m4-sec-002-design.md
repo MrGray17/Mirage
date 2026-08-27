@@ -79,7 +79,8 @@ snapshot and makes the frozen tree authoritative for mutation truth:
 - source preparation excludes `.git`, `.env` variants, the Mirage marker, and
   common SSH/cloud/package-manager credential locations; it accepts only
   independent regular files and directories and rejects source symlinks, hard
-  links, and special objects;
+  links, special objects, setuid/setgid/sticky mode bits, and any unresolved
+  `.mirage-commit-*` staging artifact from an earlier run;
 - the scanner uses Go 1.24 rooted traversal, `Lstat`, opened-handle identity
   checks, and before/after stability checks. It never opens symlinks as content;
 - snapshots are capped at 4,096 entries, depth 32, 4 MiB per file, and 32 MiB
@@ -157,8 +158,11 @@ M4.3 resolves the approved gates with the smallest real mutation slice:
   binds manifest + contract + shadow plan;
 - the one target is acquired and checked again by digest, regular-file type,
   and real permission mode before staging and immediately before replacement.
-  Staging begins only in the trusted commit phase and replacement uses a
-  same-directory rename of the exact plan-bound bytes;
+  After all target and staging work, the lifecycle observes trusted time again
+  and rechecks contract expiry plus manifest/decision/plan authority at the
+  last possible point before rename. Callback failure removes staging and does
+  not replace the target. Replacement uses a same-directory rename of the
+  exact plan-bound bytes;
 - observed real divergence becomes `CONFLICTED`; expiry or changed shadow/
   authority becomes `REJECTED`; acquisition uncertainty becomes `FAILED`.
   None of those paths replaces the real target. A successful commit changes
@@ -169,7 +173,19 @@ for one regular file. M4.3 does not preserve ownership, ACLs, xattrs, inode,
 timestamps, sparse-file structure, or other metadata. It has no multi-file
 atomicity, durable commit log, directory `fsync`, or crash recovery. Cleanup
 failure can leave a Mirage-named staging artifact while leaving the target
-unchanged, and is terminal `FAILED`.
+unchanged, and is terminal `FAILED`; a later run refuses to prepare that real
+workspace until the artifact is explicitly recovered or removed. Source and
+commit-target setuid, setgid, and sticky bits are unsupported and rejected
+rather than silently cleared.
+
+Point-in-time M4.3 evidence: on 2026-08-27 the same pinned BusyBox image and
+rootless Docker host passed both live stories. The hostile multi-mutation
+fixture was contained and rejected with reality unchanged. A separate fixed
+fixture modified only `README.md`, was frozen and reconciled to `VERIFIED`,
+passed `PreCommit`, reached `COMMITTED`, changed only the real README contents,
+preserved its real `0600` mode, and leaked no container or disposable
+workspace. These opt-in results remain local point-in-time evidence until the
+equivalent CI environment exists.
 
 M4.3 assumes the host and Mirage process are trusted. Full-tree and target
 checks plus same-directory rename narrow but do not eliminate races against a
