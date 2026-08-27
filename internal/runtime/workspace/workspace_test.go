@@ -9,12 +9,27 @@ import (
 	runtimedocker "github.com/MrGray17/Mirage/internal/runtime/docker"
 )
 
-func TestPrepareCopiesOnlyBoundedREADMEIntoDisposableWorkspace(t *testing.T) {
+func TestPrepareCopiesBoundedRepositoryTreeAndExcludesSecrets(t *testing.T) {
 	real := workspaceTestDir(t)
-	if err := os.WriteFile(filepath.Join(real, managedFile), []byte("real contents"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(real, "README.md"), []byte("real contents"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(real, "docs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(real, "docs", "guide.md"), []byte("guide"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(real, "docs", ".env.local"), []byte("NESTED_SECRET=value"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(real, ".env"), []byte("SECRET=value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(real, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(real, ".git", "config"), []byte("credential=secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -28,7 +43,7 @@ func TestPrepareCopiesOnlyBoundedREADMEIntoDisposableWorkspace(t *testing.T) {
 		}
 	})
 
-	contents, err := os.ReadFile(filepath.Join(disposable.Path(), managedFile))
+	contents, err := os.ReadFile(filepath.Join(disposable.Path(), "README.md"))
 	if err != nil {
 		t.Fatalf("read disposable README: %v", err)
 	}
@@ -37,6 +52,16 @@ func TestPrepareCopiesOnlyBoundedREADMEIntoDisposableWorkspace(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(disposable.Path(), ".env")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf(".env entered disposable workspace: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(disposable.Path(), ".git")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf(".git entered disposable workspace: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(disposable.Path(), "docs", ".env.local")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("nested .env entered disposable workspace: %v", err)
+	}
+	guide, err := os.ReadFile(filepath.Join(disposable.Path(), "docs", "guide.md"))
+	if err != nil || string(guide) != "guide" {
+		t.Fatalf("nested repository file = %q, %v", guide, err)
 	}
 	marker, err := os.ReadFile(filepath.Join(disposable.Path(), runtimedocker.DisposableMarker))
 	if err != nil {
@@ -48,6 +73,9 @@ func TestPrepareCopiesOnlyBoundedREADMEIntoDisposableWorkspace(t *testing.T) {
 	if disposable.RealWorkspace() == disposable.Path() {
 		t.Fatal("real workspace reused as disposable workspace")
 	}
+	if disposable.Baseline() == nil || disposable.Baseline().Identity() == "" {
+		t.Fatal("physical disposable baseline was not captured")
+	}
 }
 
 func TestPrepareRejectsSymlinkREADME(t *testing.T) {
@@ -56,8 +84,22 @@ func TestPrepareRejectsSymlinkREADME(t *testing.T) {
 	if err := os.WriteFile(target, []byte("secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(target, filepath.Join(real, managedFile)); err != nil {
+	if err := os.Symlink(target, filepath.Join(real, "README.md")); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
+	}
+	if _, err := Prepare(real); !errors.Is(err, ErrUnsafeSource) {
+		t.Fatalf("prepare error = %v", err)
+	}
+}
+
+func TestPrepareRejectsHardlinkedSourceObject(t *testing.T) {
+	real := workspaceTestDir(t)
+	readme := filepath.Join(real, "README.md")
+	if err := os.WriteFile(readme, []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(readme, filepath.Join(real, "alias.md")); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
 	}
 	if _, err := Prepare(real); !errors.Is(err, ErrUnsafeSource) {
 		t.Fatalf("prepare error = %v", err)
@@ -66,7 +108,7 @@ func TestPrepareRejectsSymlinkREADME(t *testing.T) {
 
 func TestCleanupNeverTouchesReality(t *testing.T) {
 	real := workspaceTestDir(t)
-	realREADME := filepath.Join(real, managedFile)
+	realREADME := filepath.Join(real, "README.md")
 	if err := os.WriteFile(realREADME, []byte("real"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +131,7 @@ func TestCleanupNeverTouchesReality(t *testing.T) {
 
 func TestPrepareRejectsOverlappingPhysicalTempRootBeforeCreation(t *testing.T) {
 	real := workspaceTestDir(t)
-	if err := os.WriteFile(filepath.Join(real, managedFile), []byte("real"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(real, "README.md"), []byte("real"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	unsafeTemp := filepath.Join(real, "temp")

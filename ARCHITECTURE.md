@@ -483,13 +483,18 @@ event is independently re-evaluated against the immutable contract; the
 verifier does not trust an event's `ALLOW` label as authorization evidence by
 itself.
 
-The pre-M4 TIME-001 hardening gives each run one trusted wall-clock authority.
-It records the greatest UTC wall time observed at run start, effect
-authorization, event append, verification, and commit. Equal readings are
-valid; an earlier reading is a structured clock-rollback failure. The greatest
-time never moves backward, the run fails closed, and wall-clock rollback cannot
-make an expired contract valid again. This is an intra-run monotonicity guard,
-not a claim that the host clock is globally accurate.
+TIME-001 gives each run one trusted wall-clock authority. The mediated M3
+coordinator and M4 hostile lifecycle use the same trusted-time implementation;
+the current prototypes are separate coordinators, and the M4.3 run manifest
+must bind one authority when they are combined. It records the greatest UTC
+wall time observed at run/lifecycle creation, effect authorization, event
+append, runtime prepare, start, freeze, reconciliation, verification, and
+commit where those stages exist. Equal readings are valid; an earlier reading
+is a structured clock-rollback failure. The greatest time never moves backward,
+the run fails closed, and wall-clock rollback cannot make an expired contract
+valid again. A freeze-time clock failure still triggers process-tree
+termination but cannot produce `FROZEN`. This is an intra-run monotonicity
+guard, not a claim that the host clock is globally accurate.
 
 ---
 
@@ -698,9 +703,13 @@ COMMITTED / REJECTED / FAILED
 
 `FROZEN` is reachable only after the trusted sandbox backend proves the
 untrusted process tree can no longer mutate the disposable workspace. M4.1
-implements lifecycle through this freeze proof and then always rejects; the
-scanner, normalized diff, verification, and commit transitions remain M4.2+.
-The runtime is disposable. Durable truth lives outside it.
+implements lifecycle through this freeze proof. M4.2 adds a bounded no-follow
+tree scanner, canonical baseline-to-final mutations, exact contract
+verification, and a plan identity bound to the contract. Acquisition
+uncertainty becomes `FAILED`, established denial becomes `REJECTED`, and only a
+fully authorized plan reaches `VERIFIED`. `COMMITTED` remains unreachable until
+the later real-workspace freshness and exact-plan application slice. The
+runtime is disposable. Durable truth lives outside it.
 
 ---
 

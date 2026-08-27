@@ -40,14 +40,14 @@ func TestRunFailsClosedAndCleansWorkspaceOnNonLinuxHost(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(real, "README.md"), []byte("real\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	before := m41TemporaryDirectories(t)
+	before := m42TemporaryDirectories(t)
 	image := "example.invalid/image@sha256:" + strings.Repeat("0", 64)
 	var stdout, stderr bytes.Buffer
 	err := run([]string{"run", "hostile-fixture", "--workspace", real, "--image", image, "--duration", "1s"}, &stdout, &stderr)
 	if err == nil || !strings.Contains(err.Error(), "requires a Linux Mirage host") {
 		t.Fatalf("error = %v", err)
 	}
-	after := m41TemporaryDirectories(t)
+	after := m42TemporaryDirectories(t)
 	for path := range after {
 		if _, existed := before[path]; !existed {
 			t.Errorf("failed launch leaked disposable workspace %s", path)
@@ -73,9 +73,9 @@ func mainTestWorkspace(t *testing.T) string {
 	return absolute
 }
 
-func m41TemporaryDirectories(t *testing.T) map[string]struct{} {
+func m42TemporaryDirectories(t *testing.T) map[string]struct{} {
 	t.Helper()
-	matches, err := filepath.Glob(filepath.Join(os.TempDir(), "mirage-m41-*"))
+	matches, err := filepath.Glob(filepath.Join(os.TempDir(), "mirage-m42-*"))
 	if err != nil {
 		t.Fatalf("list M4.1 temporary directories: %v", err)
 	}

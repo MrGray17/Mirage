@@ -1,8 +1,10 @@
 # M4 SEC-002 — Non-Bypassable Runtime Design
 
-> Status: approved design. M4.1 implements only lifecycle, hostile-fixture
-> launch, isolation checks, and process-tree stop proof. Reconciliation and
-> commit authority remain unimplemented.
+> Status: approved design. M4.1 implements lifecycle, hostile-fixture launch,
+> isolation checks, and process-tree stop proof. M4.2 implements bounded tree
+> snapshots, authoritative normalized reconciliation, contract verification,
+> and immutable plan identity. Real-workspace commit authority remains
+> unimplemented.
 
 ## M4.1 implementation boundary
 
@@ -27,7 +29,8 @@ The first runtime slice is intentionally non-committable:
   rejects the effective container configuration unless that exact non-
   unconfined profile is present alongside `no-new-privileges`.
 - Image-defined healthchecks are disabled and the inspected healthcheck must be
-  exactly `NONE`, so only the trusted fixture command executes during M4.1.
+  exactly `NONE`, so no image-defined healthcheck executes alongside the
+  trusted fixture command during M4.1.
 - The system temporary root and real workspace are resolved physically and
   checked for overlap before any disposable file or directory is created.
 - Docker's effective container configuration is inspected before start. A
@@ -38,11 +41,11 @@ The first runtime slice is intentionally non-committable:
 - Because no trusted tree scanner or normalized diff exists yet, every M4.1 run
   is rejected after freeze. The real workspace is never mounted or committed.
 
-The live attack test is opt-in and requires a Linux rootless Docker host plus a
-preloaded image containing `/bin/sh` and `wget`:
+The current live attack/reconciliation test is opt-in and requires a Linux
+rootless Docker host plus a preloaded image containing `/bin/sh` and `wget`:
 
 ```text
-MIRAGE_M41_INTEGRATION=1
+MIRAGE_M42_INTEGRATION=1
 MIRAGE_HOSTILE_IMAGE=<repository@sha256:digest>
 go test -race -count=1 ./internal/runtime/docker
 ```
@@ -66,6 +69,94 @@ The writable bind-mounted workspace does not yet have a hard storage quota.
 That is acceptable only for the fixed, trusted M4.1 fixture, which performs
 bounded overwrites. A hard writable-workspace budget is required before Mirage
 runs arbitrary agent code.
+
+## M4.2 implementation boundary
+
+M4.2 replaces the single-file disposable input with a bounded repository-tree
+snapshot and makes the frozen tree authoritative for mutation truth:
+
+- source preparation excludes `.git`, `.env` variants, the Mirage marker, and
+  common SSH/cloud/package-manager credential locations; it accepts only
+  independent regular files and directories and rejects source symlinks, hard
+  links, and special objects;
+- the scanner uses Go 1.24 rooted traversal, `Lstat`, opened-handle identity
+  checks, and before/after stability checks. It never opens symlinks as content;
+- snapshots are capped at 4,096 entries, depth 32, 4 MiB per file, and 32 MiB
+  total regular-file content, with a 4,096-byte canonical resource limit;
+- the exact physical disposable tree, after writable permission normalization
+  and marker creation, becomes the baseline. Source executable files become
+  mode `0777`, other source files `0666`, and directories `0777` so the fixed
+  numeric non-root sandbox user can edit them;
+- final reconciliation scans without exclusions and classifies `CREATE`,
+  `MODIFY`, `DELETE`, `MODE_CHANGE`, `SYMLINK`, and `UNSUPPORTED`; rename is
+  deliberately `DELETE` plus `CREATE`;
+- on the supported Linux runtime, inode link counts reject even a hard-link
+  alias whose other name is outside the scanned tree; within-tree aliases are
+  also detected by opened-object identity. Final symlinks, hard links, special
+  objects, workspace-root mode changes, and Mirage-marker changes are
+  intrinsically rejected. Every other mutation must have exact contract
+  `WRITE` authority;
+- a canonical SHA-256 plan binds baseline identity, final identity, mutation
+  metadata, content digests, and modes. A second authority hash binds that plan
+  to the immutable contract hash;
+- scanner/diff uncertainty moves the lifecycle to `FAILED`; an established
+  contract or object-policy denial moves it to `REJECTED`; only a complete
+  authorized plan reaches `VERIFIED`;
+- M3 and M4 share one trusted-time implementation. Each hostile lifecycle owns
+  one clock authority and observes it at creation and immediately before
+  prepare, start, freeze, and reconciliation. Callers cannot supply a separate
+  reconciliation timestamp. Any zero reading or observation earlier than the
+  greatest prior observation fails the lifecycle closed as `FAILED`; on a
+  freeze-time clock failure Mirage still invokes process-tree termination, but
+  cannot enter `FROZEN` or become committable.
+
+M4.2 still cannot mutate the real repository. `COMMITTED` is intentionally
+unreachable, and even an allowed hostile-fixture plan is explicitly rejected
+after verification. Multi-file freshness revalidation and applying only the
+verified plan belong to the next commit slice.
+
+Point-in-time M4.2 evidence: on 2026-08-27 this test passed on WSL2 Linux with
+rootless Docker Engine 29.5.3, Go 1.24.4, and
+`docker.io/library/busybox@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0`.
+The live hostile process directly modified the allowed `README.md`, created a
+forbidden file and symlink, spawned a child, and wrote until killed. Mirage
+proved the process tree stopped, independently derived the final mutations,
+reported the forbidden path and symlink as violations, rejected the run, left
+the real workspace unchanged, and leaked no container or disposable workspace.
+This remains developer-observed point-in-time evidence rather than continuous
+CI coverage.
+
+The exact scanner guarantee assumes M4.1's proven-stopped sandbox and a trusted
+host. It narrows obvious check/use gaps but does not claim containment against a
+concurrent privileged host process, bind-mount aliases, hostile mount changes,
+filesystem-specific metadata behavior, SHA-256 compromise, or all Unicode
+normalization aliases. Paths use exact UTF-8 bytes plus conservative
+case-fold-collision rejection. Source exclusion is defense in depth, not secret
+discovery: the trusted caller must not select a repository containing credentials
+under novel names. Reconciliation observes frozen final state, not transient
+syscalls that leave no final mutation.
+
+## M4.3 mandatory design gates
+
+M4.2 approval does not authorize real-tree mutation. Before M4.3 implementation,
+the commit design must receive separate approval and resolve all of these:
+
+- one immutable run manifest must bind run identity, sandbox, disposable
+  workspace identity, disposable baseline, contract, real baseline, and the
+  run-owned trusted clock instead of accepting them piecemeal at commit time;
+- contract v1 must explicitly define whether exact-path `WRITE` means all
+  supported mutations (`CREATE`, `MODIFY`, `DELETE`, and `MODE_CHANGE`), or a
+  versioned contract must add operation-granular authority;
+- Mirage must retain a real/source baseline separately from the permission-
+  normalized disposable baseline. Shadow modes such as `0666` and `0777` must
+  never be copied naively onto reality;
+- the commit phase must revalidate the complete supported real baseline, bind
+  the translated real commit plan to the verified shadow plan, and apply only
+  that exact fresh plan with fail-closed conflict semantics;
+- post-verification shadow changes must invalidate commit authority.
+
+Until those gates are implemented and reviewed, `COMMITTED` remains
+intentionally unreachable.
 
 ## 1. Security question
 
@@ -262,8 +353,8 @@ Rejected. Direct syscalls bypass the Gateway and would make the event stream inc
 9. Agent attempts to access Docker socket; socket is absent.
 10. Agent forks children and exits; Mirage must stop the entire process tree before verification.
 11. Agent consumes excessive memory/CPU/PIDs/output/time; sandbox limit terminates the run and commit is impossible.
-12. Shadow changes after verification snapshot; commit identity check rejects.
-13. Safe direct filesystem changes produce a verified commit plan and commit correctly.
+12. Shadow changes after verification snapshot; the future commit identity check rejects.
+13. Safe direct filesystem changes produce a verified commit plan; the future commit slice applies it correctly.
 14. Rejected runtime leaves the real repository byte-for-byte/state-equivalent under the supported metadata model.
 
 ## 11. Implementation sequence

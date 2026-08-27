@@ -1,5 +1,5 @@
-// Package workspace prepares the deliberately narrow disposable workspace used
-// by M4.1. It snapshots only README.md; bounded tree snapshots belong to M4.2.
+// Package workspace prepares a bounded disposable repository snapshot for the
+// hostile runtime. The real repository is never mounted into the sandbox.
 package workspace
 
 import (
@@ -7,23 +7,21 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
 
-	"github.com/MrGray17/Mirage/internal/limits"
 	runtimedocker "github.com/MrGray17/Mirage/internal/runtime/docker"
+	"github.com/MrGray17/Mirage/internal/runtime/tree"
 )
 
-const managedFile = "README.md"
-
 var (
-	ErrInvalidSource = errors.New("invalid M4.1 source workspace")
-	ErrUnsafeSource  = errors.New("unsafe M4.1 source resource")
-	ErrUnsafeTemp    = errors.New("unsafe M4.1 temporary root")
-	ErrCleanup       = errors.New("M4.1 disposable workspace cleanup failed")
+	ErrInvalidSource = errors.New("invalid M4 source workspace")
+	ErrUnsafeSource  = errors.New("unsafe M4 source resource")
+	ErrUnsafeTemp    = errors.New("unsafe M4 temporary root")
+	ErrCleanup       = errors.New("M4 disposable workspace cleanup failed")
 )
 
 // Disposable owns a protected outer directory and a container-writable inner
@@ -36,6 +34,7 @@ type Disposable struct {
 	outer         string
 	workspace     string
 	token         string
+	baseline      *tree.Snapshot
 	cleaned       bool
 }
 
@@ -60,16 +59,19 @@ func prepareAtTempRoot(realWorkspace, tempRoot string) (*Disposable, error) {
 			temporary,
 		)
 	}
-	contents, err := readBoundedRegularFile(real)
+	source, err := tree.Scan(real, tree.ScanOptions{Exclude: excludedSourceResource})
 	if err != nil {
-		return nil, fmt.Errorf("%w: snapshot %s: %w", ErrInvalidSource, managedFile, err)
+		return nil, fmt.Errorf("%w: bounded source snapshot: %w", ErrInvalidSource, err)
+	}
+	if err := tree.ValidateBaseline(source); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrUnsafeSource, err)
 	}
 	token, err := randomToken()
 	if err != nil {
 		return nil, fmt.Errorf("create disposable workspace token: %w", err)
 	}
 
-	outer, err := os.MkdirTemp(temporary, "mirage-m41-")
+	outer, err := os.MkdirTemp(temporary, "mirage-m42-")
 	if err != nil {
 		return nil, fmt.Errorf("create protected disposable root: %w", err)
 	}
@@ -87,11 +89,18 @@ func prepareAtTempRoot(realWorkspace, tempRoot string) (*Disposable, error) {
 	if err := os.Chmod(inner, 0o777); err != nil {
 		return fail(fmt.Errorf("make disposable workspace container-writable: %w", err))
 	}
-	if err := writeExclusive(filepath.Join(inner, managedFile), contents, 0o666); err != nil {
-		return fail(fmt.Errorf("populate disposable %s: %w", managedFile, err))
+	if err := materializeSnapshot(inner, source); err != nil {
+		return fail(fmt.Errorf("populate disposable workspace: %w", err))
 	}
 	if err := writeExclusive(filepath.Join(inner, runtimedocker.DisposableMarker), []byte(token), 0o444); err != nil {
 		return fail(fmt.Errorf("mark disposable workspace: %w", err))
+	}
+	baseline, err := tree.Scan(inner, tree.ScanOptions{})
+	if err != nil {
+		return fail(fmt.Errorf("capture disposable baseline: %w", err))
+	}
+	if err := tree.ValidateBaseline(baseline); err != nil {
+		return fail(fmt.Errorf("validate disposable baseline: %w", err))
 	}
 
 	return &Disposable{
@@ -99,6 +108,7 @@ func prepareAtTempRoot(realWorkspace, tempRoot string) (*Disposable, error) {
 		outer:         filepath.Clean(outer),
 		workspace:     filepath.Clean(inner),
 		token:         token,
+		baseline:      baseline,
 	}, nil
 }
 
@@ -118,6 +128,14 @@ func (d *Disposable) Token() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.token
+}
+
+// Baseline returns the immutable identity and contents of the exact physical
+// tree presented to the sandbox, including Mirage's tamper-evident marker.
+func (d *Disposable) Baseline() *tree.Snapshot {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.baseline
 }
 
 // Cleanup must be called only after the sandbox backend has proved its process
@@ -189,58 +207,51 @@ func resolveTempRoot(path string) (string, error) {
 	return resolved, nil
 }
 
-func readBoundedRegularFile(workspace string) (contents []byte, returnErr error) {
-	root, err := os.OpenRoot(workspace)
-	if err != nil {
-		return nil, fmt.Errorf("open source root: %w", err)
-	}
-	var file *os.File
-	defer func() {
-		if file != nil {
-			returnErr = errors.Join(returnErr, file.Close())
+func materializeSnapshot(workspace string, snapshot *tree.Snapshot) error {
+	for _, entry := range snapshot.Entries() {
+		relative := strings.TrimPrefix(entry.Resource, "/workspace/")
+		if relative == entry.Resource || relative == "" {
+			return fmt.Errorf("%w: non-workspace resource %q", ErrUnsafeSource, entry.Resource)
 		}
-		returnErr = errors.Join(returnErr, root.Close())
-	}()
+		target := filepath.Join(workspace, filepath.FromSlash(relative))
+		switch entry.Kind {
+		case tree.KindDirectory:
+			if err := os.Mkdir(target, 0o777); err != nil {
+				return fmt.Errorf("create directory %s: %w", entry.Resource, err)
+			}
+			if err := os.Chmod(target, 0o777); err != nil {
+				return fmt.Errorf("make directory writable %s: %w", entry.Resource, err)
+			}
+		case tree.KindFile:
+			mode := os.FileMode(0o666)
+			if entry.Mode&0o111 != 0 {
+				mode = 0o777
+			}
+			if err := writeExclusive(target, entry.Content(), mode); err != nil {
+				return fmt.Errorf("create file %s: %w", entry.Resource, err)
+			}
+		default:
+			return fmt.Errorf("%w: cannot materialize %s object %s", ErrUnsafeSource, entry.Kind, entry.Resource)
+		}
+	}
+	return nil
+}
 
-	initial, err := root.Lstat(managedFile)
-	if err != nil {
-		return nil, fmt.Errorf("inspect rooted %s: %w", managedFile, err)
+func excludedSourceResource(resource string, _ tree.Kind) bool {
+	relative := strings.TrimPrefix(resource, "/workspace/")
+	parts := strings.Split(relative, "/")
+	if len(parts) == 0 {
+		return false
 	}
-	if !initial.Mode().IsRegular() {
-		return nil, fmt.Errorf("%w: %s is not regular", ErrUnsafeSource, managedFile)
+	top := parts[0]
+	if top == ".git" || top == ".ssh" || top == ".aws" || top == ".azure" || top == ".git-credentials" || top == ".npmrc" || top == ".pypirc" || top == runtimedocker.DisposableMarker {
+		return true
 	}
-	if initial.Size() > limits.MaxManagedFileBytes {
-		return nil, fmt.Errorf("%w: %s exceeds %d bytes", ErrUnsafeSource, managedFile, limits.MaxManagedFileBytes)
+	if len(parts) >= 2 && top == ".config" && parts[1] == "gcloud" {
+		return true
 	}
-	file, err = root.Open(managedFile)
-	if err != nil {
-		return nil, fmt.Errorf("open rooted %s: %w", managedFile, err)
-	}
-	opened, err := file.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("inspect opened %s: %w", managedFile, err)
-	}
-	current, err := root.Lstat(managedFile)
-	if err != nil || !opened.Mode().IsRegular() || !current.Mode().IsRegular() || !os.SameFile(opened, current) {
-		return nil, fmt.Errorf("%w: %s changed during acquisition", ErrUnsafeSource, managedFile)
-	}
-
-	contents, err = io.ReadAll(io.LimitReader(file, limits.MaxManagedFileBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("read rooted %s: %w", managedFile, err)
-	}
-	if int64(len(contents)) > limits.MaxManagedFileBytes {
-		return nil, fmt.Errorf("%w: %s exceeds %d bytes", ErrUnsafeSource, managedFile, limits.MaxManagedFileBytes)
-	}
-	after, err := file.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("reinspect opened %s: %w", managedFile, err)
-	}
-	current, err = root.Lstat(managedFile)
-	if err != nil || !current.Mode().IsRegular() || !os.SameFile(opened, current) || opened.Size() != after.Size() || opened.Mode() != after.Mode() || !opened.ModTime().Equal(after.ModTime()) {
-		return nil, fmt.Errorf("%w: %s changed during snapshot", ErrUnsafeSource, managedFile)
-	}
-	return contents, nil
+	base := path.Base(relative)
+	return base == ".env" || strings.HasPrefix(base, ".env.")
 }
 
 func writeExclusive(path string, contents []byte, mode os.FileMode) error {

@@ -11,7 +11,7 @@ import (
 
 func TestPrepareRejectsTMPDIRInsideRealityBeforeCreation(t *testing.T) {
 	real := workspaceTestDir(t)
-	if err := os.WriteFile(filepath.Join(real, managedFile), []byte("real"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(real, "README.md"), []byte("real"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	unsafeTemp := filepath.Join(real, "tmpdir")
@@ -34,7 +34,7 @@ func TestPrepareRejectsTMPDIRInsideRealityBeforeCreation(t *testing.T) {
 
 func TestPrepareRejectsSymlinkedTempRootResolvingInsideReality(t *testing.T) {
 	real := workspaceTestDir(t)
-	if err := os.WriteFile(filepath.Join(real, managedFile), []byte("real"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(real, "README.md"), []byte("real"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	unsafeTemp := filepath.Join(real, "physical-temp")
