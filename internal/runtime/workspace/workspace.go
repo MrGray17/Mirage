@@ -4,7 +4,9 @@ package workspace
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -34,6 +36,7 @@ type Disposable struct {
 	outer         string
 	workspace     string
 	token         string
+	realBaseline  *tree.Snapshot
 	baseline      *tree.Snapshot
 	cleaned       bool
 }
@@ -108,8 +111,77 @@ func prepareAtTempRoot(realWorkspace, tempRoot string) (*Disposable, error) {
 		outer:         filepath.Clean(outer),
 		workspace:     filepath.Clean(inner),
 		token:         token,
+		realBaseline:  source,
 		baseline:      baseline,
 	}, nil
+}
+
+// Binding is immutable workspace authority created before hostile execution.
+// It retains real and disposable baselines as distinct security objects.
+type Binding struct {
+	realWorkspace       string
+	disposableWorkspace string
+	token               string
+	realBaseline        *tree.Snapshot
+	disposableBaseline  *tree.Snapshot
+	identity            string
+}
+
+// Binding returns one immutable subject for later manifest construction.
+func (d *Disposable) Binding() (Binding, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.cleaned || d.realBaseline == nil || d.baseline == nil {
+		return Binding{}, fmt.Errorf("%w: disposable workspace is unavailable", ErrInvalidSource)
+	}
+	canonical := struct {
+		RealWorkspace       string `json:"real_workspace"`
+		RealBaseline        string `json:"real_baseline"`
+		DisposableWorkspace string `json:"disposable_workspace"`
+		DisposableBaseline  string `json:"disposable_baseline"`
+		TokenHash           string `json:"token_hash"`
+	}{
+		RealWorkspace:       d.realWorkspace,
+		RealBaseline:        d.realBaseline.Identity(),
+		DisposableWorkspace: d.workspace,
+		DisposableBaseline:  d.baseline.Identity(),
+		TokenHash:           hashString(d.token),
+	}
+	encoded, err := json.Marshal(canonical)
+	if err != nil {
+		return Binding{}, fmt.Errorf("canonicalize workspace binding: %w", err)
+	}
+	return Binding{
+		realWorkspace:       d.realWorkspace,
+		disposableWorkspace: d.workspace,
+		token:               d.token,
+		realBaseline:        d.realBaseline,
+		disposableBaseline:  d.baseline,
+		identity:            hashBytes(encoded),
+	}, nil
+}
+
+func (b Binding) Identity() string                   { return b.identity }
+func (b Binding) RealWorkspace() string              { return b.realWorkspace }
+func (b Binding) DisposableWorkspace() string        { return b.disposableWorkspace }
+func (b Binding) Token() string                      { return b.token }
+func (b Binding) RealBaseline() *tree.Snapshot       { return b.realBaseline }
+func (b Binding) DisposableBaseline() *tree.Snapshot { return b.disposableBaseline }
+
+// ObserveReal applies the exact source inclusion rules used to capture the
+// real baseline. Excluded host metadata never becomes part of commit freshness.
+func (b Binding) ObserveReal() (*tree.Snapshot, error) {
+	if b.identity == "" || b.realWorkspace == "" {
+		return nil, fmt.Errorf("%w: workspace binding is invalid", ErrInvalidSource)
+	}
+	return tree.Scan(b.realWorkspace, tree.ScanOptions{Exclude: excludedSourceResource})
+}
+
+func (b Binding) ObserveDisposable() (*tree.Snapshot, error) {
+	if b.identity == "" || b.disposableWorkspace == "" {
+		return nil, fmt.Errorf("%w: workspace binding is invalid", ErrInvalidSource)
+	}
+	return tree.Scan(b.disposableWorkspace, tree.ScanOptions{})
 }
 
 func (d *Disposable) Path() string {
@@ -276,6 +348,13 @@ func randomToken() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(bytes), nil
+}
+
+func hashString(value string) string { return hashBytes([]byte(value)) }
+
+func hashBytes(value []byte) string {
+	digest := sha256.Sum256(value)
+	return fmt.Sprintf("sha256:%x", digest)
 }
 
 func removeOwnedDirectory(outer, real string) error {

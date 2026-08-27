@@ -3,8 +3,9 @@
 > Status: approved design. M4.1 implements lifecycle, hostile-fixture launch,
 > isolation checks, and process-tree stop proof. M4.2 implements bounded tree
 > snapshots, authoritative normalized reconciliation, contract verification,
-> and immutable plan identity. Real-workspace commit authority remains
-> unimplemented.
+> and immutable plan identity. M4.3 implements the first narrow real-workspace
+> commit: exactly one authorized content modification of one existing regular
+> file.
 
 ## M4.1 implementation boundary
 
@@ -110,10 +111,10 @@ snapshot and makes the frozen tree authoritative for mutation truth:
   freeze-time clock failure Mirage still invokes process-tree termination, but
   cannot enter `FROZEN` or become committable.
 
-M4.2 still cannot mutate the real repository. `COMMITTED` is intentionally
-unreachable, and even an allowed hostile-fixture plan is explicitly rejected
-after verification. Multi-file freshness revalidation and applying only the
-verified plan belong to the next commit slice.
+At the M4.2 boundary, Mirage still could not mutate the real repository:
+`COMMITTED` was intentionally unreachable, and even an allowed hostile-fixture
+plan was explicitly rejected after verification. M4.3 adds only the separately
+reviewed single-file commit boundary below; multi-file commit remains deferred.
 
 Point-in-time M4.2 evidence: on 2026-08-27 this test passed on WSL2 Linux with
 rootless Docker Engine 29.5.3, Go 1.24.4, and
@@ -136,27 +137,47 @@ discovery: the trusted caller must not select a repository containing credential
 under novel names. Reconciliation observes frozen final state, not transient
 syscalls that leave no final mutation.
 
-## M4.3 mandatory design gates
+## M4.3 single-file real commit boundary
 
-M4.2 approval does not authorize real-tree mutation. Before M4.3 implementation,
-the commit design must receive separate approval and resolve all of these:
+M4.3 resolves the approved gates with the smallest real mutation slice:
 
-- one immutable run manifest must bind run identity, sandbox, disposable
-  workspace identity, disposable baseline, contract, real baseline, and the
-  run-owned trusted clock instead of accepting them piecemeal at commit time;
-- contract v1 must explicitly define whether exact-path `WRITE` means all
-  supported mutations (`CREATE`, `MODIFY`, `DELETE`, and `MODE_CHANGE`), or a
-  versioned contract must add operation-granular authority;
-- Mirage must retain a real/source baseline separately from the permission-
-  normalized disposable baseline. Shadow modes such as `0666` and `0777` must
-  never be copied naively onto reality;
-- the commit phase must revalidate the complete supported real baseline, bind
-  the translated real commit plan to the verified shadow plan, and apply only
-  that exact fresh plan with fail-closed conflict semantics;
-- post-verification shadow changes must invalidate commit authority.
+- one immutable run manifest binds the contract, shared monotonic trusted
+  clock, distinct real and disposable baseline identities, physical workspace
+  identity and token, and normalized sandbox configuration before execution;
+- contract v1 exact-path `WRITE` means only content `MODIFY` for this slice.
+  Exactly one existing independent regular file must change. `CREATE`,
+  `DELETE`, `MODE_CHANGE`, zero-change, multi-change, links, special objects,
+  marker changes, and workspace-root mode changes are rejected;
+- source permissions remain in a distinct real baseline. The real file's
+  permission mode is used for replacement; normalized disposable `0666` or
+  `0777` modes never flow back into reality;
+- before precommit and again before apply, the complete supported real tree is
+  compared with the real baseline, the shadow is compared with the verified
+  final identity, and its plan hash is recomputed. The decision authority hash
+  binds manifest + contract + shadow plan;
+- the one target is acquired and checked again by digest, regular-file type,
+  and real permission mode before staging and immediately before replacement.
+  Staging begins only in the trusted commit phase and replacement uses a
+  same-directory rename of the exact plan-bound bytes;
+- observed real divergence becomes `CONFLICTED`; expiry or changed shadow/
+  authority becomes `REJECTED`; acquisition uncertainty becomes `FAILED`.
+  None of those paths replaces the real target. A successful commit changes
+  only the authorized bytes and preserves the baseline permission mode.
 
-Until those gates are implemented and reviewed, `COMMITTED` remains
-intentionally unreachable.
+The exact supported metadata guarantee is content plus Unix permission mode
+for one regular file. M4.3 does not preserve ownership, ACLs, xattrs, inode,
+timestamps, sparse-file structure, or other metadata. It has no multi-file
+atomicity, durable commit log, directory `fsync`, or crash recovery. Cleanup
+failure can leave a Mirage-named staging artifact while leaving the target
+unchanged, and is terminal `FAILED`.
+
+M4.3 assumes the host and Mirage process are trusted. Full-tree and target
+checks plus same-directory rename narrow but do not eliminate races against a
+non-cooperating host process. A host can change another file after the last
+full-tree scan or race the target between final observation and rename. A
+post-revalidation shadow write cannot change the immutable plan bytes being
+applied, but violates the frozen-shadow assumption. This is not filesystem
+compare-and-swap or hostile-host containment.
 
 ## 1. Security question
 

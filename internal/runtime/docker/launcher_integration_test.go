@@ -59,11 +59,6 @@ func TestRootlessDockerContainsHostileFixture(t *testing.T) {
 		_ = disposable.Cleanup()
 		t.Fatalf("new launcher: %v", err)
 	}
-	lifecycle, err := hostileruntime.NewLifecycle(launcher)
-	if err != nil {
-		_ = disposable.Cleanup()
-		t.Fatalf("new lifecycle: %v", err)
-	}
 	contract, err := contracts.New(contracts.Spec{
 		Version:   contracts.VersionV1,
 		RunID:     "m42-live-hostile-fixture",
@@ -76,6 +71,21 @@ func TestRootlessDockerContainsHostileFixture(t *testing.T) {
 	if err != nil {
 		_ = disposable.Cleanup()
 		t.Fatalf("create fixture contract: %v", err)
+	}
+	workspaceBinding, err := disposable.Binding()
+	if err != nil {
+		_ = disposable.Cleanup()
+		t.Fatalf("bind workspace: %v", err)
+	}
+	manifest, err := hostileruntime.NewRunManifest(contract, workspaceBinding, launcher, time.Now)
+	if err != nil {
+		_ = disposable.Cleanup()
+		t.Fatalf("create run manifest: %v", err)
+	}
+	lifecycle, err := hostileruntime.NewBoundLifecycle(manifest)
+	if err != nil {
+		_ = disposable.Cleanup()
+		t.Fatalf("new lifecycle: %v", err)
 	}
 
 	cleaned := false
@@ -168,7 +178,7 @@ func TestRootlessDockerContainsHostileFixture(t *testing.T) {
 		t.Fatalf("path escape reached host filesystem: %v", err)
 	}
 
-	decision, err := lifecycle.Reconcile(disposable.Baseline(), disposable.Path(), contract)
+	decision, err := lifecycle.Reconcile()
 	if err != nil {
 		t.Fatalf("reconcile frozen runtime: %v", err)
 	}
@@ -176,11 +186,14 @@ func TestRootlessDockerContainsHostileFixture(t *testing.T) {
 		t.Fatalf("hostile final tree was not rejected: decision=%#v state=%s", decision, lifecycle.State())
 	}
 	violations := decision.Violations()
-	if !hasViolation(violations, "/workspace/forbidden.txt", "filesystem.default_deny") {
+	if !hasViolation(violations, "/workspace/forbidden.txt", "filesystem.v1_write_content_modify_only") {
 		t.Errorf("forbidden direct write absent from violations: %#v", violations)
 	}
 	if !hasViolation(violations, "/workspace/hostile-link", "filesystem.symlink_denied") {
 		t.Errorf("hostile symlink absent from violations: %#v", violations)
+	}
+	if !hasViolation(violations, "", "filesystem.single_modify_required") {
+		t.Errorf("multi-mutation hostile plan absent from violations: %#v", violations)
 	}
 	plan, _ := lifecycle.Reconciliation()
 	if plan == nil || !hasMutation(plan.Mutations(), "/workspace/README.md") {

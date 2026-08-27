@@ -4,6 +4,7 @@ package docker
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -61,6 +62,7 @@ type Config struct {
 type Launcher struct {
 	mu                   sync.Mutex
 	config               Config
+	identity             string
 	runner               commandRunner
 	delegatedControllers func() ([]string, error)
 	containerID          string
@@ -132,12 +134,32 @@ func New(config Config) (*Launcher, error) {
 	if err != nil {
 		return nil, err
 	}
+	encoded, err := json.Marshal(normalized)
+	if err != nil {
+		return nil, fmt.Errorf("%w: canonicalize sandbox identity: %w", ErrInvalidConfig, err)
+	}
+	digest := sha256.Sum256(encoded)
 	return &Launcher{
 		config:               normalized,
+		identity:             fmt.Sprintf("sha256:%x", digest),
 		runner:               execCommandRunner{},
 		delegatedControllers: hostDelegatedControllers,
 		hostOS:               runtime.GOOS,
 	}, nil
+}
+
+// Identity binds the complete normalized pre-execution sandbox configuration.
+func (l *Launcher) Identity() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.identity
+}
+
+// BoundWorkspace exposes trusted constructor inputs for manifest validation.
+func (l *Launcher) BoundWorkspace() (realWorkspace, disposableWorkspace, token string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.config.RealWorkspace, l.config.Workspace, l.config.WorkspaceToken
 }
 
 func newWithRunner(config Config, runner commandRunner) (*Launcher, error) {

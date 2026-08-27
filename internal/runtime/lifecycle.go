@@ -1,6 +1,5 @@
 // Package runtime coordinates the lifecycle of an untrusted process sandbox
-// through trusted frozen-tree reconciliation. M4.2 still grants no authority
-// to mutate the real repository.
+// through trusted frozen-tree reconciliation and the narrow M4.3 real commit.
 package runtime
 
 import (
@@ -10,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/MrGray17/Mirage/internal/contracts"
+	"github.com/MrGray17/Mirage/internal/runtime/realcommit"
 	"github.com/MrGray17/Mirage/internal/runtime/reconcile"
 	"github.com/MrGray17/Mirage/internal/runtime/tree"
 	"github.com/MrGray17/Mirage/internal/trustedtime"
@@ -21,6 +20,11 @@ var (
 	ErrInvalidTransition = errors.New("invalid hostile runtime transition")
 	ErrTrustedTime       = trustedtime.ErrUnavailable
 	ErrClockRollback     = trustedtime.ErrRollback
+	ErrContractExpired   = errors.New("hostile run contract expired")
+	ErrRealStateConflict = errors.New("real workspace baseline conflict")
+	ErrShadowChanged     = errors.New("verified frozen shadow changed")
+	ErrCommitAuthority   = errors.New("verified commit authority changed")
+	ErrUnsupportedCommit = errors.New("unsupported M4.3 commit plan")
 )
 
 type ClockRollbackError = trustedtime.RollbackError
@@ -36,7 +40,11 @@ const (
 	StateFrozen
 	StateReconciling
 	StateVerified
+	StatePrecommitting
+	StateCommitReady
+	StateCommitting
 	StateCommitted
+	StateConflicted
 	StateRejected
 	StateFailed
 )
@@ -57,8 +65,16 @@ func (s State) String() string {
 		return "RECONCILING"
 	case StateVerified:
 		return "VERIFIED"
+	case StatePrecommitting:
+		return "PRECOMMITTING"
+	case StateCommitReady:
+		return "COMMIT_READY"
+	case StateCommitting:
+		return "COMMITTING"
 	case StateCommitted:
 		return "COMMITTED"
+	case StateConflicted:
+		return "CONFLICTED"
 	case StateRejected:
 		return "REJECTED"
 	case StateFailed:
@@ -72,6 +88,8 @@ func (s State) String() string {
 // only after it has independently established that the sandbox process tree can
 // no longer mutate the workspace.
 type Sandbox interface {
+	Identity() string
+	BoundWorkspace() (realWorkspace, disposableWorkspace, token string)
 	Prepare(context.Context) error
 	Start(context.Context) error
 	Freeze(context.Context) error
@@ -80,12 +98,14 @@ type Sandbox interface {
 
 // Lifecycle serializes sandbox actions with trusted state transitions.
 type Lifecycle struct {
-	mu       sync.Mutex
-	sandbox  Sandbox
-	clock    *trustedtime.Clock
-	state    State
-	plan     *tree.Plan
-	decision reconcile.Decision
+	mu         sync.Mutex
+	sandbox    Sandbox
+	clock      *trustedtime.Clock
+	state      State
+	plan       *tree.Plan
+	decision   reconcile.Decision
+	manifest   *RunManifest
+	commitPlan *realcommit.Plan
 }
 
 func NewLifecycle(sandbox Sandbox) (*Lifecycle, error) {
@@ -109,6 +129,23 @@ func NewLifecycleWithClock(sandbox Sandbox, now func() time.Time) (*Lifecycle, e
 	return &Lifecycle{sandbox: sandbox, clock: clock, state: StateCreated}, nil
 }
 
+// NewBoundLifecycle creates the authority-bearing M4.3 lifecycle. All later
+// security operations derive their inputs exclusively from the manifest.
+func NewBoundLifecycle(manifest *RunManifest) (*Lifecycle, error) {
+	if manifest == nil || manifest.identity == "" || manifest.clock == nil || manifest.sandbox == nil {
+		return nil, fmt.Errorf("%w: complete run manifest is required", ErrInvalidRuntime)
+	}
+	if err := manifest.validateSandbox(); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidRuntime, err)
+	}
+	return &Lifecycle{
+		sandbox:  manifest.sandbox,
+		clock:    manifest.clock,
+		state:    StateCreated,
+		manifest: manifest,
+	}, nil
+}
+
 func (l *Lifecycle) State() State {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -125,6 +162,10 @@ func (l *Lifecycle) Prepare(ctx context.Context) error {
 		return err
 	}
 	l.state = StatePreparing
+	if err := l.validateManifest(); err != nil {
+		l.state = StateFailed
+		return err
+	}
 	if _, err := l.clock.Observe(); err != nil {
 		l.state = StateFailed
 		return fmt.Errorf("observe trusted time before prepare: %w", err)
@@ -142,6 +183,10 @@ func (l *Lifecycle) Start(ctx context.Context) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err := l.require(StatePreparing, "start"); err != nil {
+		return err
+	}
+	if err := l.validateManifest(); err != nil {
+		l.state = StateFailed
 		return err
 	}
 	if _, err := l.clock.Observe(); err != nil {
@@ -165,9 +210,10 @@ func (l *Lifecycle) Freeze(ctx context.Context) error {
 		return err
 	}
 	l.state = StateFreezing
+	manifestErr := l.validateManifest()
 	_, timeErr := l.clock.Observe()
 	freezeErr := l.sandbox.Freeze(ctx)
-	if timeErr != nil || freezeErr != nil {
+	if manifestErr != nil || timeErr != nil || freezeErr != nil {
 		l.state = StateFailed
 		var trustedErr error
 		if timeErr != nil {
@@ -177,7 +223,7 @@ func (l *Lifecycle) Freeze(ctx context.Context) error {
 		if freezeErr != nil {
 			sandboxErr = fmt.Errorf("freeze hostile sandbox: %w", freezeErr)
 		}
-		return errors.Join(trustedErr, sandboxErr)
+		return errors.Join(manifestErr, trustedErr, sandboxErr)
 	}
 	l.state = StateFrozen
 	return nil
@@ -185,19 +231,33 @@ func (l *Lifecycle) Freeze(ctx context.Context) error {
 
 // Reconcile is the only path from FROZEN to VERIFIED. Scanner or acquisition
 // uncertainty is terminal FAILED; an established policy denial is REJECTED.
-func (l *Lifecycle) Reconcile(baseline *tree.Snapshot, frozenWorkspace string, contract *contracts.Contract) (reconcile.Decision, error) {
+func (l *Lifecycle) Reconcile() (reconcile.Decision, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err := l.require(StateFrozen, "reconcile"); err != nil {
 		return reconcile.Decision{}, err
 	}
 	l.state = StateReconciling
+	if l.manifest == nil {
+		l.state = StateFailed
+		return reconcile.Decision{}, fmt.Errorf("%w: reconciliation requires a bound run manifest", ErrInvalidManifest)
+	}
+	if err := l.validateManifest(); err != nil {
+		l.state = StateFailed
+		return reconcile.Decision{}, err
+	}
 	at, err := l.clock.Observe()
 	if err != nil {
 		l.state = StateFailed
 		return reconcile.Decision{}, fmt.Errorf("observe trusted time before reconciliation: %w", err)
 	}
-	plan, decision, err := reconcile.Verify(baseline, frozenWorkspace, contract, at)
+	plan, decision, err := reconcile.Verify(
+		l.manifest.identity,
+		l.manifest.workspace.DisposableBaseline(),
+		l.manifest.workspace.DisposableWorkspace(),
+		l.manifest.contract,
+		at,
+	)
 	if err != nil {
 		l.state = StateFailed
 		return reconcile.Decision{}, fmt.Errorf("reconcile hostile workspace: %w", err)
@@ -212,6 +272,26 @@ func (l *Lifecycle) Reconcile(baseline *tree.Snapshot, frozenWorkspace string, c
 	return decision, nil
 }
 
+func (l *Lifecycle) validateManifest() error {
+	if l.manifest == nil {
+		return nil
+	}
+	if l.manifest.contract == nil || l.manifest.contract.Hash() != l.declaredContractHash() {
+		return fmt.Errorf("%w: contract binding changed", ErrInvalidManifest)
+	}
+	if err := l.manifest.validateSandbox(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (l *Lifecycle) declaredContractHash() string {
+	if l.manifest == nil {
+		return ""
+	}
+	return l.manifest.ContractHash()
+}
+
 // Reconciliation returns immutable plan and decision evidence, if scanning
 // completed. The plan's contents are exposed only through defensive copies.
 func (l *Lifecycle) Reconciliation() (*tree.Plan, reconcile.Decision) {
@@ -220,13 +300,165 @@ func (l *Lifecycle) Reconciliation() (*tree.Plan, reconcile.Decision) {
 	return l.plan, l.decision
 }
 
+// PreCommit derives the one explicit real-world mutation without applying it.
+// It is safe to call only after authoritative frozen-tree verification.
+func (l *Lifecycle) PreCommit() (*realcommit.Plan, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.require(StateVerified, "precommit"); err != nil {
+		return nil, err
+	}
+	l.state = StatePrecommitting
+	plan, err := l.deriveRealCommitPlan()
+	if err != nil {
+		l.state = commitFailureState(err)
+		return nil, err
+	}
+	l.commitPlan = plan
+	l.state = StateCommitReady
+	return plan, nil
+}
+
+// Commit repeats every authority and freshness check immediately before the
+// first real mutation, then applies only the derived single-file plan.
+func (l *Lifecycle) Commit() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.require(StateCommitReady, "commit"); err != nil {
+		return err
+	}
+	l.state = StateCommitting
+	fresh, err := l.deriveRealCommitPlan()
+	if err != nil {
+		l.state = commitFailureState(err)
+		return err
+	}
+	if l.commitPlan == nil || fresh.Hash() != l.commitPlan.Hash() {
+		l.state = StateRejected
+		return fmt.Errorf("%w: precommit plan identity changed", ErrCommitAuthority)
+	}
+	if err := realcommit.Apply(fresh); err != nil {
+		if errors.Is(err, realcommit.ErrConflict) {
+			l.state = StateConflicted
+		} else {
+			l.state = StateFailed
+		}
+		return fmt.Errorf("apply real commit plan: %w", err)
+	}
+	l.state = StateCommitted
+	return nil
+}
+
+func (l *Lifecycle) RealCommitPlan() *realcommit.Plan {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.commitPlan
+}
+
+func (l *Lifecycle) deriveRealCommitPlan() (*realcommit.Plan, error) {
+	if l.manifest == nil || l.plan == nil || !l.decision.Allowed {
+		return nil, fmt.Errorf("%w: verified manifest decision is unavailable", ErrCommitAuthority)
+	}
+	if err := l.validateManifest(); err != nil {
+		return nil, err
+	}
+	at, err := l.clock.Observe()
+	if err != nil {
+		return nil, fmt.Errorf("observe trusted precommit time: %w", err)
+	}
+	if l.manifest.contract.ExpiredAt(at) {
+		return nil, fmt.Errorf("%w: %s", ErrContractExpired, l.manifest.contract.ExpiresAt().Format(time.RFC3339Nano))
+	}
+	if !l.decision.BoundTo(l.manifest.identity, l.manifest.contractHash, l.plan.Hash()) {
+		return nil, fmt.Errorf("%w: manifest, contract, plan, or authority hash mismatch", ErrCommitAuthority)
+	}
+
+	realNow, err := l.manifest.workspace.ObserveReal()
+	if err != nil {
+		return nil, fmt.Errorf("revalidate complete real baseline: %w", err)
+	}
+	realBaseline := l.manifest.workspace.RealBaseline()
+	if realNow.Identity() != realBaseline.Identity() {
+		return nil, fmt.Errorf("%w: expected %s, observed %s", ErrRealStateConflict, realBaseline.Identity(), realNow.Identity())
+	}
+
+	shadowNow, err := l.manifest.workspace.ObserveDisposable()
+	if err != nil {
+		return nil, fmt.Errorf("revalidate frozen shadow: %w", err)
+	}
+	if shadowNow.Identity() != l.plan.FinalIdentity() {
+		return nil, fmt.Errorf("%w: expected final %s, observed %s", ErrShadowChanged, l.plan.FinalIdentity(), shadowNow.Identity())
+	}
+	recomputed, err := tree.Diff(l.manifest.workspace.DisposableBaseline(), shadowNow)
+	if err != nil {
+		return nil, fmt.Errorf("recompute verified shadow plan: %w", err)
+	}
+	if recomputed.Hash() != l.plan.Hash() {
+		return nil, fmt.Errorf("%w: expected plan %s, observed %s", ErrCommitAuthority, l.plan.Hash(), recomputed.Hash())
+	}
+
+	mutations := recomputed.Mutations()
+	if len(mutations) != 1 {
+		return nil, fmt.Errorf("%w: mutations=%d", ErrUnsupportedCommit, len(mutations))
+	}
+	mutation := mutations[0]
+	if mutation.Operation != tree.OperationModify || mutation.BeforeKind != tree.KindFile || mutation.AfterKind != tree.KindFile || mutation.BeforeMode != mutation.AfterMode {
+		return nil, fmt.Errorf("%w: %s %s", ErrUnsupportedCommit, mutation.Operation, mutation.Resource)
+	}
+	realEntry, ok := snapshotEntry(realBaseline, mutation.Resource)
+	if !ok || realEntry.Kind != tree.KindFile {
+		return nil, fmt.Errorf("%w: real baseline lacks existing regular file %s", ErrUnsupportedCommit, mutation.Resource)
+	}
+	disposableEntry, ok := snapshotEntry(l.manifest.workspace.DisposableBaseline(), mutation.Resource)
+	if !ok || disposableEntry.Kind != tree.KindFile || disposableEntry.Digest != mutation.BeforeDigest {
+		return nil, fmt.Errorf("%w: disposable baseline does not bind %s", ErrCommitAuthority, mutation.Resource)
+	}
+	if realEntry.Digest != mutation.BeforeDigest {
+		return nil, fmt.Errorf("%w: real and disposable content baselines differ for %s", ErrCommitAuthority, mutation.Resource)
+	}
+	return realcommit.New(realcommit.Spec{
+		ManifestHash:         l.manifest.identity,
+		AuthorityHash:        l.decision.AuthorityHash,
+		RealBaselineIdentity: realBaseline.Identity(),
+		RealWorkspace:        l.manifest.workspace.RealWorkspace(),
+		Resource:             mutation.Resource,
+		BeforeDigest:         realEntry.Digest,
+		AfterDigest:          mutation.AfterDigest,
+		RealMode:             realEntry.Mode,
+		Contents:             mutation.Content(),
+	})
+}
+
+func snapshotEntry(snapshot *tree.Snapshot, resource string) (tree.Entry, bool) {
+	if snapshot == nil {
+		return tree.Entry{}, false
+	}
+	for _, entry := range snapshot.Entries() {
+		if entry.Resource == resource {
+			return entry, true
+		}
+	}
+	return tree.Entry{}, false
+}
+
+func commitFailureState(err error) State {
+	switch {
+	case errors.Is(err, ErrRealStateConflict), errors.Is(err, realcommit.ErrConflict):
+		return StateConflicted
+	case errors.Is(err, ErrContractExpired), errors.Is(err, ErrShadowChanged), errors.Is(err, ErrCommitAuthority), errors.Is(err, ErrUnsupportedCommit):
+		return StateRejected
+	default:
+		return StateFailed
+	}
+}
+
 // Reject is valid before execution, after freeze, during reconciliation, or
 // after verification. It never implies that a running process was stopped.
 func (l *Lifecycle) Reject() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	switch l.state {
-	case StateCreated, StatePreparing, StateFrozen, StateReconciling, StateVerified:
+	case StateCreated, StatePreparing, StateFrozen, StateReconciling, StateVerified, StateCommitReady:
 		l.state = StateRejected
 		return nil
 	default:
