@@ -66,10 +66,10 @@ network probe as evidence of containment. The inspected `NetworkMode=none`
 remains the authoritative network-isolation control; the attempted request is
 supplemental attack evidence.
 
-The writable bind-mounted workspace does not yet have a hard storage quota.
-That is acceptable only for the fixed, trusted M4.1 fixture, which performs
-bounded overwrites. A hard writable-workspace budget is required before Mirage
-runs arbitrary agent code.
+The legacy M4.1 fixture still uses a writable bind mount without a hard storage
+quota. That remains acceptable only for its fixed bounded workload. The M4.4
+agent launcher below does not reuse that mount path: arbitrary agent code is
+given a separately verified, capacity-limited workspace volume.
 
 ## M4.2 implementation boundary
 
@@ -195,6 +195,120 @@ full-tree scan or race the target between final observation and rename. A
 post-revalidation shadow write cannot change the immutable plan bytes being
 applied, but violates the frozen-shadow assumption. This is not filesystem
 compare-and-swap or hostile-host containment.
+
+## M4.4 real coding agent, unchanged real commit boundary
+
+M4.4 adds a second Docker launcher rather than widening the reviewed fixture
+launcher or M4.3 commit code:
+
+- a trusted command array and digest-pinned agent image are bound into the run
+  manifest. Arguments are passed directly as `argv`; Mirage does not construct
+  an agent shell command;
+- the agent sees a rootless-Docker local volume backed by tmpfs with a hard
+  capacity (64 MiB by default, configurable only from 40 MiB through 256 MiB).
+  The volume is `nosuid,nodev`, while the existing memory, swap, CPU, PID,
+  descriptor, output, timeout, read-only-root, seccomp, capability, NNP, IPC,
+  cgroup, and network controls remain in force;
+- Mirage verifies the volume's effective `type=tmpfs`, `device=tmpfs`, exact
+  `size`, mode, and ownership label after creation, then requires the mounted
+  filesystem itself to report exactly that manifest-bound capacity before
+  seeding any repository bytes. Docker's
+  `--storage-opt size=` is deliberately not trusted: on the supported rootless
+  host Docker accepted a 32 MiB option while allowing a 64 MiB write;
+- a fixed, digest-pinned, locked-down keeper container seeds and retains the
+  tmpfs mount. Before acquisition Mirage pauses the hostile agent cgroup and
+  accepts the pause only after Docker reports `Running=true`, `Paused=true`, a
+  positive PID, and no restart. Docker's trusted archive path then copies the
+  still-mounted frozen tree into the protected disposable host directory;
+- after acquisition Mirage sends `SIGKILL`, waits, and requires PID zero and no
+  running, paused, or restarting state for both the agent and keeper. Only then
+  may the existing tree scanner run. A pause, copy, stop-proof, or cleanup
+  uncertainty is terminal and cannot produce commit authority;
+- direct networking remains `none`. An optional trusted host broker exposes
+  only a Unix socket mounted read-only into the sandbox. Its per-run directory
+  is `0711`: the trusted host owner retains `rwx`, while sandbox UID `65532`
+  receives execute-only traversal to the known socket path and cannot list or
+  write the directory. The socket is non-secret and per-run. Before Codex is
+  launched, the trusted image performs a local broker preflight that never
+  contacts a provider; failure exits immediately as `BROKER_CONNECT`;
+- Responses-provider adapters accept only `POST /v1/responses`, require the
+  manifest-bound model, cap requests, concurrency, request bytes, response
+  bytes, and model output tokens, refuse redirects, and inject the provider
+  key only in the trusted host process. The agent receives a non-secret dummy
+  provider value and cannot read the real key;
+- agent stdout and stderr are retained through a size-rotated Docker `local`
+  log, acquired only after stop proof, immediately redacted, and capped at 32
+  KiB per stream in trusted memory. Diagnostics classify `BROKER_CONNECT`,
+  `PROVIDER_HTTP`, `PROVIDER_SCHEMA`, `AGENT_PROTOCOL`, `AGENT_EXIT`, and
+  `TIMEOUT`; raw provider request and response bodies are not logged;
+- `mirage run agent` waits for the process only within the trusted timeout and
+  freezes even when completion is missing or nonzero. Timeout or agent failure
+  is explicitly rejected after stop proof; it never falls through to
+  reconciliation or commit.
+
+The real-world authority is unchanged. Final `CREATE`, `DELETE`,
+`MODE_CHANGE`, multiple mutations, links, special objects, and marker/root
+changes remain rejected. Only one content-only modification of one existing
+regular file can pass through M4.3 freshness, authority, and replacement.
+
+The reference image in `build/m44-codex-agent` contains the real Codex CLI and
+a small loopback-to-Unix-socket bridge. It invokes `codex exec --ephemeral` and
+uses the outer rootless container as the security sandbox. The image contains
+no provider credential; the current locally built image reports
+`codex-cli 0.150.1`, runs as numeric user `65532:65532`, and has immutable local
+digest `sha256:6907192a85b5f2212a8d4d4ba255724eade36f161e1ec89c1261b8da9a790355`.
+That digest is point-in-time local evidence, not a published artifact promise.
+
+The reference build and command shape are:
+
+```text
+docker build --pull=false -t mirage-m44-codex-agent:0.150.1 build/m44-codex-agent
+
+mirage run agent \
+  --image mirage-m44-codex-agent@sha256:<built-manifest-digest> \
+  --helper-image docker.io/library/busybox@sha256:<approved-helper-digest> \
+  --workspace . \
+  --allow /workspace/README.md \
+  --model-broker deepseek \
+  --model deepseek-v4-flash \
+  -- /usr/local/bin/mirage-codex "Update only README.md"
+```
+
+`DEEPSEEK_API_KEY` (or `OPENAI_API_KEY` for that adapter) is read only by the
+Mirage host process. Docker subprocess environments are scrubbed of
+credential-bearing variables, and the key is never an agent environment
+variable, image layer, mounted file, or workspace file.
+
+Point-in-time M4.4 evidence: on 2026-08-28 WSL2 Linux with rootless Docker and
+the pinned BusyBox digest passed the race-enabled live suite for: one-file
+commit; extra-file rejection; two-file rejection; absent `.env`, host home,
+SSH, and Docker socket plus denied direct network; hard quota exhaustion;
+timeout with a forked child; a delayed background write observed in frozen
+final truth; and concurrent real-state conflict. The 32 MiB quota probe failed
+at exactly 32 MiB with `ENOSPC`. A separate live UID `65532` test proved the
+`0711` broker directory was neither listable nor writable from the sandbox,
+the known Unix socket was reachable, exactly one preflight arrived, no provider
+request occurred, and teardown removed the socket and directory.
+
+The genuine provider-backed acceptance used exactly `deepseek-v4-flash`
+through the host-only DeepSeek Responses adapter. Evidence was: one broker
+preflight; four bounded provider requests and four trusted-valid responses;
+one frozen `README.md` mutation; zero policy violations; `VERIFIED`;
+`PreCommit`; and `COMMITTED`. The real file contained exactly the authorized
+line, its original Unix mode `0777` was preserved on the test filesystem, no
+second real mutation existed, an exact in-memory key scan found zero repository
+matches, and no container, volume, broker directory, or disposable workspace
+survived. No fallback provider or model was used.
+
+Remaining limitations are explicit. The tmpfs capacity bounds writable
+workspace bytes but may consume bounded host memory or swap. Docker, the
+trusted keeper image, Docker's paused-container archive copy, the Mirage host,
+and the model broker are in the TCB. A compromised trusted agent image can
+contain baked-in data; Mirage guarantees it receives no selected host secret,
+not that arbitrary image layers are secret-free. Broker request budgets bound
+abuse but do not decide whether model output is safe; final deterministic
+reconciliation remains authoritative. M4.3's host races and metadata/crash
+limitations remain unchanged.
 
 ## 1. Security question
 

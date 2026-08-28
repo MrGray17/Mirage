@@ -16,8 +16,17 @@ type fakeResponse struct {
 }
 
 type fakeRunner struct {
-	responses []fakeResponse
-	calls     [][]string
+	responses     []fakeResponse
+	calls         [][]string
+	captureOutput capturedCommandOutput
+	captureErr    error
+	captureCalls  [][]string
+}
+
+func (f *fakeRunner) Capture(_ context.Context, _ int, name string, args ...string) (capturedCommandOutput, error) {
+	call := append([]string{name}, args...)
+	f.captureCalls = append(f.captureCalls, call)
+	return f.captureOutput, f.captureErr
 }
 
 func (f *fakeRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
@@ -29,6 +38,25 @@ func (f *fakeRunner) Run(_ context.Context, name string, args ...string) ([]byte
 	response := f.responses[0]
 	f.responses = f.responses[1:]
 	return response.output, response.err
+}
+
+func TestDockerSubprocessEnvironmentScrubsHostCredentials(t *testing.T) {
+	got := scrubCredentialEnvironment([]string{
+		"PATH=/usr/bin",
+		"DOCKER_HOST=unix:///run/user/1000/docker.sock",
+		"DEEPSEEK_API_KEY=provider-secret",
+		"OPENAI_API_KEY=other-secret",
+		"GITHUB_TOKEN=repository-secret",
+		"SSH_AUTH_SOCK=/run/user/1000/agent.sock",
+	})
+	if environmentValue(got, "PATH") != "/usr/bin" || environmentValue(got, "DOCKER_HOST") != "unix:///run/user/1000/docker.sock" {
+		t.Fatalf("required host controls were removed: %v", got)
+	}
+	for _, name := range []string{"DEEPSEEK_API_KEY", "OPENAI_API_KEY", "GITHUB_TOKEN", "SSH_AUTH_SOCK"} {
+		if environmentValue(got, name) != "" {
+			t.Fatalf("credential-bearing environment %s survived scrub: %v", name, got)
+		}
+	}
 }
 
 func TestPrepareRequiresRootlessLinuxSeccompDaemon(t *testing.T) {
@@ -533,6 +561,7 @@ func secureContainerInspect(t *testing.T, config Config) containerInspect {
 	inspected.HostConfig.LogConfig.Type = "none"
 	inspected.Mounts = append(inspected.Mounts, struct {
 		Type        string `json:"Type"`
+		Name        string `json:"Name"`
 		Source      string `json:"Source"`
 		Destination string `json:"Destination"`
 		RW          bool   `json:"RW"`

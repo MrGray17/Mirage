@@ -87,10 +87,25 @@ type commandRunner interface {
 	Run(context.Context, string, ...string) ([]byte, error)
 }
 
+type commandCaptureRunner interface {
+	Capture(context.Context, int, string, ...string) (capturedCommandOutput, error)
+}
+
+type capturedCommandOutput struct {
+	stdout          string
+	stderr          string
+	stdoutTruncated bool
+	stderrTruncated bool
+}
+
 type execCommandRunner struct{}
 
 func (execCommandRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	command := exec.CommandContext(ctx, name, args...)
+	// Docker is trusted runtime infrastructure, but it does not need provider
+	// or unrelated host credentials. Keep those values confined to the Mirage
+	// broker process instead of relying only on Docker's explicit --env list.
+	command.Env = scrubCredentialEnvironment(os.Environ())
 	var stdout, stderr limitedBuffer
 	stdout.limit = defaultOutputLimit
 	stderr.limit = defaultOutputLimit
@@ -107,6 +122,35 @@ func (execCommandRunner) Run(ctx context.Context, name string, args ...string) (
 		return stdout.Bytes(), err
 	}
 	return stdout.Bytes(), nil
+}
+
+func (execCommandRunner) Capture(ctx context.Context, limit int, name string, args ...string) (capturedCommandOutput, error) {
+	command := exec.CommandContext(ctx, name, args...)
+	command.Env = scrubCredentialEnvironment(os.Environ())
+	var stdout, stderr limitedBuffer
+	stdout.limit = limit
+	stderr.limit = limit
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	err := command.Run()
+	return capturedCommandOutput{
+		stdout:          stdout.buffer.String(),
+		stderr:          stderr.buffer.String(),
+		stdoutTruncated: stdout.truncated,
+		stderrTruncated: stderr.truncated,
+	}, err
+}
+
+func scrubCredentialEnvironment(environment []string) []string {
+	result := make([]string, 0, len(environment))
+	for _, value := range environment {
+		name, _, _ := strings.Cut(value, "=")
+		if credentialEnvironmentName(name) {
+			continue
+		}
+		result = append(result, value)
+	}
+	return result
 }
 
 type limitedBuffer struct {
@@ -551,6 +595,7 @@ type containerInspect struct {
 		Image       string   `json:"Image"`
 		Entrypoint  []string `json:"Entrypoint"`
 		Cmd         []string `json:"Cmd"`
+		Env         []string `json:"Env"`
 		Healthcheck *struct {
 			Test []string `json:"Test"`
 		} `json:"Healthcheck"`
@@ -580,11 +625,13 @@ type containerInspect struct {
 			Name string `json:"Name"`
 		} `json:"RestartPolicy"`
 		LogConfig struct {
-			Type string `json:"Type"`
+			Type   string            `json:"Type"`
+			Config map[string]string `json:"Config"`
 		} `json:"LogConfig"`
 	} `json:"HostConfig"`
 	Mounts []struct {
 		Type        string `json:"Type"`
+		Name        string `json:"Name"`
 		Source      string `json:"Source"`
 		Destination string `json:"Destination"`
 		RW          bool   `json:"RW"`
@@ -605,6 +652,7 @@ type containerState struct {
 	Restarting bool   `json:"Restarting"`
 	Dead       bool   `json:"Dead"`
 	PID        int    `json:"Pid"`
+	ExitCode   int    `json:"ExitCode"`
 }
 
 func (s containerState) stopped() bool {
