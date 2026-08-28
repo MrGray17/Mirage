@@ -48,6 +48,7 @@ type Effect struct {
 	AfterMode    uint32         `json:"after_mode"`
 	BeforeDigest string         `json:"before_digest"`
 	AfterDigest  string         `json:"after_digest"`
+	BaseBlobOID  string         `json:"base_blob_oid"`
 }
 
 // Spec contains trusted construction inputs. New validates the complete
@@ -110,6 +111,14 @@ func New(spec Spec) (*Plan, error) {
 	if err != nil {
 		return nil, err
 	}
+	baseBlob, err := spec.Repository.BindTrackedBlob(spec.ManifestHash, effects[0].Resource, effects[0].BeforeDigest, effects[0].BeforeMode&0o111 != 0)
+	if err != nil {
+		if errors.Is(err, gitbinding.ErrUntrackedResource) || errors.Is(err, gitbinding.ErrBlobMismatch) {
+			return nil, fmt.Errorf("%w: %v", ErrUnsupportedEffect, err)
+		}
+		return nil, fmt.Errorf("%w: %v", ErrRepositoryChanged, err)
+	}
+	effects[0].BaseBlobOID = baseBlob.ObjectID()
 	targetRef := targetBranch(spec.RunID)
 	manifestDigest := sha256.Sum256([]byte(spec.ManifestHash))
 	message := "MIRAGE verified change " + hex.EncodeToString(manifestDigest[:])[:12]
@@ -268,8 +277,15 @@ func Revalidate(plan *Plan, manifestHash string, contract *contracts.Contract, r
 	if reconciliationPlan.Hash() != plan.reconciliationPlanHash || !decision.Allowed || decision.AuthorityHash != plan.reconciliationAuthority || !decision.BoundTo(manifestHash, contract.Hash(), reconciliationPlan.Hash()) {
 		return fmt.Errorf("%w: verified reconciliation evidence differs", ErrAuthorityChanged)
 	}
-	if err := repository.Revalidate(manifestHash); err != nil {
+	if len(plan.effects) != 1 {
+		return fmt.Errorf("%w: planned effect shape changed", ErrAuthorityChanged)
+	}
+	baseBlob, err := repository.BindTrackedBlob(manifestHash, plan.effects[0].Resource, plan.effects[0].BeforeDigest, plan.effects[0].BeforeMode&0o111 != 0)
+	if err != nil {
 		return fmt.Errorf("%w: %v", ErrRepositoryChanged, err)
+	}
+	if baseBlob.ObjectID() != plan.effects[0].BaseBlobOID {
+		return fmt.Errorf("%w: base blob identity differs", ErrAuthorityChanged)
 	}
 	canonical := canonicalPlan{
 		Version: plan.version, RunID: plan.runID, ManifestHash: plan.manifestHash,

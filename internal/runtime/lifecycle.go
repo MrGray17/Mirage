@@ -131,6 +131,9 @@ func (l *Lifecycle) BindGitRepository() (*gitbinding.Binding, error) {
 	if err := l.validateManifest(); err != nil {
 		return nil, err
 	}
+	if err := l.requireManifestRealBaseline(); err != nil {
+		return nil, err
+	}
 	at, err := l.clock.Observe()
 	if err != nil {
 		return nil, fmt.Errorf("observe trusted time before Git binding: %w", err)
@@ -138,6 +141,9 @@ func (l *Lifecycle) BindGitRepository() (*gitbinding.Binding, error) {
 	binding, err := gitbinding.Capture(l.manifest.workspace.RealWorkspace(), l.manifest.identity, at)
 	if err != nil {
 		return nil, fmt.Errorf("bind trusted Git repository: %w", err)
+	}
+	if err := l.requireManifestRealBaseline(); err != nil {
+		return nil, err
 	}
 	l.gitBinding = binding
 	return binding, nil
@@ -353,6 +359,13 @@ func (l *Lifecycle) DeriveGitEffectPlan() (*gitplan.Plan, error) {
 	if err != nil {
 		return nil, fmt.Errorf("observe trusted time before Git planning: %w", err)
 	}
+	if l.gitPlan != nil {
+		if err := gitplan.Revalidate(l.gitPlan, l.manifest.identity, l.manifest.contract, l.gitBinding, l.plan, l.decision, at); err != nil {
+			l.state = gitPlanFailureState(err)
+			return nil, fmt.Errorf("revalidate existing deferred Git plan: %w", err)
+		}
+		return l.gitPlan, nil
+	}
 	plan, err := gitplan.New(gitplan.Spec{
 		RunID:              l.manifest.RunID(),
 		ManifestHash:       l.manifest.identity,
@@ -405,6 +418,20 @@ func (l *Lifecycle) GitEffectPlan() *gitplan.Plan {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.gitPlan
+}
+
+func (l *Lifecycle) requireManifestRealBaseline() error {
+	current, err := l.manifest.workspace.ObserveReal()
+	if err != nil {
+		l.state = StateFailed
+		return fmt.Errorf("revalidate M4 real baseline for Git authority: %w", err)
+	}
+	expected := l.manifest.workspace.RealBaseline()
+	if expected == nil || current.Identity() != expected.Identity() {
+		l.state = StateConflicted
+		return fmt.Errorf("%w: M4 real baseline changed before Git authority binding", ErrRealStateConflict)
+	}
+	return nil
 }
 
 // PreCommit derives the one explicit real-world mutation without applying it.

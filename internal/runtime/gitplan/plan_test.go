@@ -30,7 +30,7 @@ func TestPlanBindsExactVerifiedReconciliationAndTrustedRepository(t *testing.T) 
 		t.Fatalf("unsafe deterministic target ref %q", plan.TargetRef())
 	}
 	effects := plan.Effects()
-	if len(effects) != 1 || effects[0].Resource != "/workspace/README.md" || effects[0].Operation != tree.OperationModify || effects[0].BeforeDigest == effects[0].AfterDigest {
+	if len(effects) != 1 || effects[0].Resource != "/workspace/README.md" || effects[0].Operation != tree.OperationModify || effects[0].BeforeDigest == effects[0].AfterDigest || effects[0].BaseBlobOID == "" {
 		t.Fatalf("effects = %#v", effects)
 	}
 	effects[0].Resource = "/workspace/forged"

@@ -238,6 +238,10 @@ func TestLifecycleBindsGitBeforeHostileExecutionAndPlansOnlyAfterVerification(t 
 	if plan == nil || plan.RepositoryBindingHash() != binding.Identity() || plan.TargetRef() == "refs/heads/main" || len(plan.Effects()) != 1 {
 		t.Fatalf("Git plan = %#v", plan)
 	}
+	again, err := lifecycle.DeriveGitEffectPlan()
+	if err != nil || again != plan || again.Identity() != plan.Identity() || again.CreatedAt() != plan.CreatedAt() {
+		t.Fatalf("repeated derivation minted new authority: first=%p second=%p error=%v", plan, again, err)
+	}
 	if err := lifecycle.RevalidateGitEffectPlan(); err != nil {
 		t.Fatal(err)
 	}
@@ -247,6 +251,67 @@ func TestLifecycleBindsGitBeforeHostileExecutionAndPlansOnlyAfterVerification(t 
 	}
 	if before.Identity() != after.Identity() {
 		t.Fatalf("M5.1 mutated real Git metadata: before=%s after=%s", before.Identity(), after.Identity())
+	}
+}
+
+func TestLifecycleGitBindingRejectsM4BaselineGitBaseMismatch(t *testing.T) {
+	lifecycle, disposable, _ := boundGitLifecycle(t)
+	if err := os.WriteFile(filepath.Join(disposable.RealWorkspace(), "README.md"), []byte("outside commit after M4 baseline\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runLifecycleGit(t, disposable.RealWorkspace(), "add", "--", "README.md")
+	runLifecycleGit(t, disposable.RealWorkspace(), "-c", "user.name=MIRAGE Test", "-c", "user.email=mirage@example.invalid", "commit", "-m", "outside change")
+	if _, err := lifecycle.BindGitRepository(); !errors.Is(err, ErrRealStateConflict) {
+		t.Fatalf("binding mismatch = %v", err)
+	}
+	if lifecycle.State() != StateConflicted || lifecycle.GitRepositoryBinding() != nil {
+		t.Fatalf("state=%s binding=%#v", lifecycle.State(), lifecycle.GitRepositoryBinding())
+	}
+}
+
+func TestLifecycleGitPlanRejectsUntrackedM4Modify(t *testing.T) {
+	now := time.Date(2026, 8, 28, 18, 0, 0, 0, time.UTC)
+	real := lifecycleRealWorkspace(t)
+	runLifecycleGit(t, real, "init", "-b", "main")
+	writeLifecycleFile(t, real, "README.md", "tracked\n", 0o600)
+	runLifecycleGit(t, real, "add", "--", "README.md")
+	runLifecycleGit(t, real, "-c", "user.name=MIRAGE Test", "-c", "user.email=mirage@example.invalid", "commit", "-m", "initial")
+	writeLifecycleFile(t, real, "notes.txt", "untracked before\n", 0o600)
+	disposable, err := workspace.Prepare(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := disposable.Cleanup(); err != nil {
+			t.Errorf("cleanup disposable: %v", err)
+		}
+	})
+	workspaceBinding, err := disposable.Binding()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub := &sandboxStub{real: workspaceBinding.RealWorkspace(), disposable: workspaceBinding.DisposableWorkspace(), token: workspaceBinding.Token()}
+	manifest, err := NewRunManifest(lifecycleContract(t, now.Add(time.Hour), "/workspace/notes.txt"), workspaceBinding, stub, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifecycle, err := NewBoundLifecycle(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lifecycle.BindGitRepository(); err != nil {
+		t.Fatal(err)
+	}
+	runToStarted(t, lifecycle)
+	if err := os.WriteFile(filepath.Join(disposable.Path(), "notes.txt"), []byte("agent update\n"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	freezeAndVerify(t, lifecycle)
+	if _, err := lifecycle.DeriveGitEffectPlan(); !errors.Is(err, gitplan.ErrUnsupportedEffect) {
+		t.Fatalf("untracked Git effect = %v", err)
+	}
+	if lifecycle.State() != StateRejected || lifecycle.GitEffectPlan() != nil {
+		t.Fatalf("state=%s plan=%#v", lifecycle.State(), lifecycle.GitEffectPlan())
 	}
 }
 

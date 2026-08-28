@@ -1,7 +1,9 @@
 package gitbinding
 
 import (
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -135,7 +137,7 @@ func TestCaptureRejectsDirtyAndAmbiguousRepositories(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, writeErr := file.WriteString("\n[include]\n\tpath = ../outside\n")
+		_, writeErr := file.WriteString("\n[include] # legitimate comment\n\tpath = ../outside\n")
 		closeErr := file.Close()
 		if writeErr != nil || closeErr != nil {
 			t.Fatal(errors.Join(writeErr, closeErr))
@@ -178,6 +180,29 @@ func TestCaptureRejectsDirtyAndAmbiguousRepositories(t *testing.T) {
 				t.Fatalf("capture = %v", err)
 			}
 		})
+	}
+}
+
+func TestBindTrackedBlobRejectsUntrackedOrMismatchedM4Base(t *testing.T) {
+	repository := newRepository(t)
+	binding, err := Capture(repository, testManifest, testTime())
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte("before\n"))
+	expected := "sha256:" + fmt.Sprintf("%x", digest)
+	blob, err := binding.BindTrackedBlob(testManifest, "/workspace/README.md", expected, false)
+	if err != nil || !validObjectID(blob.ObjectID()) || blob.Digest() != expected || blob.Executable() {
+		t.Fatalf("tracked blob = %#v, %v", blob, err)
+	}
+	if err := os.WriteFile(filepath.Join(repository, "notes.txt"), []byte("untracked\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := binding.BindTrackedBlob(testManifest, "/workspace/notes.txt", expected, false); !errors.Is(err, ErrUntrackedResource) {
+		t.Fatalf("untracked blob = %v", err)
+	}
+	if _, err := binding.BindTrackedBlob(testManifest, "/workspace/README.md", "sha256:wrong", false); !errors.Is(err, ErrBlobMismatch) {
+		t.Fatalf("mismatched blob = %v", err)
 	}
 }
 

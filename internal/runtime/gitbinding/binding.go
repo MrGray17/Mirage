@@ -13,10 +13,13 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/MrGray17/Mirage/internal/limits"
 )
 
 const (
@@ -34,7 +37,21 @@ var (
 	ErrDirtyRepository   = errors.New("tracked Git worktree or index differs from HEAD")
 	ErrRepositoryChanged = errors.New("trusted Git repository binding changed")
 	ErrGitObservation    = errors.New("trusted read-only Git observation failed")
+	ErrUntrackedResource = errors.New("resource is not a tracked regular Git blob")
+	ErrBlobMismatch      = errors.New("Git base blob differs from the M4 baseline")
 )
+
+// TrackedBlob binds one canonical workspace resource to the raw blob stored in
+// the captured base tree. The values are immutable after construction.
+type TrackedBlob struct {
+	objectID   string
+	digest     string
+	executable bool
+}
+
+func (b TrackedBlob) ObjectID() string { return b.objectID }
+func (b TrackedBlob) Digest() string   { return b.digest }
+func (b TrackedBlob) Executable() bool { return b.executable }
 
 // Binding is immutable trusted repository evidence. The os.FileInfo values are
 // retained privately so revalidation can prove that the physical repository
@@ -216,6 +233,52 @@ func (b *Binding) Revalidate(manifestHash string) error {
 	return nil
 }
 
+// BindTrackedBlob proves that resource is an ordinary tracked blob in the
+// captured base tree and that its raw bytes equal the M4 baseline bytes. This
+// deliberately rejects Git attribute/filter normalization differences in v0.
+func (b *Binding) BindTrackedBlob(manifestHash, resource, expectedDigest string, expectedExecutable bool) (TrackedBlob, error) {
+	if err := b.Revalidate(manifestHash); err != nil {
+		return TrackedBlob{}, err
+	}
+	relative, err := canonicalResourcePath(resource)
+	if err != nil || expectedDigest == "" {
+		return TrackedBlob{}, fmt.Errorf("%w: resource or digest is invalid", ErrUntrackedResource)
+	}
+	output, err := gitOutputBytes(b.root, limits.MaxResourceIdentifierBytes+128, "ls-tree", "-z", b.headTree, "--", ":(literal)"+relative)
+	if err != nil {
+		return TrackedBlob{}, fmt.Errorf("%w: inspect base tree resource", ErrGitObservation)
+	}
+	records := bytes.Split(output, []byte{0})
+	if len(records) != 2 || len(records[0]) == 0 || len(records[1]) != 0 {
+		return TrackedBlob{}, fmt.Errorf("%w: %s", ErrUntrackedResource, resource)
+	}
+	tab := bytes.IndexByte(records[0], '\t')
+	if tab < 0 || string(records[0][tab+1:]) != relative {
+		return TrackedBlob{}, fmt.Errorf("%w: malformed or mismatched tree entry", ErrUntrackedResource)
+	}
+	fields := strings.Fields(string(records[0][:tab]))
+	if len(fields) != 3 || fields[1] != "blob" || !validObjectID(fields[2]) || (fields[0] != "100644" && fields[0] != "100755") {
+		return TrackedBlob{}, fmt.Errorf("%w: unsupported tree entry", ErrUntrackedResource)
+	}
+	executable := fields[0] == "100755"
+	if executable != expectedExecutable {
+		return TrackedBlob{}, fmt.Errorf("%w: executable mode differs for %s", ErrBlobMismatch, resource)
+	}
+	contents, err := gitOutputBytes(b.root, int(limits.MaxTreeFileBytes), "cat-file", "blob", fields[2])
+	if err != nil {
+		return TrackedBlob{}, fmt.Errorf("%w: acquire bounded base blob", ErrGitObservation)
+	}
+	digest := sha256.Sum256(contents)
+	observedDigest := "sha256:" + hex.EncodeToString(digest[:])
+	if observedDigest != expectedDigest {
+		return TrackedBlob{}, fmt.Errorf("%w: %s expected %s observed %s", ErrBlobMismatch, resource, expectedDigest, observedDigest)
+	}
+	if err := b.Revalidate(manifestHash); err != nil {
+		return TrackedBlob{}, err
+	}
+	return TrackedBlob{objectID: fields[2], digest: observedDigest, executable: executable}, nil
+}
+
 func observe(repositoryRoot string) (observation, error) {
 	root, rootInfo, gitDir, gitInfo, configDigest, indexDigest, headFileDigest, err := validatePhysicalLayout(repositoryRoot)
 	if err != nil {
@@ -225,6 +288,9 @@ func observe(repositoryRoot string) (observation, error) {
 		return observation{}, err
 	}
 	if err := requireSupportedIndex(root); err != nil {
+		return observation{}, err
+	}
+	if err := requireSupportedConfig(root, gitDir); err != nil {
 		return observation{}, err
 	}
 	top, err := gitOutput(root, "rev-parse", "--show-toplevel")
@@ -315,12 +381,9 @@ func validatePhysicalLayout(repositoryRoot string) (string, os.FileInfo, string,
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", nil, "", nil, "", "", "", fmt.Errorf("%w: inspect grafted history", ErrGitObservation)
 	}
-	configBytes, configDigest, err := readAndHashRegular(filepath.Join(gitDir, "config"), maxConfigBytes)
+	_, configDigest, err := readAndHashRegular(filepath.Join(gitDir, "config"), maxConfigBytes)
 	if err != nil {
 		return "", nil, "", nil, "", "", "", fmt.Errorf("%w: read repository config: %v", ErrUnsupportedLayout, err)
-	}
-	if hasForbiddenConfig(configBytes) {
-		return "", nil, "", nil, "", "", "", fmt.Errorf("%w: config include/worktree indirection is unsupported", ErrUnsupportedLayout)
 	}
 	_, indexDigest, err := readAndHashRegular(filepath.Join(gitDir, "index"), maxIndexBytes)
 	if err != nil {
@@ -372,6 +435,23 @@ func requireSupportedIndex(root string) error {
 	return nil
 }
 
+func requireSupportedConfig(root, gitDir string) error {
+	output, err := gitOutputBytes(root, int(maxConfigBytes), "config", "--file", filepath.Join(gitDir, "config"), "--no-includes", "--name-only", "--list", "-z")
+	if err != nil {
+		return fmt.Errorf("%w: parse bounded repository config", ErrGitObservation)
+	}
+	for _, raw := range bytes.Split(output, []byte{0}) {
+		key := strings.ToLower(strings.TrimSpace(string(raw)))
+		if key == "" {
+			continue
+		}
+		if strings.HasPrefix(key, "include.") || strings.HasPrefix(key, "includeif.") || key == "core.worktree" || key == "extensions.worktreeconfig" {
+			return fmt.Errorf("%w: config key %s is unsupported", ErrUnsupportedLayout, key)
+		}
+	}
+	return nil
+}
+
 func gitOutput(root string, args ...string) (string, error) {
 	output, err := gitOutputBytes(root, maxGitOutput, args...)
 	if err != nil {
@@ -416,6 +496,7 @@ func scrubbedGitEnvironment() []string {
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_OPTIONAL_LOCKS=0",
 		"GIT_NO_REPLACE_OBJECTS=1",
+		"GIT_NO_LAZY_FETCH=1",
 	)
 }
 
@@ -519,27 +600,15 @@ func observeRefStorage(gitDir, ref string) (string, error) {
 	return "packed:" + digest, nil
 }
 
-func hasForbiddenConfig(contents []byte) bool {
-	section := ""
-	for _, raw := range strings.Split(string(contents), "\n") {
-		line := strings.TrimSpace(raw)
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
-			continue
-		}
-		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
-			section = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "["), "]")))
-			if strings.HasPrefix(section, "include") {
-				return true
-			}
-			continue
-		}
-		key, _, _ := strings.Cut(line, "=")
-		key = strings.TrimSpace(key)
-		if (section == "core" && strings.EqualFold(key, "worktree")) || (section == "extensions" && strings.EqualFold(key, "worktreeConfig")) {
-			return true
-		}
+func canonicalResourcePath(resource string) (string, error) {
+	if len(resource) > limits.MaxResourceIdentifierBytes || !strings.HasPrefix(resource, "/workspace/") || strings.Contains(resource, "\\") || path.Clean(resource) != resource {
+		return "", ErrUntrackedResource
 	}
-	return false
+	relative := strings.TrimPrefix(resource, "/workspace/")
+	if relative == "" || relative == "." || relative == ".." || strings.HasPrefix(relative, "../") {
+		return "", ErrUntrackedResource
+	}
+	return relative, nil
 }
 
 func samePath(left, right string) bool {
