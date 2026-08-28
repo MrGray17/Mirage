@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/MrGray17/Mirage/internal/contracts"
+	"github.com/MrGray17/Mirage/internal/runtime/gitcommit"
 	"github.com/MrGray17/Mirage/internal/runtime/gitplan"
 	"github.com/MrGray17/Mirage/internal/runtime/realcommit"
 	"github.com/MrGray17/Mirage/internal/runtime/tree"
@@ -369,6 +370,153 @@ func TestLifecycleGitPlanRevalidationFailsOnConcurrentHeadChange(t *testing.T) {
 	if err := lifecycle.RevalidateGitEffectPlan(); !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("conflicted plan was retryable: %v", err)
 	}
+}
+
+func TestLifecycleConstructsOneDeterministicGitArtifactWithoutTouchingReality(t *testing.T) {
+	lifecycle, disposable, gitDir := preparedGitArtifactLifecycle(t, func() time.Time {
+		return time.Date(2026, 8, 29, 2, 0, 0, 987654321, time.UTC)
+	}, time.Date(2026, 8, 29, 3, 0, 0, 0, time.UTC))
+	beforeGit, err := tree.Scan(gitDir, tree.ScanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeReal, err := lifecycle.manifest.workspace.ObserveReal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := lifecycle.ConstructGitCommitArtifact()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact == nil || lifecycle.State() != StateVerified || artifact.GitPlanIdentity() != lifecycle.GitEffectPlan().Identity() || artifact.BaseBlobOID() != lifecycle.GitEffectPlan().Effects()[0].BaseBlobOID || artifact.Resource() != "/workspace/README.md" {
+		t.Fatalf("artifact=%#v state=%s", artifact, lifecycle.State())
+	}
+	again, err := lifecycle.ConstructGitCommitArtifact()
+	if err != nil || again != artifact || again.Identity() != artifact.Identity() || again.CommitOID() != artifact.CommitOID() {
+		t.Fatalf("repeated artifact = %p/%s, %v", again, again.Identity(), err)
+	}
+	if err := lifecycle.RevalidateGitCommitArtifact(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lifecycle.PreCommit(); !errors.Is(err, ErrInvalidTransition) || lifecycle.State() != StateVerified {
+		t.Fatalf("direct commit path after Git artifact = %v, state=%s", err, lifecycle.State())
+	}
+	afterGit, err := tree.Scan(gitDir, tree.ScanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterReal, err := lifecycle.manifest.workspace.ObserveReal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if beforeGit.Identity() != afterGit.Identity() || beforeReal.Identity() != afterReal.Identity() {
+		t.Fatal("M5.2 changed real Git metadata or worktree state")
+	}
+	assertRealREADME(t, disposable, "before\n", 0o600)
+	if err := lifecycle.CleanupGitCommitArtifact(); err != nil {
+		t.Fatal(err)
+	}
+	if lifecycle.GitCommitArtifact() != nil {
+		t.Fatal("cleaned artifact remains installed")
+	}
+	if _, err := lifecycle.ConstructGitCommitArtifact(); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("cleaned lifecycle minted another artifact: %v", err)
+	}
+}
+
+func TestLifecycleGitArtifactRejectsStaleRealityAndFrozenShadow(t *testing.T) {
+	base := time.Date(2026, 8, 29, 2, 0, 0, 0, time.UTC)
+	t.Run("HEAD before construction", func(t *testing.T) {
+		lifecycle, disposable, _ := preparedGitArtifactLifecycle(t, func() time.Time { return base }, base.Add(time.Hour))
+		runLifecycleGit(t, disposable.RealWorkspace(), "-c", "user.name=MIRAGE Test", "-c", "user.email=mirage@example.invalid", "commit", "--allow-empty", "-m", "concurrent head")
+		if _, err := lifecycle.ConstructGitCommitArtifact(); !errors.Is(err, gitplan.ErrRepositoryChanged) || lifecycle.State() != StateConflicted || lifecycle.GitCommitArtifact() != nil {
+			t.Fatalf("stale HEAD = %v, state=%s artifact=%#v", err, lifecycle.State(), lifecycle.GitCommitArtifact())
+		}
+	})
+	t.Run("HEAD during construction", func(t *testing.T) {
+		lifecycle, disposable, _ := preparedGitArtifactLifecycle(t, func() time.Time { return base }, base.Add(time.Hour))
+		lifecycle.afterGitConstruction = func() {
+			runLifecycleGit(t, disposable.RealWorkspace(), "-c", "user.name=MIRAGE Test", "-c", "user.email=mirage@example.invalid", "commit", "--allow-empty", "-m", "concurrent head")
+		}
+		if _, err := lifecycle.ConstructGitCommitArtifact(); !errors.Is(err, gitplan.ErrRepositoryChanged) || lifecycle.State() != StateConflicted || lifecycle.GitCommitArtifact() != nil {
+			t.Fatalf("concurrent HEAD = %v, state=%s artifact=%#v", err, lifecycle.State(), lifecycle.GitCommitArtifact())
+		}
+	})
+	t.Run("shadow before construction", func(t *testing.T) {
+		lifecycle, disposable, _ := preparedGitArtifactLifecycle(t, func() time.Time { return base }, base.Add(time.Hour))
+		if err := os.WriteFile(filepath.Join(disposable.Path(), "README.md"), []byte("late shadow bytes\n"), 0o666); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := lifecycle.ConstructGitCommitArtifact(); !errors.Is(err, ErrShadowChanged) || lifecycle.State() != StateRejected || lifecycle.GitCommitArtifact() != nil {
+			t.Fatalf("stale shadow = %v, state=%s artifact=%#v", err, lifecycle.State(), lifecycle.GitCommitArtifact())
+		}
+	})
+	t.Run("shadow during construction", func(t *testing.T) {
+		lifecycle, disposable, _ := preparedGitArtifactLifecycle(t, func() time.Time { return base }, base.Add(time.Hour))
+		lifecycle.afterGitConstruction = func() {
+			if err := os.WriteFile(filepath.Join(disposable.Path(), "README.md"), []byte("late shadow bytes\n"), 0o666); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := lifecycle.ConstructGitCommitArtifact(); !errors.Is(err, ErrShadowChanged) || lifecycle.State() != StateRejected || lifecycle.GitCommitArtifact() != nil {
+			t.Fatalf("concurrent shadow = %v, state=%s artifact=%#v", err, lifecycle.State(), lifecycle.GitCommitArtifact())
+		}
+	})
+}
+
+func TestLifecycleGitArtifactExpiryRollbackAndCleanupUncertaintyFailClosed(t *testing.T) {
+	base := time.Date(2026, 8, 29, 2, 0, 0, 0, time.UTC)
+	t.Run("expiry", func(t *testing.T) {
+		current := base
+		lifecycle, _, _ := preparedGitArtifactLifecycle(t, func() time.Time { return current }, base.Add(time.Minute))
+		current = base.Add(time.Minute)
+		if _, err := lifecycle.ConstructGitCommitArtifact(); !errors.Is(err, ErrContractExpired) || lifecycle.State() != StateRejected {
+			t.Fatalf("expiry = %v, state=%s", err, lifecycle.State())
+		}
+	})
+	t.Run("rollback", func(t *testing.T) {
+		current := base
+		lifecycle, _, _ := preparedGitArtifactLifecycle(t, func() time.Time { return current }, base.Add(time.Hour))
+		current = base.Add(-time.Second)
+		if _, err := lifecycle.ConstructGitCommitArtifact(); !errors.Is(err, ErrClockRollback) || lifecycle.State() != StateFailed {
+			t.Fatalf("rollback = %v, state=%s", err, lifecycle.State())
+		}
+	})
+	t.Run("cleanup dominates conflict", func(t *testing.T) {
+		lifecycle, disposable, _ := preparedGitArtifactLifecycle(t, func() time.Time { return base }, base.Add(time.Hour))
+		lifecycle.afterGitConstruction = func() {
+			runLifecycleGit(t, disposable.RealWorkspace(), "-c", "user.name=MIRAGE Test", "-c", "user.email=mirage@example.invalid", "commit", "--allow-empty", "-m", "concurrent head")
+		}
+		lifecycle.cleanupGitArtifact = func(artifact *gitcommit.Artifact) error {
+			return errors.Join(artifact.Cleanup(), fmt.Errorf("%w: injected cleanup uncertainty", gitcommit.ErrCleanup))
+		}
+		if _, err := lifecycle.ConstructGitCommitArtifact(); !errors.Is(err, gitplan.ErrRepositoryChanged) || !errors.Is(err, gitcommit.ErrCleanup) || lifecycle.State() != StateFailed {
+			t.Fatalf("cleanup conflict = %v, state=%s", err, lifecycle.State())
+		}
+		if lifecycle.GitCommitArtifact() != nil || lifecycle.gitCleanupArtifact == nil {
+			t.Fatal("failed cleanup exposed authority or lost cleanup ownership")
+		}
+		lifecycle.cleanupGitArtifact = nil
+		if err := lifecycle.CleanupGitCommitArtifact(); err != nil || lifecycle.gitCleanupArtifact != nil {
+			t.Fatalf("cleanup retry = %v, retained=%#v", err, lifecycle.gitCleanupArtifact)
+		}
+	})
+	t.Run("explicit cleanup uncertainty revokes artifact", func(t *testing.T) {
+		lifecycle, _, _ := preparedGitArtifactLifecycle(t, func() time.Time { return base }, base.Add(time.Hour))
+		if _, err := lifecycle.ConstructGitCommitArtifact(); err != nil {
+			t.Fatal(err)
+		}
+		lifecycle.cleanupGitArtifact = func(artifact *gitcommit.Artifact) error {
+			return errors.Join(artifact.Cleanup(), fmt.Errorf("%w: injected cleanup uncertainty", gitcommit.ErrCleanup))
+		}
+		if err := lifecycle.CleanupGitCommitArtifact(); !errors.Is(err, gitcommit.ErrCleanup) || lifecycle.State() != StateFailed || lifecycle.GitCommitArtifact() != nil || lifecycle.gitCleanupArtifact == nil {
+			t.Fatalf("uncertain explicit cleanup = %v, state=%s valid=%#v recovery=%#v", err, lifecycle.State(), lifecycle.GitCommitArtifact(), lifecycle.gitCleanupArtifact)
+		}
+		lifecycle.cleanupGitArtifact = nil
+		if err := lifecycle.CleanupGitCommitArtifact(); err != nil || lifecycle.gitCleanupArtifact != nil {
+			t.Fatalf("explicit cleanup retry = %v, retained=%#v", err, lifecycle.gitCleanupArtifact)
+		}
+	})
 }
 
 func TestLifecycleClockRollbackBeforePrepareFailsClosed(t *testing.T) {
@@ -935,6 +1083,49 @@ func boundGitLifecycle(t *testing.T) (*Lifecycle, *workspace.Disposable, string)
 	}
 	lifecycle, err := NewBoundLifecycle(manifest)
 	if err != nil {
+		t.Fatal(err)
+	}
+	return lifecycle, disposable, filepath.Join(real, ".git")
+}
+
+func preparedGitArtifactLifecycle(t *testing.T, now func() time.Time, expires time.Time) (*Lifecycle, *workspace.Disposable, string) {
+	t.Helper()
+	real := lifecycleRealWorkspace(t)
+	runLifecycleGit(t, real, "init", "-b", "main")
+	writeLifecycleFile(t, real, "README.md", "before\n", 0o600)
+	runLifecycleGit(t, real, "add", "--", "README.md")
+	runLifecycleGit(t, real, "-c", "user.name=MIRAGE Test", "-c", "user.email=mirage@example.invalid", "commit", "-m", "initial")
+	disposable, err := workspace.Prepare(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := disposable.Cleanup(); err != nil {
+			t.Errorf("cleanup disposable: %v", err)
+		}
+	})
+	binding, err := disposable.Binding()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub := &sandboxStub{real: binding.RealWorkspace(), disposable: binding.DisposableWorkspace(), token: binding.Token()}
+	manifest, err := NewRunManifest(lifecycleContract(t, expires, "/workspace/README.md"), binding, stub, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifecycle, err := NewBoundLifecycle(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lifecycle.BindGitRepository(); err != nil {
+		t.Fatal(err)
+	}
+	runToStarted(t, lifecycle)
+	if err := os.WriteFile(filepath.Join(disposable.Path(), "README.md"), []byte("verified Git artifact\n"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	freezeAndVerify(t, lifecycle)
+	if _, err := lifecycle.DeriveGitEffectPlan(); err != nil {
 		t.Fatal(err)
 	}
 	return lifecycle, disposable, filepath.Join(real, ".git")
