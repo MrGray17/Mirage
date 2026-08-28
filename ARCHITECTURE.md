@@ -2053,10 +2053,18 @@ M4 inputs, not solved claims.
 
 ## M5 — Git + GitHub deferred commit
 
-- branch/commit occur in shadow,
-- PR creation becomes deferred external effect,
-- GitHub receives no mutation before commit,
-- commit creates one PR exactly once.
+M5 is split so each new external authority receives a separate security review:
+
+- **M5.1 — Git authority and immutable deferred plan:** bind one narrow trusted
+  repository topology and derive data-only Git intent exclusively from VERIFIED
+  reconciliation. No Git mutation or credential exists in this slice.
+- **M5.2 — deterministic commit construction:** construct and independently
+  verify the exact commit in transaction-owned Git state without altering the
+  user's worktree or refs.
+- **M5.3 — create-only remote branch:** push the exact verified commit with
+  conflict/CAS protection and uncertain-result reconciliation.
+- **M5.4 — GitHub pull request effect:** create one bounded PR with idempotency
+  and explicit accounting when remote branch and PR outcomes differ.
 
 ## M6 — Repository TOCTOU + crash safety
 

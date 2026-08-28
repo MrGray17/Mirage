@@ -5,12 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/MrGray17/Mirage/internal/contracts"
+	"github.com/MrGray17/Mirage/internal/runtime/gitplan"
 	"github.com/MrGray17/Mirage/internal/runtime/realcommit"
+	"github.com/MrGray17/Mirage/internal/runtime/tree"
 	"github.com/MrGray17/Mirage/internal/runtime/workspace"
 )
 
@@ -192,6 +196,178 @@ func TestLifecycleScanUncertaintyFailsClosed(t *testing.T) {
 	}
 	if lifecycle.State() != StateFailed {
 		t.Fatalf("state = %s, want FAILED", lifecycle.State())
+	}
+}
+
+func TestLifecycleBindsGitBeforeHostileExecutionAndPlansOnlyAfterVerification(t *testing.T) {
+	lifecycle, disposable, gitDir := boundGitLifecycle(t)
+	before, err := tree.Scan(gitDir, tree.ScanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := lifecycle.BindGitRepository()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if binding.Root() != disposable.RealWorkspace() || binding.ManifestHash() == "" {
+		t.Fatalf("binding = %#v", binding)
+	}
+	if _, err := os.Lstat(filepath.Join(disposable.Path(), ".git")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("real .git entered disposable workspace: %v", err)
+	}
+	if _, err := lifecycle.DeriveGitEffectPlan(); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("unverified derivation = %v", err)
+	}
+	if err := lifecycle.Prepare(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lifecycle.BindGitRepository(); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("late binding = %v", err)
+	}
+	if err := lifecycle.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(disposable.Path(), "README.md"), []byte("verified Git proposal\n"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	freezeAndVerify(t, lifecycle)
+	plan, err := lifecycle.DeriveGitEffectPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan == nil || plan.RepositoryBindingHash() != binding.Identity() || plan.TargetRef() == "refs/heads/main" || len(plan.Effects()) != 1 {
+		t.Fatalf("Git plan = %#v", plan)
+	}
+	again, err := lifecycle.DeriveGitEffectPlan()
+	if err != nil || again != plan || again.Identity() != plan.Identity() || again.CreatedAt() != plan.CreatedAt() {
+		t.Fatalf("repeated derivation minted new authority: first=%p second=%p error=%v", plan, again, err)
+	}
+	if err := lifecycle.RevalidateGitEffectPlan(); err != nil {
+		t.Fatal(err)
+	}
+	after, err := tree.Scan(gitDir, tree.ScanOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Identity() != after.Identity() {
+		t.Fatalf("M5.1 mutated real Git metadata: before=%s after=%s", before.Identity(), after.Identity())
+	}
+}
+
+func TestLifecycleGitBindingRejectsM4BaselineGitBaseMismatch(t *testing.T) {
+	lifecycle, disposable, _ := boundGitLifecycle(t)
+	if err := os.WriteFile(filepath.Join(disposable.RealWorkspace(), "README.md"), []byte("outside commit after M4 baseline\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runLifecycleGit(t, disposable.RealWorkspace(), "add", "--", "README.md")
+	runLifecycleGit(t, disposable.RealWorkspace(), "-c", "user.name=MIRAGE Test", "-c", "user.email=mirage@example.invalid", "commit", "-m", "outside change")
+	if _, err := lifecycle.BindGitRepository(); !errors.Is(err, ErrRealStateConflict) {
+		t.Fatalf("binding mismatch = %v", err)
+	}
+	if lifecycle.State() != StateConflicted || lifecycle.GitRepositoryBinding() != nil {
+		t.Fatalf("state=%s binding=%#v", lifecycle.State(), lifecycle.GitRepositoryBinding())
+	}
+}
+
+func TestLifecycleGitPlanRejectsUntrackedM4Modify(t *testing.T) {
+	now := time.Date(2026, 8, 28, 18, 0, 0, 0, time.UTC)
+	real := lifecycleRealWorkspace(t)
+	runLifecycleGit(t, real, "init", "-b", "main")
+	writeLifecycleFile(t, real, "README.md", "tracked\n", 0o600)
+	runLifecycleGit(t, real, "add", "--", "README.md")
+	runLifecycleGit(t, real, "-c", "user.name=MIRAGE Test", "-c", "user.email=mirage@example.invalid", "commit", "-m", "initial")
+	writeLifecycleFile(t, real, "notes.txt", "untracked before\n", 0o600)
+	disposable, err := workspace.Prepare(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := disposable.Cleanup(); err != nil {
+			t.Errorf("cleanup disposable: %v", err)
+		}
+	})
+	workspaceBinding, err := disposable.Binding()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub := &sandboxStub{real: workspaceBinding.RealWorkspace(), disposable: workspaceBinding.DisposableWorkspace(), token: workspaceBinding.Token()}
+	manifest, err := NewRunManifest(lifecycleContract(t, now.Add(time.Hour), "/workspace/notes.txt"), workspaceBinding, stub, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifecycle, err := NewBoundLifecycle(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lifecycle.BindGitRepository(); err != nil {
+		t.Fatal(err)
+	}
+	runToStarted(t, lifecycle)
+	if err := os.WriteFile(filepath.Join(disposable.Path(), "notes.txt"), []byte("agent update\n"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	freezeAndVerify(t, lifecycle)
+	if _, err := lifecycle.DeriveGitEffectPlan(); !errors.Is(err, gitplan.ErrUnsupportedEffect) {
+		t.Fatalf("untracked Git effect = %v", err)
+	}
+	if lifecycle.State() != StateRejected || lifecycle.GitEffectPlan() != nil {
+		t.Fatalf("state=%s plan=%#v", lifecycle.State(), lifecycle.GitEffectPlan())
+	}
+}
+
+func TestLifecycleRejectsAgentCreatedShadowGitAsFilesystemMutation(t *testing.T) {
+	lifecycle, disposable, _ := boundGitLifecycle(t)
+	binding, err := lifecycle.BindGitRepository()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runToStarted(t, lifecycle)
+	if err := os.Mkdir(filepath.Join(disposable.Path(), ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(disposable.Path(), ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.Freeze(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	decision, err := lifecycle.Reconcile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Allowed || lifecycle.State() != StateRejected {
+		t.Fatalf("shadow .git decision=%#v state=%s", decision, lifecycle.State())
+	}
+	if lifecycle.GitRepositoryBinding().Identity() != binding.Identity() || lifecycle.GitEffectPlan() != nil {
+		t.Fatal("hostile shadow .git influenced trusted Git authority")
+	}
+	if _, err := lifecycle.DeriveGitEffectPlan(); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("rejected state derived plan: %v", err)
+	}
+}
+
+func TestLifecycleGitPlanRevalidationFailsOnConcurrentHeadChange(t *testing.T) {
+	lifecycle, disposable, _ := boundGitLifecycle(t)
+	if _, err := lifecycle.BindGitRepository(); err != nil {
+		t.Fatal(err)
+	}
+	runToStarted(t, lifecycle)
+	if err := os.WriteFile(filepath.Join(disposable.Path(), "README.md"), []byte("verified Git proposal\n"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	freezeAndVerify(t, lifecycle)
+	if _, err := lifecycle.DeriveGitEffectPlan(); err != nil {
+		t.Fatal(err)
+	}
+	runLifecycleGit(t, disposable.RealWorkspace(), "-c", "user.name=MIRAGE Test", "-c", "user.email=mirage@example.invalid", "commit", "--allow-empty", "-m", "concurrent head")
+	if err := lifecycle.RevalidateGitEffectPlan(); !errors.Is(err, gitplan.ErrRepositoryChanged) {
+		t.Fatalf("revalidation = %v", err)
+	}
+	if lifecycle.State() != StateConflicted {
+		t.Fatalf("state = %s, want CONFLICTED", lifecycle.State())
+	}
+	if err := lifecycle.RevalidateGitEffectPlan(); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("conflicted plan was retryable: %v", err)
 	}
 }
 
@@ -729,4 +905,48 @@ func lifecycleContract(t *testing.T, expires time.Time, allow ...string) *contra
 		t.Fatal(err)
 	}
 	return contract
+}
+
+func boundGitLifecycle(t *testing.T) (*Lifecycle, *workspace.Disposable, string) {
+	t.Helper()
+	now := time.Date(2026, 8, 28, 18, 0, 0, 0, time.UTC)
+	real := lifecycleRealWorkspace(t)
+	runLifecycleGit(t, real, "init", "-b", "main")
+	writeLifecycleFile(t, real, "README.md", "before\n", 0o600)
+	runLifecycleGit(t, real, "add", "--", "README.md")
+	runLifecycleGit(t, real, "-c", "user.name=MIRAGE Test", "-c", "user.email=mirage@example.invalid", "commit", "-m", "initial")
+	disposable, err := workspace.Prepare(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := disposable.Cleanup(); err != nil {
+			t.Errorf("cleanup disposable: %v", err)
+		}
+	})
+	binding, err := disposable.Binding()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub := &sandboxStub{real: binding.RealWorkspace(), disposable: binding.DisposableWorkspace(), token: binding.Token()}
+	manifest, err := NewRunManifest(lifecycleContract(t, now.Add(time.Hour), "/workspace/README.md"), binding, stub, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifecycle, err := NewBoundLifecycle(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return lifecycle, disposable, filepath.Join(real, ".git")
+}
+
+func runLifecycleGit(t *testing.T, root string, args ...string) string {
+	t.Helper()
+	command := exec.Command("git", append([]string{"-C", root}, args...)...)
+	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v (%s)", args, err, output)
+	}
+	return strings.TrimSpace(string(output))
 }
