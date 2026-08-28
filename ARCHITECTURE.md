@@ -846,6 +846,24 @@ on the supported Linux filesystems, not an atomic compare-and-swap with the
 earlier observations. M4.3 narrows these windows and binds what is applied; it
 does not eliminate them.
 
+M4.4 places arbitrary coding-agent execution on a hard-capped rootless-Docker
+tmpfs volume instead of the legacy writable bind mount. A trusted keeper holds
+the volume mounted while Mirage pauses and independently verifies the hostile
+cgroup, copies the frozen final tree into the protected host-side disposable
+directory through Docker's trusted archive path, then kills and proves both
+container process trees stopped before reconciliation. The manifest binds the
+exact agent image, argv, capacity, broker policy, and existing sandbox limits.
+
+The optional model path is a trusted host broker exposed as a single read-only
+mounted Unix-socket directory. Direct sandbox networking remains disabled and
+no provider key enters the agent. Responses-provider adapters proxy only
+bounded, exact-model requests; model output is untrusted and cannot authorize
+effects. The per-run broker directory grants the sandbox traversal to the
+known socket but neither listing nor write authority, and a local preflight
+must succeed before the coding agent starts. M4.4 does not change the M4.3
+commit shape: exactly one existing-file content modification is the only real
+mutation supported.
+
 Inside the trusted `ApplyCommit` phase, M2 prepares the replacement in the real
 file's directory, then re-observes the real file immediately before
 replacement. A content mismatch or a successfully observed type/shape change
@@ -2028,7 +2046,10 @@ M4 inputs, not solved claims.
 - run an actual coding agent in rootless sandbox,
 - no direct external egress,
 - no real credentials inside runtime,
-- real workspace protected.
+- hard-cap the arbitrary agent's writable workspace,
+- freeze and acquire authoritative final state before process-tree stop proof,
+- real workspace protected,
+- retain the M4.3 one-existing-file `MODIFY` commit boundary.
 
 ## M5 — Git + GitHub deferred commit
 
