@@ -1,5 +1,6 @@
 // Package runtime coordinates the lifecycle of an untrusted process sandbox
-// through trusted frozen-tree reconciliation and the narrow M4.3 real commit.
+// through trusted frozen-tree reconciliation, the narrow M4.3 real commit, and
+// M5.1's read-only Git authority planning.
 package runtime
 
 import (
@@ -9,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MrGray17/Mirage/internal/runtime/gitbinding"
+	"github.com/MrGray17/Mirage/internal/runtime/gitplan"
 	"github.com/MrGray17/Mirage/internal/runtime/realcommit"
 	"github.com/MrGray17/Mirage/internal/runtime/reconcile"
 	"github.com/MrGray17/Mirage/internal/runtime/tree"
@@ -106,6 +109,38 @@ type Lifecycle struct {
 	decision   reconcile.Decision
 	manifest   *RunManifest
 	commitPlan *realcommit.Plan
+	gitBinding *gitbinding.Binding
+	gitPlan    *gitplan.Plan
+}
+
+// BindGitRepository captures the exact trusted repository underlying the real
+// workspace. It is permitted only before sandbox preparation, so hostile
+// execution can never choose or refresh Git authority.
+func (l *Lifecycle) BindGitRepository() (*gitbinding.Binding, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.require(StateCreated, "bind Git repository"); err != nil {
+		return nil, err
+	}
+	if l.manifest == nil || l.manifest.identity == "" {
+		return nil, fmt.Errorf("%w: Git authority requires a bound run manifest", ErrInvalidManifest)
+	}
+	if l.gitBinding != nil {
+		return nil, fmt.Errorf("%w: Git repository is already bound", ErrInvalidTransition)
+	}
+	if err := l.validateManifest(); err != nil {
+		return nil, err
+	}
+	at, err := l.clock.Observe()
+	if err != nil {
+		return nil, fmt.Errorf("observe trusted time before Git binding: %w", err)
+	}
+	binding, err := gitbinding.Capture(l.manifest.workspace.RealWorkspace(), l.manifest.identity, at)
+	if err != nil {
+		return nil, fmt.Errorf("bind trusted Git repository: %w", err)
+	}
+	l.gitBinding = binding
+	return binding, nil
 }
 
 func NewLifecycle(sandbox Sandbox) (*Lifecycle, error) {
@@ -300,6 +335,78 @@ func (l *Lifecycle) Reconciliation() (*tree.Plan, reconcile.Decision) {
 	return l.plan, l.decision
 }
 
+// DeriveGitEffectPlan creates immutable M5.1 data from the already-verified
+// reconciliation. It neither mutates Git nor changes the runtime lifecycle.
+func (l *Lifecycle) DeriveGitEffectPlan() (*gitplan.Plan, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.require(StateVerified, "derive Git effect plan"); err != nil {
+		return nil, err
+	}
+	if l.manifest == nil || l.gitBinding == nil || l.plan == nil || !l.decision.Allowed {
+		return nil, fmt.Errorf("%w: verified Git planning authority is incomplete", ErrCommitAuthority)
+	}
+	if err := l.validateManifest(); err != nil {
+		return nil, err
+	}
+	at, err := l.clock.Observe()
+	if err != nil {
+		return nil, fmt.Errorf("observe trusted time before Git planning: %w", err)
+	}
+	plan, err := gitplan.New(gitplan.Spec{
+		RunID:              l.manifest.RunID(),
+		ManifestHash:       l.manifest.identity,
+		Contract:           l.manifest.contract,
+		Repository:         l.gitBinding,
+		ReconciliationPlan: l.plan,
+		Decision:           l.decision,
+		CreatedAt:          at,
+	})
+	if err != nil {
+		l.state = gitPlanFailureState(err)
+		return nil, fmt.Errorf("derive deferred Git plan: %w", err)
+	}
+	l.gitPlan = plan
+	return plan, nil
+}
+
+// RevalidateGitEffectPlan repeats repository, manifest, reconciliation, and
+// trusted-time checks without regenerating stale authority.
+func (l *Lifecycle) RevalidateGitEffectPlan() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.require(StateVerified, "revalidate Git effect plan"); err != nil {
+		return err
+	}
+	if l.manifest == nil || l.gitBinding == nil || l.gitPlan == nil || l.plan == nil {
+		return fmt.Errorf("%w: deferred Git plan is unavailable", ErrCommitAuthority)
+	}
+	if err := l.validateManifest(); err != nil {
+		return err
+	}
+	at, err := l.clock.Observe()
+	if err != nil {
+		return fmt.Errorf("observe trusted time before Git plan revalidation: %w", err)
+	}
+	if err := gitplan.Revalidate(l.gitPlan, l.manifest.identity, l.manifest.contract, l.gitBinding, l.plan, l.decision, at); err != nil {
+		l.state = gitPlanFailureState(err)
+		return fmt.Errorf("revalidate deferred Git plan: %w", err)
+	}
+	return nil
+}
+
+func (l *Lifecycle) GitRepositoryBinding() *gitbinding.Binding {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.gitBinding
+}
+
+func (l *Lifecycle) GitEffectPlan() *gitplan.Plan {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.gitPlan
+}
+
 // PreCommit derives the one explicit real-world mutation without applying it.
 // It is safe to call only after authoritative frozen-tree verification.
 func (l *Lifecycle) PreCommit() (*realcommit.Plan, error) {
@@ -466,6 +573,17 @@ func commitFailureState(err error) State {
 	case errors.Is(err, ErrRealStateConflict), errors.Is(err, realcommit.ErrConflict):
 		return StateConflicted
 	case errors.Is(err, ErrContractExpired), errors.Is(err, ErrShadowChanged), errors.Is(err, ErrCommitAuthority), errors.Is(err, ErrUnsupportedCommit):
+		return StateRejected
+	default:
+		return StateFailed
+	}
+}
+
+func gitPlanFailureState(err error) State {
+	switch {
+	case errors.Is(err, gitplan.ErrRepositoryChanged):
+		return StateConflicted
+	case errors.Is(err, gitplan.ErrAuthorityChanged), errors.Is(err, gitplan.ErrContractExpired), errors.Is(err, gitplan.ErrUnverified), errors.Is(err, gitplan.ErrUnsupportedEffect):
 		return StateRejected
 	default:
 		return StateFailed
