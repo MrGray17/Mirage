@@ -13,9 +13,12 @@ import (
 	"time"
 
 	"github.com/MrGray17/Mirage/internal/contracts"
+	"github.com/MrGray17/Mirage/internal/gitrefs"
 	hostileruntime "github.com/MrGray17/Mirage/internal/runtime"
 	"github.com/MrGray17/Mirage/internal/runtime/diagnostics"
 	runtimedocker "github.com/MrGray17/Mirage/internal/runtime/docker"
+	"github.com/MrGray17/Mirage/internal/runtime/githubbinding"
+	"github.com/MrGray17/Mirage/internal/runtime/gitpublication"
 	"github.com/MrGray17/Mirage/internal/runtime/modelbroker"
 	"github.com/MrGray17/Mirage/internal/runtime/workspace"
 )
@@ -188,6 +191,8 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 	quota := flags.Int64("workspace-quota-bytes", 64<<20, "hard writable disposable-workspace capacity")
 	brokerKind := flags.String("model-broker", "none", "trusted model broker: none, openai, or deepseek")
 	model := flags.String("model", "", "exact model allowed by the trusted broker")
+	publishGitHub := flags.Bool("publish-github", false, "create the contract-authorized MIRAGE run branch on github.com")
+	githubRepository := flags.String("github-repo", "", "canonical GitHub owner/repo; free-form URLs are not accepted")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -215,6 +220,19 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 	}
 	if *brokerKind != "none" && strings.TrimSpace(*model) == "" {
 		return errors.New("--model is required by the trusted model broker")
+	}
+	if !*publishGitHub && strings.TrimSpace(*githubRepository) != "" {
+		return errors.New("--github-repo requires explicit --publish-github opt-in")
+	}
+	if *publishGitHub && strings.TrimSpace(*githubRepository) == "" {
+		return errors.New("--publish-github requires exact --github-repo owner/repo authority")
+	}
+	githubToken := ""
+	if *publishGitHub {
+		githubToken = strings.TrimSpace(os.Getenv("MIRAGE_GITHUB_TOKEN"))
+		if githubToken == "" {
+			return errors.New("MIRAGE_GITHUB_TOKEN is required by trusted host-side publication; ambient Git/gh credentials are never used")
+		}
 	}
 
 	disposable, err := workspace.Prepare(*realWorkspace)
@@ -293,14 +311,22 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 		return errors.Join(err, closeBroker())
 	}
 	issuedAt := time.Now().UTC()
+	runID := "coding-agent-" + disposable.Token()[:16]
+	contractVersion := contracts.VersionV1
+	publicationPolicy := contracts.GitHubPublicationPolicy{}
+	if *publishGitHub {
+		contractVersion = contracts.VersionV2
+		publicationPolicy = contracts.GitHubPublicationPolicy{RepositoryFullName: *githubRepository, TargetRef: gitrefs.RunTarget(runID), Operation: contracts.GitHubCreateBranch}
+	}
 	contract, err := contracts.New(contracts.Spec{
-		Version:   contracts.VersionV1,
-		RunID:     "coding-agent-" + disposable.Token()[:16],
+		Version:   contractVersion,
+		RunID:     runID,
 		ActorID:   "coding-agent",
 		ExpiresAt: issuedAt.Add(*timeout + 3*operationTimeout),
 		Filesystem: contracts.FilesystemPolicy{Write: contracts.AccessRules{
 			Allow: []string{*allowedResource},
 		}},
+		GitHub: publicationPolicy,
 	})
 	if err != nil {
 		return errors.Join(err, closeBroker())
@@ -316,6 +342,22 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 	lifecycle, err := hostileruntime.NewBoundLifecycle(manifest)
 	if err != nil {
 		return errors.Join(err, closeBroker())
+	}
+	var githubClient *githubbinding.HTTPClient
+	if *publishGitHub {
+		githubClient, err = githubbinding.NewHTTPClient(githubToken)
+		if err != nil {
+			return errors.Join(err, closeBroker())
+		}
+		if _, err := lifecycle.BindGitRepository(); err != nil {
+			return errors.Join(err, closeBroker())
+		}
+		bindCtx, cancelBind := context.WithTimeout(context.Background(), operationTimeout)
+		_, err = lifecycle.BindGitHubRepository(bindCtx, *githubRepository, githubClient)
+		cancelBind()
+		if err != nil {
+			return errors.Join(err, closeBroker())
+		}
 	}
 	// From here on, disposable cleanup is conditional on proven sandbox
 	// destruction. If Docker cleanup is uncertain, retain the workspace and
@@ -380,13 +422,49 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 		cleanupErr := cleanupAgentRuntime(lifecycle, disposable, closeBroker)
 		return errors.Join(fmt.Errorf("coding-agent final state rejected with %d policy violation(s)", len(decision.Violations())), cleanupErr)
 	}
-	if _, err := lifecycle.PreCommit(); err != nil {
-		return errors.Join(err, cleanupAgentRuntime(lifecycle, disposable, closeBroker))
+	if *publishGitHub {
+		if _, err := lifecycle.DeriveGitEffectPlan(); err != nil {
+			return errors.Join(err, cleanupAgentRuntime(lifecycle, disposable, closeBroker))
+		}
+		artifact, err := lifecycle.ConstructGitCommitArtifact()
+		if err != nil {
+			return errors.Join(err, cleanupAgentRuntime(lifecycle, disposable, closeBroker))
+		}
+		publicationPlan, err := lifecycle.DeriveGitPublicationPlan(commandCtx)
+		if err != nil {
+			return errors.Join(err, cleanupAgentRuntime(lifecycle, disposable, closeBroker))
+		}
+		engine, err := gitpublication.NewEngine(githubClient, func() (string, error) {
+			value := strings.TrimSpace(os.Getenv("MIRAGE_GITHUB_TOKEN"))
+			if value == "" || value != githubToken {
+				return "", gitpublication.ErrCredential
+			}
+			return value, nil
+		})
+		if err != nil {
+			return errors.Join(err, cleanupAgentRuntime(lifecycle, disposable, closeBroker))
+		}
+		publishCtx, cancelPublish := context.WithTimeout(commandCtx, operationTimeout)
+		record, publishErr := lifecycle.PublishGitHub(publishCtx, engine)
+		cancelPublish()
+		if record != nil {
+			fmt.Fprintf(stdout, "runtime=%s repository_id=%d repository=%s target_ref=%s commit_oid=%s transport_acknowledged=%t reconciled=%t publication_record=%s\n", lifecycle.State(), record.RepositoryID(), record.RepositoryFullName(), record.TargetRef(), record.CommitOID(), record.TransportAcknowledged(), record.ResolvedByReconciliation(), record.Identity())
+		}
+		if publishErr != nil {
+			return errors.Join(publishErr, cleanupAgentRuntime(lifecycle, disposable, closeBroker))
+		}
+		if record == nil || artifact.CommitOID() != publicationPlan.CommitOID() || record.CommitOID() != artifact.CommitOID() {
+			return errors.Join(errors.New("publication evidence does not bind the exact commit artifact"), cleanupAgentRuntime(lifecycle, disposable, closeBroker))
+		}
+	} else {
+		if _, err := lifecycle.PreCommit(); err != nil {
+			return errors.Join(err, cleanupAgentRuntime(lifecycle, disposable, closeBroker))
+		}
+		if err := lifecycle.Commit(); err != nil {
+			return errors.Join(err, cleanupAgentRuntime(lifecycle, disposable, closeBroker))
+		}
+		fmt.Fprintf(stdout, "runtime=%s committed_resource=%s\n", lifecycle.State(), *allowedResource)
 	}
-	if err := lifecycle.Commit(); err != nil {
-		return errors.Join(err, cleanupAgentRuntime(lifecycle, disposable, closeBroker))
-	}
-	fmt.Fprintf(stdout, "runtime=%s committed_resource=%s\n", lifecycle.State(), *allowedResource)
 	cleanupErr := cleanupAgentRuntime(lifecycle, disposable, closeBroker)
 	return cleanupErr
 }

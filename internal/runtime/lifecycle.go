@@ -1,7 +1,7 @@
 // Package runtime coordinates the lifecycle of an untrusted process sandbox
 // through trusted frozen-tree reconciliation, the narrow M4.3 real commit,
 // M5.1's read-only Git authority planning, and M5.2's transaction-only commit
-// construction.
+// construction, and M5.3's create-only GitHub publication.
 package runtime
 
 import (
@@ -11,9 +11,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MrGray17/Mirage/internal/contracts"
 	"github.com/MrGray17/Mirage/internal/runtime/gitbinding"
 	"github.com/MrGray17/Mirage/internal/runtime/gitcommit"
+	"github.com/MrGray17/Mirage/internal/runtime/githubbinding"
 	"github.com/MrGray17/Mirage/internal/runtime/gitplan"
+	"github.com/MrGray17/Mirage/internal/runtime/gitpublication"
 	"github.com/MrGray17/Mirage/internal/runtime/realcommit"
 	"github.com/MrGray17/Mirage/internal/runtime/reconcile"
 	"github.com/MrGray17/Mirage/internal/runtime/tree"
@@ -49,6 +52,9 @@ const (
 	StateCommitReady
 	StateCommitting
 	StateCommitted
+	StatePublishing
+	StatePublished
+	StatePublicationUncertain
 	StateConflicted
 	StateRejected
 	StateFailed
@@ -78,6 +84,12 @@ func (s State) String() string {
 		return "COMMITTING"
 	case StateCommitted:
 		return "COMMITTED"
+	case StatePublishing:
+		return "PUBLISHING"
+	case StatePublished:
+		return "PUBLISHED"
+	case StatePublicationUncertain:
+		return "PUBLICATION_UNCERTAIN"
 	case StateConflicted:
 		return "CONFLICTED"
 	case StateRejected:
@@ -101,26 +113,81 @@ type Sandbox interface {
 	Destroy(context.Context) error
 }
 
+type GitPublicationEngine interface {
+	Publish(context.Context, *githubbinding.Binding, *gitpublication.Plan, *gitcommit.Artifact, *gitbinding.Binding, gitpublication.FinalAuthority) (gitpublication.Result, error)
+	Reconcile(context.Context, *githubbinding.Binding, *gitpublication.Plan) (githubbinding.RefObservation, gitpublication.Outcome, error)
+}
+
 // Lifecycle serializes sandbox actions with trusted state transitions.
 type Lifecycle struct {
-	mu                  sync.Mutex
-	sandbox             Sandbox
-	clock               *trustedtime.Clock
-	state               State
-	plan                *tree.Plan
-	decision            reconcile.Decision
-	manifest            *RunManifest
-	commitPlan          *realcommit.Plan
-	gitBinding          *gitbinding.Binding
-	gitPlan             *gitplan.Plan
-	gitArtifact         *gitcommit.Artifact
-	gitArtifactIdentity string
-	gitCleanupArtifact  *gitcommit.Artifact
+	mu                   sync.Mutex
+	sandbox              Sandbox
+	clock                *trustedtime.Clock
+	state                State
+	plan                 *tree.Plan
+	decision             reconcile.Decision
+	manifest             *RunManifest
+	commitPlan           *realcommit.Plan
+	gitBinding           *gitbinding.Binding
+	gitPlan              *gitplan.Plan
+	gitArtifact          *gitcommit.Artifact
+	gitArtifactIdentity  string
+	gitCleanupArtifact   *gitcommit.Artifact
+	githubClient         githubbinding.Client
+	githubBinding        *githubbinding.Binding
+	publicationPlan      *gitpublication.Plan
+	publicationRecord    *gitpublication.Record
+	publicationAttempted bool
 
 	// Test-only fault points remain nil in production. They exercise the final
 	// authority and cleanup rules without widening any public capability.
 	afterGitConstruction func()
 	cleanupGitArtifact   func(*gitcommit.Artifact) error
+}
+
+// BindGitHubRepository captures one exact github.com repository before hostile
+// execution. Repository authority comes from contract v2 plus GitHub's stable
+// repository ID, never from Git config, an agent, a URL, or credentials.
+func (l *Lifecycle) BindGitHubRepository(ctx context.Context, fullName string, client githubbinding.Client) (*githubbinding.Binding, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.require(StateCreated, "bind GitHub repository"); err != nil {
+		return nil, err
+	}
+	if l.manifest == nil || l.manifest.contract == nil || l.gitBinding == nil || client == nil {
+		return nil, fmt.Errorf("%w: Git and GitHub authority must be complete", ErrCommitAuthority)
+	}
+	if l.githubBinding != nil {
+		return nil, fmt.Errorf("%w: GitHub repository is already bound", ErrInvalidTransition)
+	}
+	if err := l.validateManifest(); err != nil {
+		return nil, err
+	}
+	if err := l.requireManifestRealBaseline(); err != nil {
+		return nil, err
+	}
+	at, err := l.clock.Observe()
+	if err != nil {
+		return nil, fmt.Errorf("observe trusted time before GitHub binding: %w", err)
+	}
+	policy := l.manifest.contract.GitHubPublication()
+	decision := l.manifest.contract.EvaluateGitHubPublication(policy.Operation, fullName, policy.TargetRef, at)
+	if !decision.Allowed {
+		return nil, fmt.Errorf("%w: %s", ErrCommitAuthority, decision.RuleID)
+	}
+	binding, err := githubbinding.Capture(ctx, client, fullName, l.manifest.contract.Hash(), l.manifest.identity, at)
+	if err != nil {
+		return nil, fmt.Errorf("bind trusted GitHub repository: %w", err)
+	}
+	if err := l.gitBinding.Revalidate(l.manifest.identity); err != nil {
+		return nil, fmt.Errorf("revalidate Git authority after GitHub binding: %w", err)
+	}
+	if err := l.requireManifestRealBaseline(); err != nil {
+		return nil, err
+	}
+	l.githubClient = client
+	l.githubBinding = binding
+	return binding, nil
 }
 
 // BindGitRepository captures the exact trusted repository underlying the real
@@ -521,6 +588,207 @@ func (l *Lifecycle) GitCommitArtifact() *gitcommit.Artifact {
 	return l.gitArtifact
 }
 
+// DeriveGitPublicationPlan mints at most one immutable, data-only plan after
+// the complete M5.2 artifact exists. Repeated calls freshly revalidate and
+// return the same plan rather than refreshing its identity.
+func (l *Lifecycle) DeriveGitPublicationPlan(ctx context.Context) (*gitpublication.Plan, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.require(StateVerified, "derive Git publication plan"); err != nil {
+		return nil, err
+	}
+	at, err := l.clock.Observe()
+	if err != nil {
+		l.state = StateFailed
+		return nil, fmt.Errorf("observe trusted publication-plan time: %w", err)
+	}
+	if err := l.revalidatePublicationAuthority(ctx, at, false); err != nil {
+		l.state = gitPublicationFailureState(err)
+		return nil, err
+	}
+	if l.publicationPlan != nil {
+		spec := l.gitPublicationPlanSpec(l.publicationPlan.CreatedAt())
+		if err := gitpublication.RevalidatePlan(l.publicationPlan, spec); err != nil {
+			l.state = gitPublicationFailureState(err)
+			return nil, err
+		}
+		return l.publicationPlan, nil
+	}
+	plan, err := gitpublication.NewPlan(l.gitPublicationPlanSpec(at))
+	if err != nil {
+		l.state = gitPublicationFailureState(err)
+		return nil, fmt.Errorf("derive Git publication plan: %w", err)
+	}
+	l.publicationPlan = plan
+	return plan, nil
+}
+
+// PublishGitHub is the sole M5.3 mutation entry point. It performs no automatic
+// retry and supplies the engine's mandatory last-possible authority callback.
+func (l *Lifecycle) PublishGitHub(ctx context.Context, engine GitPublicationEngine) (*gitpublication.Record, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.state == StatePublished {
+		return l.revalidatePublished(ctx, engine)
+	}
+	if err := l.require(StateVerified, "publish GitHub branch"); err != nil {
+		return nil, err
+	}
+	if engine == nil || l.publicationPlan == nil || l.gitArtifact == nil || l.githubBinding == nil || l.publicationAttempted {
+		return nil, fmt.Errorf("%w: publication authority is incomplete or already consumed", ErrCommitAuthority)
+	}
+	l.state = StatePublishing
+	result, err := engine.Publish(ctx, l.githubBinding, l.publicationPlan, l.gitArtifact, l.gitBinding, func(callbackContext context.Context) (time.Time, error) {
+		at, observeErr := l.clock.Observe()
+		if observeErr != nil {
+			return time.Time{}, fmt.Errorf("observe trusted time immediately before publication dispatch: %w", observeErr)
+		}
+		if authorityErr := l.revalidatePublicationAuthority(callbackContext, at, true); authorityErr != nil {
+			return time.Time{}, authorityErr
+		}
+		return at, nil
+	})
+	if result.Attempted {
+		l.publicationAttempted = true
+	}
+	if result.Record != nil {
+		l.publicationRecord = result.Record
+	}
+	if result.Record == nil {
+		l.state = gitPublicationFailureState(err)
+		return nil, err
+	}
+	switch result.Record.Outcome() {
+	case gitpublication.OutcomePublished:
+		l.state = StatePublished
+	case gitpublication.OutcomePublicationUncertain:
+		l.state = StatePublicationUncertain
+	case gitpublication.OutcomeConflicted:
+		l.state = StateConflicted
+	default:
+		l.state = StateFailed
+	}
+	return result.Record, err
+}
+
+// ReconcileGitPublication is read-only and is the only transition available
+// from PUBLICATION_UNCERTAIN. It can never start another push.
+func (l *Lifecycle) ReconcileGitPublication(ctx context.Context, engine GitPublicationEngine) (*gitpublication.Record, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.require(StatePublicationUncertain, "reconcile Git publication"); err != nil {
+		return nil, err
+	}
+	if engine == nil || l.publicationRecord == nil || l.publicationPlan == nil || l.githubBinding == nil || !l.publicationAttempted {
+		return nil, ErrCommitAuthority
+	}
+	observation, outcome, err := engine.Reconcile(ctx, l.githubBinding, l.publicationPlan)
+	if err != nil {
+		return l.publicationRecord, err
+	}
+	record, recordErr := gitpublication.ReconciledRecord(l.publicationRecord, observation, outcome)
+	if recordErr != nil {
+		return l.publicationRecord, recordErr
+	}
+	wasPublished := l.publicationRecord.Outcome() == gitpublication.OutcomePublished
+	l.publicationRecord = record
+	switch outcome {
+	case gitpublication.OutcomePublished:
+		l.state = StatePublished
+	case gitpublication.OutcomeConflicted:
+		l.state = StateConflicted
+	case gitpublication.OutcomeNotPublished:
+		if wasPublished {
+			l.state = StateConflicted
+		} else {
+			l.state = StateFailed
+		}
+	default:
+		l.state = StatePublicationUncertain
+	}
+	return record, nil
+}
+
+func (l *Lifecycle) GitHubRepositoryBinding() *githubbinding.Binding {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.githubBinding
+}
+func (l *Lifecycle) GitPublicationPlan() *gitpublication.Plan {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.state != StateVerified && l.state != StatePublishing && l.state != StatePublished && l.state != StatePublicationUncertain {
+		return nil
+	}
+	return l.publicationPlan
+}
+func (l *Lifecycle) PublicationRecord() *gitpublication.Record {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.publicationRecord
+}
+
+func (l *Lifecycle) revalidatePublished(ctx context.Context, engine GitPublicationEngine) (*gitpublication.Record, error) {
+	if engine == nil || l.publicationRecord == nil || l.publicationPlan == nil || l.githubBinding == nil {
+		return nil, ErrCommitAuthority
+	}
+	at, err := l.clock.Observe()
+	if err != nil {
+		l.state = StateFailed
+		return nil, err
+	}
+	if err := l.revalidatePublicationAuthority(ctx, at, true); err != nil {
+		l.state = gitPublicationFailureState(err)
+		return nil, err
+	}
+	observation, outcome, err := engine.Reconcile(ctx, l.githubBinding, l.publicationPlan)
+	if err != nil {
+		l.state = StatePublicationUncertain
+		return nil, err
+	}
+	if outcome != gitpublication.OutcomePublished || observation.OID != l.publicationPlan.CommitOID() {
+		l.state = StateConflicted
+		return nil, fmt.Errorf("%w: published remote ref drifted", gitpublication.ErrPreexistingRef)
+	}
+	return l.publicationRecord, nil
+}
+
+func (l *Lifecycle) revalidatePublicationAuthority(ctx context.Context, at time.Time, requirePlan bool) error {
+	if l.manifest == nil || l.manifest.contract == nil || l.gitBinding == nil || l.gitPlan == nil || l.gitArtifact == nil || l.githubClient == nil || l.githubBinding == nil || l.plan == nil || at.IsZero() {
+		return fmt.Errorf("%w: complete publication authority is required", ErrCommitAuthority)
+	}
+	fresh, err := l.revalidateGitConstructionAuthority(at)
+	if err != nil {
+		return err
+	}
+	if err := gitcommit.Revalidate(l.gitArtifact, l.gitCommitSpec(fresh, at)); err != nil {
+		return fmt.Errorf("revalidate commit artifact for publication: %w", err)
+	}
+	if err := l.githubBinding.Revalidate(ctx, l.githubClient, l.manifest.contract.Hash(), l.manifest.identity); err != nil {
+		return err
+	}
+	decision := l.manifest.contract.EvaluateGitHubPublication(contracts.GitHubCreateBranch, l.githubBinding.FullName(), l.gitPlan.TargetRef(), at)
+	if !decision.Allowed {
+		return fmt.Errorf("%w: %s", ErrCommitAuthority, decision.RuleID)
+	}
+	if l.githubBinding.CapturedAt().After(at) {
+		return fmt.Errorf("%w: trusted time predates GitHub binding", ErrCommitAuthority)
+	}
+	if requirePlan {
+		if l.publicationPlan == nil {
+			return fmt.Errorf("%w: publication plan is unavailable", ErrCommitAuthority)
+		}
+		if err := gitpublication.RevalidatePlan(l.publicationPlan, l.gitPublicationPlanSpec(l.publicationPlan.CreatedAt())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (l *Lifecycle) gitPublicationPlanSpec(createdAt time.Time) gitpublication.PlanSpec {
+	return gitpublication.PlanSpec{ManifestHash: l.manifest.identity, Contract: l.manifest.contract, Repository: l.gitBinding, GitPlan: l.gitPlan, Artifact: l.gitArtifact, GitHub: l.githubBinding, CreatedAt: createdAt}
+}
+
 // CleanupGitCommitArtifact explicitly destroys retained M5.2 transaction
 // state. Cleanup uncertainty is terminal and never hidden by semantic errors.
 func (l *Lifecycle) CleanupGitCommitArtifact() error {
@@ -840,6 +1108,19 @@ func gitCommitFailureState(err error) State {
 	case errors.Is(err, ErrRealStateConflict), errors.Is(err, gitcommit.ErrRepositoryChanged), errors.Is(err, gitplan.ErrRepositoryChanged):
 		return StateConflicted
 	case errors.Is(err, ErrContractExpired), errors.Is(err, ErrShadowChanged), errors.Is(err, ErrCommitAuthority), errors.Is(err, gitcommit.ErrAuthorityChanged), errors.Is(err, gitcommit.ErrContentMismatch), errors.Is(err, gitplan.ErrContractExpired):
+		return StateRejected
+	default:
+		return StateFailed
+	}
+}
+
+func gitPublicationFailureState(err error) State {
+	switch {
+	case errors.Is(err, ErrClockRollback), errors.Is(err, ErrTrustedTime), errors.Is(err, githubbinding.ErrUnavailable), errors.Is(err, gitpublication.ErrWorkspaceChanged), errors.Is(err, gitpublication.ErrCleanup), errors.Is(err, gitcommit.ErrTransactionChanged), errors.Is(err, gitcommit.ErrCleanup):
+		return StateFailed
+	case errors.Is(err, githubbinding.ErrRepositoryChanged), errors.Is(err, gitpublication.ErrPreexistingRef), errors.Is(err, ErrRealStateConflict), errors.Is(err, gitcommit.ErrRepositoryChanged), errors.Is(err, gitplan.ErrRepositoryChanged):
+		return StateConflicted
+	case errors.Is(err, ErrContractExpired), errors.Is(err, ErrShadowChanged), errors.Is(err, ErrCommitAuthority), errors.Is(err, gitpublication.ErrExpired), errors.Is(err, gitpublication.ErrAuthorityChanged), errors.Is(err, gitcommit.ErrAuthorityChanged):
 		return StateRejected
 	default:
 		return StateFailed

@@ -451,6 +451,16 @@ func (a *Artifact) GitTimestamp() time.Time {
 	return a.gitTimestamp
 }
 
+// ExportObjects copies the already-constructed loose object set into an empty,
+// caller-owned directory. This is a local data operation only; it grants no
+// ref, repository, credential, or publication authority.
+func (a *Artifact) ExportObjects(destination string) error {
+	if a == nil || a.transaction == nil {
+		return fmt.Errorf("%w: artifact transaction is unavailable", ErrInvalidArtifact)
+	}
+	return a.transaction.exportObjects(destination)
+}
+
 func value(a *Artifact, getter func() string) string {
 	if a == nil {
 		return ""

@@ -11,11 +11,17 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
+	"github.com/MrGray17/Mirage/internal/gitrefs"
 	"github.com/MrGray17/Mirage/internal/limits"
 )
 
-const VersionV1 = "mirage.contract/v1"
+const (
+	VersionV1 = "mirage.contract/v1"
+	VersionV2 = "mirage.contract/v2"
+)
 
 var ErrInvalidContract = errors.New("invalid effect contract")
 
@@ -40,6 +46,20 @@ type FilesystemPolicy struct {
 	Write AccessRules
 }
 
+// GitHubPublicationOperation is deliberately not a generic Git operation.
+// M5.3 recognizes only creation of one previously absent branch.
+type GitHubPublicationOperation string
+
+const GitHubCreateBranch GitHubPublicationOperation = "CREATE_BRANCH"
+
+// GitHubPublicationPolicy authorizes one exact GitHub destination. Repository
+// is canonical owner/repo data, never a URL or credential-bearing locator.
+type GitHubPublicationPolicy struct {
+	RepositoryFullName string
+	TargetRef          string
+	Operation          GitHubPublicationOperation
+}
+
 // Spec is mutable construction input. New copies and canonicalizes every field
 // so later mutation of Spec cannot change the resulting Contract.
 type Spec struct {
@@ -48,6 +68,7 @@ type Spec struct {
 	ActorID    string
 	ExpiresAt  time.Time
 	Filesystem FilesystemPolicy
+	GitHub     GitHubPublicationPolicy
 }
 
 // Contract is immutable after construction. Its fields are intentionally
@@ -58,6 +79,7 @@ type Contract struct {
 	actorID    string
 	expiresAt  time.Time
 	filesystem canonicalFilesystemPolicy
+	github     canonicalGitHubPublicationPolicy
 	hash       string
 }
 
@@ -79,6 +101,21 @@ type canonicalSpec struct {
 	Filesystem canonicalFilesystemPolicy `json:"filesystem"`
 }
 
+type canonicalGitHubPublicationPolicy struct {
+	RepositoryFullName string                     `json:"repository_full_name"`
+	TargetRef          string                     `json:"target_ref"`
+	Operation          GitHubPublicationOperation `json:"operation"`
+}
+
+type canonicalSpecV2 struct {
+	Version    string                           `json:"version"`
+	RunID      string                           `json:"run_id"`
+	ActorID    string                           `json:"actor_id"`
+	ExpiresAt  string                           `json:"expires_at"`
+	Filesystem canonicalFilesystemPolicy        `json:"filesystem"`
+	GitHub     canonicalGitHubPublicationPolicy `json:"github_publication"`
+}
+
 // Decision is structured policy evidence. Denials are never represented as a
 // bare boolean because callers must be able to reconstruct the rule applied.
 type Decision struct {
@@ -88,9 +125,10 @@ type Decision struct {
 	Evidence string
 }
 
-// New validates and canonicalizes a v1 contract.
+// New validates and canonicalizes a v1 or v2 contract. The v1 serialization
+// path is intentionally unchanged so all pre-M5.3 hashes remain compatible.
 func New(spec Spec) (*Contract, error) {
-	if spec.Version != VersionV1 {
+	if spec.Version != VersionV1 && spec.Version != VersionV2 {
 		return nil, fmt.Errorf("%w: unsupported version %q", ErrInvalidContract, spec.Version)
 	}
 	runID := strings.TrimSpace(spec.RunID)
@@ -110,27 +148,133 @@ func New(spec Spec) (*Contract, error) {
 		return nil, err
 	}
 	expiresAt := spec.ExpiresAt.UTC()
-	canonical := canonicalSpec{
-		Version:    VersionV1,
-		RunID:      runID,
-		ActorID:    actorID,
-		ExpiresAt:  expiresAt.Format(time.RFC3339Nano),
-		Filesystem: filesystem,
+	github := canonicalGitHubPublicationPolicy{}
+	var encoded []byte
+	if spec.Version == VersionV1 {
+		canonical := canonicalSpec{
+			Version: VersionV1, RunID: runID, ActorID: actorID,
+			ExpiresAt: expiresAt.Format(time.RFC3339Nano), Filesystem: filesystem,
+		}
+		encoded, err = json.Marshal(canonical)
+	} else {
+		github, err = canonicalizeGitHubPublicationPolicy(runID, spec.GitHub)
+		if err == nil {
+			canonical := canonicalSpecV2{
+				Version: VersionV2, RunID: runID, ActorID: actorID,
+				ExpiresAt: expiresAt.Format(time.RFC3339Nano), Filesystem: filesystem, GitHub: github,
+			}
+			encoded, err = json.Marshal(canonical)
+		}
 	}
-	encoded, err := json.Marshal(canonical)
 	if err != nil {
 		return nil, fmt.Errorf("%w: canonicalize: %w", ErrInvalidContract, err)
 	}
 	digest := sha256.Sum256(encoded)
 
 	return &Contract{
-		version:    VersionV1,
+		version:    spec.Version,
 		runID:      runID,
 		actorID:    actorID,
 		expiresAt:  expiresAt,
 		filesystem: filesystem,
+		github:     github,
 		hash:       fmt.Sprintf("sha256:%x", digest),
 	}, nil
+}
+
+// EvaluateGitHubPublication deterministically evaluates one remote effect. It
+// never contacts GitHub. Contract v1 and every non-exact operation default deny.
+func (c *Contract) EvaluateGitHubPublication(operation GitHubPublicationOperation, repository, targetRef string, at time.Time) Decision {
+	if c == nil {
+		return Decision{RuleID: "github.invalid_contract", Reason: "effect contract is unavailable"}
+	}
+	if at.IsZero() {
+		return Decision{RuleID: "contract.invalid_time", Reason: "trusted evaluation time is unavailable"}
+	}
+	if c.ExpiredAt(at) {
+		return Decision{RuleID: "contract.expired", Reason: "effect contract has expired", Evidence: c.expiresAt.Format(time.RFC3339Nano)}
+	}
+	if c.version != VersionV2 {
+		return Decision{RuleID: "github.version_default_deny", Reason: "contract version has no remote publication authority", Evidence: c.version}
+	}
+	canonicalRepository, err := CanonicalGitHubRepository(repository)
+	if err != nil {
+		return Decision{RuleID: "github.invalid_repository", Reason: "repository identity is not canonical", Evidence: "invalid owner/repo"}
+	}
+	if operation != GitHubCreateBranch {
+		return Decision{RuleID: "github.operation_default_deny", Reason: "GitHub operation is not authorized", Evidence: string(operation)}
+	}
+	if canonicalRepository != c.github.RepositoryFullName {
+		return Decision{RuleID: "github.repository_default_deny", Reason: "GitHub repository is not authorized", Evidence: canonicalRepository}
+	}
+	if targetRef != c.github.TargetRef {
+		return Decision{RuleID: "github.ref_default_deny", Reason: "Git ref is not authorized", Evidence: targetRef}
+	}
+	return Decision{Allowed: true, RuleID: "github.exact_create_branch", Reason: "exact create-only GitHub branch is authorized", Evidence: canonicalRepository + "@" + targetRef}
+}
+
+// GitHubPublication returns a value copy of the canonical v2 policy.
+func (c *Contract) GitHubPublication() GitHubPublicationPolicy {
+	if c == nil || c.version != VersionV2 {
+		return GitHubPublicationPolicy{}
+	}
+	return GitHubPublicationPolicy{RepositoryFullName: c.github.RepositoryFullName, TargetRef: c.github.TargetRef, Operation: c.github.Operation}
+}
+
+func canonicalizeGitHubPublicationPolicy(runID string, policy GitHubPublicationPolicy) (canonicalGitHubPublicationPolicy, error) {
+	repository, err := CanonicalGitHubRepository(policy.RepositoryFullName)
+	if err != nil {
+		return canonicalGitHubPublicationPolicy{}, err
+	}
+	if policy.Operation != GitHubCreateBranch {
+		return canonicalGitHubPublicationPolicy{}, fmt.Errorf("%w: only GitHub CREATE_BRANCH is supported", ErrInvalidContract)
+	}
+	if !gitrefs.IsRunTarget(runID, policy.TargetRef) {
+		return canonicalGitHubPublicationPolicy{}, fmt.Errorf("%w: GitHub target ref is not the deterministic run branch", ErrInvalidContract)
+	}
+	return canonicalGitHubPublicationPolicy{RepositoryFullName: repository, TargetRef: policy.TargetRef, Operation: policy.Operation}, nil
+}
+
+// CanonicalGitHubRepository validates owner/repo data for github.com and
+// returns its documented lower-case M5.3 canonical representation.
+func CanonicalGitHubRepository(value string) (string, error) {
+	if value == "" || value != strings.TrimSpace(value) || len(value) > 201 || !utf8.ValidString(value) || strings.Count(value, "/") != 1 {
+		return "", fmt.Errorf("%w: GitHub repository must be exact owner/repo data", ErrInvalidContract)
+	}
+	for _, r := range value {
+		if r > unicode.MaxASCII || unicode.IsControl(r) || unicode.IsSpace(r) {
+			return "", fmt.Errorf("%w: GitHub repository contains unsafe characters", ErrInvalidContract)
+		}
+	}
+	owner, repository, _ := strings.Cut(strings.ToLower(value), "/")
+	if !validGitHubOwner(owner) || !validGitHubRepositoryName(repository) {
+		return "", fmt.Errorf("%w: invalid GitHub owner or repository name", ErrInvalidContract)
+	}
+	return owner + "/" + repository, nil
+}
+
+func validGitHubOwner(value string) bool {
+	if len(value) < 1 || len(value) > 100 || value[0] == '-' || value[len(value)-1] == '-' || strings.Contains(value, "--") {
+		return false
+	}
+	for _, r := range value {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func validGitHubRepositoryName(value string) bool {
+	if len(value) < 1 || len(value) > 100 || value == "." || value == ".." {
+		return false
+	}
+	for _, r := range value {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' && r != '_' && r != '.' {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Contract) Version() string      { return c.version }

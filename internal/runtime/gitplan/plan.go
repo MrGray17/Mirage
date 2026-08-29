@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/MrGray17/Mirage/internal/contracts"
+	"github.com/MrGray17/Mirage/internal/gitrefs"
 	"github.com/MrGray17/Mirage/internal/runtime/gitbinding"
 	"github.com/MrGray17/Mirage/internal/runtime/reconcile"
 	"github.com/MrGray17/Mirage/internal/runtime/tree"
@@ -22,8 +23,7 @@ const (
 	Version        = "mirage.git-effect-plan/v1"
 	authorName     = "MIRAGE"
 	authorEmail    = "mirage@localhost"
-	branchPrefix   = "refs/heads/mirage/run-"
-	runHashLength  = 24
+	branchPrefix   = gitrefs.RunBranchPrefix // compatibility alias; derivation lives in gitrefs.
 	maxMessageSize = 256
 	maxRunIDSize   = 256
 )
@@ -119,7 +119,7 @@ func New(spec Spec) (*Plan, error) {
 		return nil, fmt.Errorf("%w: %v", ErrRepositoryChanged, err)
 	}
 	effects[0].BaseBlobOID = baseBlob.ObjectID()
-	targetRef := targetBranch(spec.RunID)
+	targetRef := gitrefs.RunTarget(spec.RunID)
 	manifestDigest := sha256.Sum256([]byte(spec.ManifestHash))
 	message := "MIRAGE verified change " + hex.EncodeToString(manifestDigest[:])[:12]
 	if !utf8.ValidString(message) || len(message) > maxMessageSize {
@@ -339,11 +339,6 @@ func deriveEffects(plan *tree.Plan) ([]Effect, error) {
 		BeforeMode: mutation.BeforeMode, AfterMode: mutation.AfterMode,
 		BeforeDigest: mutation.BeforeDigest, AfterDigest: mutation.AfterDigest,
 	}}, nil
-}
-
-func targetBranch(runID string) string {
-	digest := sha256.Sum256([]byte(runID))
-	return branchPrefix + hex.EncodeToString(digest[:])[:runHashLength]
 }
 
 func canonicalIdentity(plan canonicalPlan) (string, error) {
