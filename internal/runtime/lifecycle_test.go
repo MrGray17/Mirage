@@ -519,6 +519,95 @@ func TestLifecycleGitArtifactExpiryRollbackAndCleanupUncertaintyFailClosed(t *te
 	})
 }
 
+func TestLifecycleRevokesInstalledGitArtifactOnLaterAuthorityFailure(t *testing.T) {
+	base := time.Date(2026, 8, 29, 3, 0, 0, 0, time.UTC)
+	t.Run("HEAD then repeat construction", func(t *testing.T) {
+		lifecycle, disposable, _ := preparedGitArtifactLifecycle(t, func() time.Time { return base }, base.Add(time.Hour))
+		if _, err := lifecycle.ConstructGitCommitArtifact(); err != nil {
+			t.Fatal(err)
+		}
+		cleanupCalled := false
+		lifecycle.cleanupGitArtifact = func(artifact *gitcommit.Artifact) error {
+			cleanupCalled = true
+			return artifact.Cleanup()
+		}
+		runLifecycleGit(t, disposable.RealWorkspace(), "-c", "user.name=MIRAGE Test", "-c", "user.email=mirage@example.invalid", "commit", "--allow-empty", "-m", "later head")
+		if _, err := lifecycle.ConstructGitCommitArtifact(); !errors.Is(err, gitplan.ErrRepositoryChanged) || lifecycle.State() != StateConflicted || lifecycle.GitCommitArtifact() != nil || lifecycle.gitArtifact != nil || lifecycle.gitCleanupArtifact != nil || !cleanupCalled {
+			t.Fatalf("later HEAD = %v, state=%s valid=%#v installed=%#v recovery=%#v cleanup=%t", err, lifecycle.State(), lifecycle.GitCommitArtifact(), lifecycle.gitArtifact, lifecycle.gitCleanupArtifact, cleanupCalled)
+		}
+	})
+
+	t.Run("shadow then repeat construction", func(t *testing.T) {
+		lifecycle, disposable, _ := preparedGitArtifactLifecycle(t, func() time.Time { return base }, base.Add(time.Hour))
+		if _, err := lifecycle.ConstructGitCommitArtifact(); err != nil {
+			t.Fatal(err)
+		}
+		cleanupCalled := false
+		lifecycle.cleanupGitArtifact = func(artifact *gitcommit.Artifact) error {
+			cleanupCalled = true
+			return artifact.Cleanup()
+		}
+		if err := os.WriteFile(filepath.Join(disposable.Path(), "README.md"), []byte("later shadow\n"), 0o666); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := lifecycle.ConstructGitCommitArtifact(); !errors.Is(err, ErrShadowChanged) || lifecycle.State() != StateRejected || lifecycle.GitCommitArtifact() != nil || lifecycle.gitArtifact != nil || lifecycle.gitCleanupArtifact != nil || !cleanupCalled {
+			t.Fatalf("later shadow = %v, state=%s valid=%#v installed=%#v recovery=%#v cleanup=%t", err, lifecycle.State(), lifecycle.GitCommitArtifact(), lifecycle.gitArtifact, lifecycle.gitCleanupArtifact, cleanupCalled)
+		}
+	})
+
+	t.Run("contract expiry then repeat construction", func(t *testing.T) {
+		current := base
+		lifecycle, _, _ := preparedGitArtifactLifecycle(t, func() time.Time { return current }, base.Add(time.Minute))
+		if _, err := lifecycle.ConstructGitCommitArtifact(); err != nil {
+			t.Fatal(err)
+		}
+		cleanupCalled := false
+		lifecycle.cleanupGitArtifact = func(artifact *gitcommit.Artifact) error {
+			cleanupCalled = true
+			return artifact.Cleanup()
+		}
+		current = base.Add(time.Minute)
+		if _, err := lifecycle.ConstructGitCommitArtifact(); !errors.Is(err, ErrContractExpired) || lifecycle.State() != StateRejected || lifecycle.GitCommitArtifact() != nil || lifecycle.gitArtifact != nil || !cleanupCalled {
+			t.Fatalf("later expiry = %v, state=%s valid=%#v installed=%#v cleanup=%t", err, lifecycle.State(), lifecycle.GitCommitArtifact(), lifecycle.gitArtifact, cleanupCalled)
+		}
+	})
+
+	t.Run("clock rollback then artifact revalidation", func(t *testing.T) {
+		current := base
+		lifecycle, _, _ := preparedGitArtifactLifecycle(t, func() time.Time { return current }, base.Add(time.Hour))
+		if _, err := lifecycle.ConstructGitCommitArtifact(); err != nil {
+			t.Fatal(err)
+		}
+		cleanupCalled := false
+		lifecycle.cleanupGitArtifact = func(artifact *gitcommit.Artifact) error {
+			cleanupCalled = true
+			return artifact.Cleanup()
+		}
+		current = base.Add(-time.Second)
+		if err := lifecycle.RevalidateGitCommitArtifact(); !errors.Is(err, ErrClockRollback) || lifecycle.State() != StateFailed || lifecycle.GitCommitArtifact() != nil || lifecycle.gitArtifact != nil || !cleanupCalled {
+			t.Fatalf("later rollback = %v, state=%s valid=%#v installed=%#v cleanup=%t", err, lifecycle.State(), lifecycle.GitCommitArtifact(), lifecycle.gitArtifact, cleanupCalled)
+		}
+	})
+
+	t.Run("cleanup uncertainty dominates later conflict", func(t *testing.T) {
+		lifecycle, disposable, _ := preparedGitArtifactLifecycle(t, func() time.Time { return base }, base.Add(time.Hour))
+		if _, err := lifecycle.ConstructGitCommitArtifact(); err != nil {
+			t.Fatal(err)
+		}
+		lifecycle.cleanupGitArtifact = func(artifact *gitcommit.Artifact) error {
+			return errors.Join(artifact.Cleanup(), fmt.Errorf("%w: injected later cleanup uncertainty", gitcommit.ErrCleanup))
+		}
+		runLifecycleGit(t, disposable.RealWorkspace(), "-c", "user.name=MIRAGE Test", "-c", "user.email=mirage@example.invalid", "commit", "--allow-empty", "-m", "later head")
+		if _, err := lifecycle.ConstructGitCommitArtifact(); !errors.Is(err, gitplan.ErrRepositoryChanged) || !errors.Is(err, gitcommit.ErrCleanup) || lifecycle.State() != StateFailed || lifecycle.GitCommitArtifact() != nil || lifecycle.gitArtifact != nil || lifecycle.gitCleanupArtifact == nil {
+			t.Fatalf("later cleanup uncertainty = %v, state=%s valid=%#v installed=%#v recovery=%#v", err, lifecycle.State(), lifecycle.GitCommitArtifact(), lifecycle.gitArtifact, lifecycle.gitCleanupArtifact)
+		}
+		lifecycle.cleanupGitArtifact = nil
+		if err := lifecycle.CleanupGitCommitArtifact(); err != nil || lifecycle.gitCleanupArtifact != nil {
+			t.Fatalf("later cleanup retry = %v, retained=%#v", err, lifecycle.gitCleanupArtifact)
+		}
+	})
+}
+
 func TestLifecycleClockRollbackBeforePrepareFailsClosed(t *testing.T) {
 	base := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
 	stub := &sandboxStub{}

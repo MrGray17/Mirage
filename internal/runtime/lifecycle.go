@@ -440,17 +440,17 @@ func (l *Lifecycle) ConstructGitCommitArtifact() (*gitcommit.Artifact, error) {
 		return nil, err
 	}
 	if l.manifest == nil || l.gitBinding == nil || l.gitPlan == nil || l.plan == nil || !l.decision.Allowed {
-		return nil, fmt.Errorf("%w: verified Git construction authority is incomplete", ErrCommitAuthority)
+		cause := fmt.Errorf("%w: verified Git construction authority is incomplete", ErrCommitAuthority)
+		return nil, l.failGitArtifactAuthority(cause)
 	}
 	at, err := l.clock.Observe()
 	if err != nil {
-		l.state = StateFailed
-		return nil, fmt.Errorf("observe trusted time before Git construction: %w", err)
+		cause := fmt.Errorf("observe trusted time before Git construction: %w", err)
+		return nil, l.failGitArtifactAuthority(cause)
 	}
 	freshPlan, err := l.revalidateGitConstructionAuthority(at)
 	if err != nil {
-		l.state = gitCommitFailureState(err)
-		return nil, err
+		return nil, l.failGitArtifactAuthority(err)
 	}
 	spec := l.gitCommitSpec(freshPlan, at)
 	if l.gitArtifact != nil {
@@ -500,8 +500,7 @@ func (l *Lifecycle) RevalidateGitCommitArtifact() error {
 	}
 	at, err := l.clock.Observe()
 	if err != nil {
-		l.state = StateFailed
-		return fmt.Errorf("observe trusted time before artifact revalidation: %w", err)
+		return l.discardGitArtifact(fmt.Errorf("observe trusted time before artifact revalidation: %w", err))
 	}
 	freshPlan, err := l.revalidateGitConstructionAuthority(at)
 	if err != nil {
@@ -516,6 +515,9 @@ func (l *Lifecycle) RevalidateGitCommitArtifact() error {
 func (l *Lifecycle) GitCommitArtifact() *gitcommit.Artifact {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.state != StateVerified {
+		return nil
+	}
 	return l.gitArtifact
 }
 
@@ -621,6 +623,14 @@ func (l *Lifecycle) discardGitArtifact(cause error) error {
 	artifact := l.gitArtifact
 	l.gitArtifact = nil
 	return l.discardSpecificGitArtifact(artifact, cause)
+}
+
+func (l *Lifecycle) failGitArtifactAuthority(cause error) error {
+	if l.gitArtifact != nil {
+		return l.discardGitArtifact(cause)
+	}
+	l.state = gitCommitFailureState(cause)
+	return cause
 }
 
 func (l *Lifecycle) requireManifestRealBaseline() error {
