@@ -2060,7 +2060,8 @@ M5 is split so each new external authority receives a separate security review:
   reconciliation. No Git mutation or credential exists in this slice.
 - **M5.2 — deterministic commit construction:** construct and independently
   verify the exact commit in transaction-owned Git state without altering the
-  user's worktree or refs.
+  user's worktree or refs. The implemented boundary and limitations are
+  recorded in `docs/m5.2-deterministic-git-commit.md`.
 - **M5.3 — create-only remote branch:** push the exact verified commit with
   conflict/CAS protection and uncertain-result reconciliation.
 - **M5.4 — GitHub pull request effect:** create one bounded PR with idempotency

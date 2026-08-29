@@ -1,6 +1,7 @@
 // Package runtime coordinates the lifecycle of an untrusted process sandbox
-// through trusted frozen-tree reconciliation, the narrow M4.3 real commit, and
-// M5.1's read-only Git authority planning.
+// through trusted frozen-tree reconciliation, the narrow M4.3 real commit,
+// M5.1's read-only Git authority planning, and M5.2's transaction-only commit
+// construction.
 package runtime
 
 import (
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/MrGray17/Mirage/internal/runtime/gitbinding"
+	"github.com/MrGray17/Mirage/internal/runtime/gitcommit"
 	"github.com/MrGray17/Mirage/internal/runtime/gitplan"
 	"github.com/MrGray17/Mirage/internal/runtime/realcommit"
 	"github.com/MrGray17/Mirage/internal/runtime/reconcile"
@@ -101,16 +103,24 @@ type Sandbox interface {
 
 // Lifecycle serializes sandbox actions with trusted state transitions.
 type Lifecycle struct {
-	mu         sync.Mutex
-	sandbox    Sandbox
-	clock      *trustedtime.Clock
-	state      State
-	plan       *tree.Plan
-	decision   reconcile.Decision
-	manifest   *RunManifest
-	commitPlan *realcommit.Plan
-	gitBinding *gitbinding.Binding
-	gitPlan    *gitplan.Plan
+	mu                  sync.Mutex
+	sandbox             Sandbox
+	clock               *trustedtime.Clock
+	state               State
+	plan                *tree.Plan
+	decision            reconcile.Decision
+	manifest            *RunManifest
+	commitPlan          *realcommit.Plan
+	gitBinding          *gitbinding.Binding
+	gitPlan             *gitplan.Plan
+	gitArtifact         *gitcommit.Artifact
+	gitArtifactIdentity string
+	gitCleanupArtifact  *gitcommit.Artifact
+
+	// Test-only fault points remain nil in production. They exercise the final
+	// authority and cleanup rules without widening any public capability.
+	afterGitConstruction func()
+	cleanupGitArtifact   func(*gitcommit.Artifact) error
 }
 
 // BindGitRepository captures the exact trusted repository underlying the real
@@ -420,6 +430,209 @@ func (l *Lifecycle) GitEffectPlan() *gitplan.Plan {
 	return l.gitPlan
 }
 
+// ConstructGitCommitArtifact builds one deterministic candidate commit in
+// transaction-owned storage. It neither updates nor writes any real Git state.
+// Repeated calls revalidate and return the same immutable artifact.
+func (l *Lifecycle) ConstructGitCommitArtifact() (*gitcommit.Artifact, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.require(StateVerified, "construct deterministic Git commit"); err != nil {
+		return nil, err
+	}
+	if l.manifest == nil || l.gitBinding == nil || l.gitPlan == nil || l.plan == nil || !l.decision.Allowed {
+		cause := fmt.Errorf("%w: verified Git construction authority is incomplete", ErrCommitAuthority)
+		return nil, l.failGitArtifactAuthority(cause)
+	}
+	at, err := l.clock.Observe()
+	if err != nil {
+		cause := fmt.Errorf("observe trusted time before Git construction: %w", err)
+		return nil, l.failGitArtifactAuthority(cause)
+	}
+	freshPlan, err := l.revalidateGitConstructionAuthority(at)
+	if err != nil {
+		return nil, l.failGitArtifactAuthority(err)
+	}
+	spec := l.gitCommitSpec(freshPlan, at)
+	if l.gitArtifact != nil {
+		if err := gitcommit.Revalidate(l.gitArtifact, spec); err != nil {
+			return nil, l.discardGitArtifact(fmt.Errorf("revalidate existing Git commit artifact: %w", err))
+		}
+		return l.gitArtifact, nil
+	}
+	if l.gitArtifactIdentity != "" {
+		return nil, fmt.Errorf("%w: lifecycle already minted and cleaned its Git commit artifact", ErrInvalidTransition)
+	}
+
+	artifact, err := gitcommit.Construct(spec)
+	if err != nil {
+		l.state = gitCommitFailureState(err)
+		return nil, fmt.Errorf("construct deterministic Git commit: %w", err)
+	}
+	if l.afterGitConstruction != nil {
+		l.afterGitConstruction()
+	}
+	finalAt, err := l.clock.Observe()
+	if err != nil {
+		return nil, l.discardSpecificGitArtifact(artifact, fmt.Errorf("observe trusted time after Git construction: %w", err))
+	}
+	finalPlan, err := l.revalidateGitConstructionAuthority(finalAt)
+	if err != nil {
+		return nil, l.discardSpecificGitArtifact(artifact, err)
+	}
+	if err := gitcommit.Revalidate(artifact, l.gitCommitSpec(finalPlan, finalAt)); err != nil {
+		return nil, l.discardSpecificGitArtifact(artifact, fmt.Errorf("final Git commit artifact revalidation: %w", err))
+	}
+	l.gitArtifact = artifact
+	l.gitArtifactIdentity = artifact.Identity()
+	return artifact, nil
+}
+
+// RevalidateGitCommitArtifact proves that the existing transaction objects and
+// every upstream authority are still current without regenerating authority.
+func (l *Lifecycle) RevalidateGitCommitArtifact() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.require(StateVerified, "revalidate deterministic Git commit"); err != nil {
+		return err
+	}
+	if l.gitArtifact == nil {
+		return fmt.Errorf("%w: Git commit artifact is unavailable", ErrCommitAuthority)
+	}
+	at, err := l.clock.Observe()
+	if err != nil {
+		return l.discardGitArtifact(fmt.Errorf("observe trusted time before artifact revalidation: %w", err))
+	}
+	freshPlan, err := l.revalidateGitConstructionAuthority(at)
+	if err != nil {
+		return l.discardGitArtifact(err)
+	}
+	if err := gitcommit.Revalidate(l.gitArtifact, l.gitCommitSpec(freshPlan, at)); err != nil {
+		return l.discardGitArtifact(fmt.Errorf("revalidate deterministic Git commit: %w", err))
+	}
+	return nil
+}
+
+func (l *Lifecycle) GitCommitArtifact() *gitcommit.Artifact {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.state != StateVerified {
+		return nil
+	}
+	return l.gitArtifact
+}
+
+// CleanupGitCommitArtifact explicitly destroys retained M5.2 transaction
+// state. Cleanup uncertainty is terminal and never hidden by semantic errors.
+func (l *Lifecycle) CleanupGitCommitArtifact() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	artifact := l.gitArtifact
+	if artifact == nil {
+		artifact = l.gitCleanupArtifact
+	}
+	if artifact == nil {
+		return nil
+	}
+	if err := l.cleanupArtifact(artifact); err != nil {
+		l.retainCleanupOnly(artifact)
+		l.state = StateFailed
+		return err
+	}
+	if l.gitArtifact == artifact {
+		l.gitArtifact = nil
+	}
+	if l.gitCleanupArtifact == artifact {
+		l.gitCleanupArtifact = nil
+	}
+	return nil
+}
+
+func (l *Lifecycle) revalidateGitConstructionAuthority(at time.Time) (*tree.Plan, error) {
+	if l.manifest == nil || l.manifest.contract == nil || l.gitBinding == nil || l.gitPlan == nil || l.plan == nil || at.IsZero() {
+		return nil, fmt.Errorf("%w: Git construction authority is incomplete", ErrCommitAuthority)
+	}
+	if err := l.validateManifest(); err != nil {
+		return nil, err
+	}
+	if l.manifest.contract.ExpiredAt(at) {
+		return nil, fmt.Errorf("%w: %s", ErrContractExpired, l.manifest.contract.ExpiresAt().Format(time.RFC3339Nano))
+	}
+	if err := gitplan.Revalidate(l.gitPlan, l.manifest.identity, l.manifest.contract, l.gitBinding, l.plan, l.decision, at); err != nil {
+		return nil, fmt.Errorf("revalidate Git effect plan before construction: %w", err)
+	}
+	realNow, err := l.manifest.workspace.ObserveReal()
+	if err != nil {
+		return nil, fmt.Errorf("revalidate complete real baseline before Git construction: %w", err)
+	}
+	realBaseline := l.manifest.workspace.RealBaseline()
+	if realBaseline == nil || realNow.Identity() != realBaseline.Identity() {
+		return nil, fmt.Errorf("%w: M4 real baseline changed before Git construction", ErrRealStateConflict)
+	}
+	shadowNow, err := l.manifest.workspace.ObserveDisposable()
+	if err != nil {
+		return nil, fmt.Errorf("revalidate frozen shadow before Git construction: %w", err)
+	}
+	if shadowNow.Identity() != l.plan.FinalIdentity() {
+		return nil, fmt.Errorf("%w: expected final %s, observed %s", ErrShadowChanged, l.plan.FinalIdentity(), shadowNow.Identity())
+	}
+	recomputed, err := tree.Diff(l.manifest.workspace.DisposableBaseline(), shadowNow)
+	if err != nil {
+		return nil, fmt.Errorf("recompute frozen Git construction plan: %w", err)
+	}
+	if recomputed.Hash() != l.plan.Hash() {
+		return nil, fmt.Errorf("%w: verified and current reconciliation plans differ", ErrCommitAuthority)
+	}
+	if err := gitplan.Revalidate(l.gitPlan, l.manifest.identity, l.manifest.contract, l.gitBinding, recomputed, l.decision, at); err != nil {
+		return nil, fmt.Errorf("revalidate current Git construction effect: %w", err)
+	}
+	return recomputed, nil
+}
+
+func (l *Lifecycle) gitCommitSpec(plan *tree.Plan, at time.Time) gitcommit.Spec {
+	return gitcommit.Spec{
+		ManifestHash: l.manifest.identity, Contract: l.manifest.contract, Repository: l.gitBinding,
+		GitPlan: l.gitPlan, ReconciliationPlan: plan, Decision: l.decision, ObservedAt: at,
+	}
+}
+
+func (l *Lifecycle) cleanupArtifact(artifact *gitcommit.Artifact) error {
+	if l.cleanupGitArtifact != nil {
+		return l.cleanupGitArtifact(artifact)
+	}
+	return artifact.Cleanup()
+}
+
+func (l *Lifecycle) retainCleanupOnly(artifact *gitcommit.Artifact) {
+	if l.gitArtifact == artifact {
+		l.gitArtifact = nil
+	}
+	l.gitCleanupArtifact = artifact
+}
+
+func (l *Lifecycle) discardSpecificGitArtifact(artifact *gitcommit.Artifact, cause error) error {
+	cleanupErr := l.cleanupArtifact(artifact)
+	if cleanupErr != nil {
+		l.retainCleanupOnly(artifact)
+	}
+	result := errors.Join(cause, cleanupErr)
+	l.state = gitCommitFailureState(result)
+	return result
+}
+
+func (l *Lifecycle) discardGitArtifact(cause error) error {
+	artifact := l.gitArtifact
+	l.gitArtifact = nil
+	return l.discardSpecificGitArtifact(artifact, cause)
+}
+
+func (l *Lifecycle) failGitArtifactAuthority(cause error) error {
+	if l.gitArtifact != nil {
+		return l.discardGitArtifact(cause)
+	}
+	l.state = gitCommitFailureState(cause)
+	return cause
+}
+
 func (l *Lifecycle) requireManifestRealBaseline() error {
 	current, err := l.manifest.workspace.ObserveReal()
 	if err != nil {
@@ -441,6 +654,9 @@ func (l *Lifecycle) PreCommit() (*realcommit.Plan, error) {
 	defer l.mu.Unlock()
 	if err := l.require(StateVerified, "precommit"); err != nil {
 		return nil, err
+	}
+	if l.gitArtifact != nil || l.gitArtifactIdentity != "" {
+		return nil, fmt.Errorf("%w: lifecycle already selected the deferred Git path", ErrInvalidTransition)
 	}
 	l.state = StatePrecommitting
 	plan, err := l.deriveRealCommitPlan()
@@ -617,6 +833,19 @@ func gitPlanFailureState(err error) State {
 	}
 }
 
+func gitCommitFailureState(err error) State {
+	switch {
+	case errors.Is(err, gitcommit.ErrCleanup), errors.Is(err, gitcommit.ErrTransactionChanged):
+		return StateFailed
+	case errors.Is(err, ErrRealStateConflict), errors.Is(err, gitcommit.ErrRepositoryChanged), errors.Is(err, gitplan.ErrRepositoryChanged):
+		return StateConflicted
+	case errors.Is(err, ErrContractExpired), errors.Is(err, ErrShadowChanged), errors.Is(err, ErrCommitAuthority), errors.Is(err, gitcommit.ErrAuthorityChanged), errors.Is(err, gitcommit.ErrContentMismatch), errors.Is(err, gitplan.ErrContractExpired):
+		return StateRejected
+	default:
+		return StateFailed
+	}
+}
+
 // Reject is valid before execution, after freeze, during reconciliation, or
 // after verification. It never implies that a running process was stopped.
 func (l *Lifecycle) Reject() error {
@@ -624,6 +853,23 @@ func (l *Lifecycle) Reject() error {
 	defer l.mu.Unlock()
 	switch l.state {
 	case StateCreated, StatePreparing, StateFrozen, StateReconciling, StateVerified, StateCommitReady:
+		artifact := l.gitArtifact
+		if artifact == nil {
+			artifact = l.gitCleanupArtifact
+		}
+		if artifact != nil {
+			if err := l.cleanupArtifact(artifact); err != nil {
+				l.retainCleanupOnly(artifact)
+				l.state = StateFailed
+				return err
+			}
+			if l.gitArtifact == artifact {
+				l.gitArtifact = nil
+			}
+			if l.gitCleanupArtifact == artifact {
+				l.gitCleanupArtifact = nil
+			}
+		}
 		l.state = StateRejected
 		return nil
 	default:
@@ -639,10 +885,29 @@ func (l *Lifecycle) Destroy(ctx context.Context) error {
 	if l.state == StateRunning || l.state == StateFreezing {
 		return fmt.Errorf("%w: cannot destroy an unproven running sandbox in state %s", ErrInvalidTransition, l.state)
 	}
+	var result error
 	if err := l.sandbox.Destroy(ctx); err != nil {
-		return fmt.Errorf("destroy hostile sandbox: %w", err)
+		result = fmt.Errorf("destroy hostile sandbox: %w", err)
 	}
-	return nil
+	artifact := l.gitArtifact
+	if artifact == nil {
+		artifact = l.gitCleanupArtifact
+	}
+	if artifact != nil {
+		if err := l.cleanupArtifact(artifact); err != nil {
+			l.retainCleanupOnly(artifact)
+			l.state = StateFailed
+			result = errors.Join(result, err)
+		} else {
+			if l.gitArtifact == artifact {
+				l.gitArtifact = nil
+			}
+			if l.gitCleanupArtifact == artifact {
+				l.gitCleanupArtifact = nil
+			}
+		}
+	}
+	return result
 }
 
 func (l *Lifecycle) require(expected State, operation string) error {

@@ -5,6 +5,7 @@ package gitbinding
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -23,12 +24,14 @@ import (
 )
 
 const (
-	Version          = "mirage.git-repository-binding/v1"
-	maxGitOutput     = 4096
-	maxConfigBytes   = 1 << 20
-	maxIndexBytes    = 64 << 20
-	sha1HexLength    = 40
-	maxReferenceSize = 255
+	Version           = "mirage.git-repository-binding/v1"
+	maxGitOutput      = 4096
+	maxConfigBytes    = 1 << 20
+	maxIndexBytes     = 64 << 20
+	maxObjectBytes    = 64 << 20
+	sha1HexLength     = 40
+	maxReferenceSize  = 255
+	gitCommandTimeout = 10 * time.Second
 )
 
 var (
@@ -279,6 +282,26 @@ func (b *Binding) BindTrackedBlob(manifestHash, resource, expectedDigest string,
 	return TrackedBlob{objectID: fields[2], digest: observedDigest, executable: executable}, nil
 }
 
+// ReadObject returns the exact bounded payload of one already-present Git
+// object. It revalidates the immutable repository binding on both sides of the
+// read, disables lazy fetching, and never writes to the repository.
+func (b *Binding) ReadObject(manifestHash, objectType, objectID string, maximum int64) ([]byte, error) {
+	if b == nil || (objectType != "blob" && objectType != "tree" && objectType != "commit") || !validObjectID(objectID) || maximum <= 0 || maximum > maxObjectBytes {
+		return nil, fmt.Errorf("%w: invalid bounded object request", ErrGitObservation)
+	}
+	if err := b.Revalidate(manifestHash); err != nil {
+		return nil, err
+	}
+	contents, err := gitOutputBytes(b.root, int(maximum), "cat-file", objectType, objectID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: read bounded %s object %s", ErrGitObservation, objectType, objectID)
+	}
+	if err := b.Revalidate(manifestHash); err != nil {
+		return nil, err
+	}
+	return contents, nil
+}
+
 func observe(repositoryRoot string) (observation, error) {
 	root, rootInfo, gitDir, gitInfo, configDigest, indexDigest, headFileDigest, err := validatePhysicalLayout(repositoryRoot)
 	if err != nil {
@@ -462,7 +485,9 @@ func gitOutput(root string, args ...string) (string, error) {
 
 func gitOutputBytes(root string, limit int, args ...string) ([]byte, error) {
 	full := append([]string{"--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "-c", "credential.helper=", "-C", root}, args...)
-	command := exec.Command("git", full...)
+	ctx, cancel := context.WithTimeout(context.Background(), gitCommandTimeout)
+	defer cancel()
+	command := exec.CommandContext(ctx, "git", full...)
 	command.Env = scrubbedGitEnvironment()
 	stdout := &boundedBuffer{remaining: limit}
 	stderr := &boundedBuffer{remaining: maxGitOutput}

@@ -204,6 +204,13 @@ func TestBindTrackedBlobRejectsUntrackedOrMismatchedM4Base(t *testing.T) {
 	if _, err := binding.BindTrackedBlob(testManifest, "/workspace/README.md", "sha256:wrong", false); !errors.Is(err, ErrBlobMismatch) {
 		t.Fatalf("mismatched blob = %v", err)
 	}
+	contents, err := binding.ReadObject(testManifest, "blob", blob.ObjectID(), 64)
+	if err != nil || string(contents) != "before\n" {
+		t.Fatalf("bounded object = %q, %v", contents, err)
+	}
+	if _, err := binding.ReadObject(testManifest, "blob", blob.ObjectID(), 2); !errors.Is(err, ErrGitObservation) {
+		t.Fatalf("over-budget object read = %v", err)
+	}
 }
 
 func TestTrustedGitEnvironmentScrubsCredentials(t *testing.T) {
