@@ -26,12 +26,14 @@ func (f *fakeClient) ExactRef(context.Context, string, int64, string, string) (R
 
 func TestBindingCapturesStableRepositoryIdentityAndRevalidates(t *testing.T) {
 	at := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
-	client := &fakeClient{repository: Repository{ID: 1729, FullName: "MrGray17/Mirage-Test"}}
-	binding, err := Capture(context.Background(), client, "mrgray17/mirage-test", "contract", "manifest", at)
+	baseRef := "refs/heads/main"
+	baseCommit := "1111111111111111111111111111111111111111"
+	client := &fakeClient{repository: Repository{ID: 1729, FullName: "MrGray17/Mirage-Test"}, observation: RefObservation{Status: RefPresentExact, OID: baseCommit}}
+	binding, err := Capture(context.Background(), client, "mrgray17/mirage-test", "contract", "manifest", baseRef, baseCommit, at)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if binding.Provider() != Provider || binding.FullName() != "mrgray17/mirage-test" || binding.RepositoryID() != 1729 || binding.Identity() == "" || binding.ContractHash() != "contract" || binding.ManifestHash() != "manifest" {
+	if binding.Provider() != Provider || binding.FullName() != "mrgray17/mirage-test" || binding.RepositoryID() != 1729 || binding.Identity() == "" || binding.ContractHash() != "contract" || binding.ManifestHash() != "manifest" || binding.BaseRef() != baseRef || binding.BaseCommit() != baseCommit {
 		t.Fatalf("binding = %#v", binding)
 	}
 	if err := binding.Revalidate(context.Background(), client, "contract", "manifest"); err != nil {
@@ -40,6 +42,29 @@ func TestBindingCapturesStableRepositoryIdentityAndRevalidates(t *testing.T) {
 	client.repository.ID++
 	if err := binding.Revalidate(context.Background(), client, "contract", "manifest"); !errors.Is(err, ErrRepositoryChanged) {
 		t.Fatalf("identity drift = %v", err)
+	}
+}
+
+func TestBindingRequiresExactRemoteBase(t *testing.T) {
+	at := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+	baseRef := "refs/heads/main"
+	baseCommit := "1111111111111111111111111111111111111111"
+	for _, test := range []struct {
+		name        string
+		observation RefObservation
+		refErr      error
+		want        error
+	}{
+		{name: "absent", observation: RefObservation{Status: RefAbsent}, want: ErrRepositoryChanged},
+		{name: "other", observation: RefObservation{Status: RefPresentOther, OID: "2222222222222222222222222222222222222222"}, want: ErrRepositoryChanged},
+		{name: "unavailable", observation: RefObservation{Status: RefUnavailable}, refErr: errors.New("unavailable"), want: ErrUnavailable},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := &fakeClient{repository: Repository{ID: 1729, FullName: "owner/repo"}, observation: test.observation, refErr: test.refErr}
+			if _, err := Capture(context.Background(), client, "owner/repo", "contract", "manifest", baseRef, baseCommit, at); !errors.Is(err, test.want) {
+				t.Fatalf("capture = %v, want %v", err, test.want)
+			}
+		})
 	}
 }
 

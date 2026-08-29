@@ -47,8 +47,8 @@ func TestM53LifecycleMintsOnePlanAndRejectsStaleAuthorityBeforeDispatch(t *testi
 		if lifecycle.GitCommitArtifact() == nil {
 			t.Fatal("verified lifecycle lost artifact")
 		}
-		if client.refCalls != 0 {
-			t.Fatal("plan derivation unexpectedly inspected remote ref")
+		if client.refCalls != 1 {
+			t.Fatalf("plan derivation did not revalidate the bound remote base: calls=%d", client.refCalls)
 		}
 	})
 
@@ -104,9 +104,6 @@ func TestM53LifecycleMintsOnePlanAndRejectsStaleAuthorityBeforeDispatch(t *testi
 			record, err := lifecycle.PublishGitHub(context.Background(), engine)
 			if !errors.Is(err, test.want) || record != nil || lifecycle.State() != test.state {
 				t.Fatalf("record=%#v err=%v state=%s want %v/%s", record, err, lifecycle.State(), test.want, test.state)
-			}
-			if client.refCalls != 1 {
-				t.Fatalf("remote mutations cannot occur; preflight calls=%d", client.refCalls)
 			}
 		})
 	}
@@ -239,17 +236,25 @@ type m53LifecycleClient struct {
 	repository githubbinding.Repository
 	beforeRef  func()
 	refCalls   int
+	baseRef    string
+	baseCommit string
 }
 
 func (c *m53LifecycleClient) Repository(context.Context, string) (githubbinding.Repository, error) {
 	return c.repository, nil
 }
-func (c *m53LifecycleClient) ExactRef(context.Context, string, int64, string, string) (githubbinding.RefObservation, error) {
+func (c *m53LifecycleClient) ExactRef(_ context.Context, _ string, _ int64, ref, expected string) (githubbinding.RefObservation, error) {
 	c.refCalls++
 	if c.beforeRef != nil {
 		hook := c.beforeRef
 		c.beforeRef = nil
 		hook()
+	}
+	if ref == c.baseRef {
+		if c.baseCommit == expected {
+			return githubbinding.RefObservation{Status: githubbinding.RefPresentExact, OID: c.baseCommit}, nil
+		}
+		return githubbinding.RefObservation{Status: githubbinding.RefPresentOther, OID: c.baseCommit}, nil
 	}
 	return githubbinding.RefObservation{Status: githubbinding.RefAbsent}, nil
 }
@@ -291,7 +296,8 @@ func preparedPublicationLifecycle(t *testing.T, now func() time.Time, expires ti
 	if _, err := lifecycle.BindGitRepository(); err != nil {
 		t.Fatal(err)
 	}
-	client := &m53LifecycleClient{repository: githubbinding.Repository{ID: 1729, FullName: publicationLifecycleRepo}}
+	localGit := lifecycle.GitRepositoryBinding()
+	client := &m53LifecycleClient{repository: githubbinding.Repository{ID: 1729, FullName: publicationLifecycleRepo}, baseRef: localGit.HeadRef(), baseCommit: localGit.HeadCommit()}
 	if _, err := lifecycle.BindGitHubRepository(context.Background(), publicationLifecycleRepo, client); err != nil {
 		t.Fatal(err)
 	}

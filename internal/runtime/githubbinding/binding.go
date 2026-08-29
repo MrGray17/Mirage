@@ -27,6 +27,7 @@ const (
 	apiVersion       = "2026-03-10"
 	maxResponseBytes = 1 << 20
 	maxRepositoryID  = int64(^uint64(0) >> 1)
+	maxReferenceSize = 1024
 )
 
 var (
@@ -68,12 +69,14 @@ type Binding struct {
 	repositoryID int64
 	contractHash string
 	manifestHash string
+	baseRef      string
+	baseCommit   string
 	capturedAt   time.Time
 }
 
-func Capture(ctx context.Context, client Client, fullName, contractHash, manifestHash string, at time.Time) (*Binding, error) {
+func Capture(ctx context.Context, client Client, fullName, contractHash, manifestHash, baseRef, baseCommit string, at time.Time) (*Binding, error) {
 	canonical, err := contracts.CanonicalGitHubRepository(fullName)
-	if err != nil || client == nil || contractHash == "" || manifestHash == "" || at.IsZero() {
+	if err != nil || client == nil || contractHash == "" || manifestHash == "" || !validBranchRef(baseRef) || !validOID(baseCommit) || at.IsZero() {
 		return nil, errors.Join(ErrInvalidBinding, err)
 	}
 	repository, err := client.Repository(ctx, canonical)
@@ -84,12 +87,15 @@ func Capture(ctx context.Context, client Client, fullName, contractHash, manifes
 	if err != nil || observedName != canonical || repository.ID <= 0 || repository.ID > maxRepositoryID {
 		return nil, fmt.Errorf("%w: GitHub returned a different repository identity", ErrRepositoryChanged)
 	}
-	canonicalBinding := canonicalBinding{Version: Version, Provider: Provider, FullName: canonical, RepositoryID: repository.ID, ContractHash: contractHash, ManifestHash: manifestHash, CapturedAt: at.UTC().Format(time.RFC3339Nano)}
+	if err := requireExactBase(ctx, client, canonical, repository.ID, baseRef, baseCommit); err != nil {
+		return nil, err
+	}
+	canonicalBinding := canonicalBinding{Version: Version, Provider: Provider, FullName: canonical, RepositoryID: repository.ID, ContractHash: contractHash, ManifestHash: manifestHash, BaseRef: baseRef, BaseCommit: baseCommit, CapturedAt: at.UTC().Format(time.RFC3339Nano)}
 	identity, err := hashCanonical(canonicalBinding)
 	if err != nil {
 		return nil, err
 	}
-	return &Binding{version: Version, identity: identity, provider: Provider, fullName: canonical, repositoryID: repository.ID, contractHash: contractHash, manifestHash: manifestHash, capturedAt: at.UTC()}, nil
+	return &Binding{version: Version, identity: identity, provider: Provider, fullName: canonical, repositoryID: repository.ID, contractHash: contractHash, manifestHash: manifestHash, baseRef: baseRef, baseCommit: baseCommit, capturedAt: at.UTC()}, nil
 }
 
 func (b *Binding) Revalidate(ctx context.Context, client Client, contractHash, manifestHash string) error {
@@ -104,7 +110,10 @@ func (b *Binding) Revalidate(ctx context.Context, client Client, contractHash, m
 	if nameErr != nil || name != b.fullName || repository.ID != b.repositoryID {
 		return fmt.Errorf("%w: expected %s/%d", ErrRepositoryChanged, b.fullName, b.repositoryID)
 	}
-	identity, err := hashCanonical(canonicalBinding{Version: b.version, Provider: b.provider, FullName: b.fullName, RepositoryID: b.repositoryID, ContractHash: b.contractHash, ManifestHash: b.manifestHash, CapturedAt: b.capturedAt.Format(time.RFC3339Nano)})
+	if err := requireExactBase(ctx, client, b.fullName, b.repositoryID, b.baseRef, b.baseCommit); err != nil {
+		return err
+	}
+	identity, err := hashCanonical(canonicalBinding{Version: b.version, Provider: b.provider, FullName: b.fullName, RepositoryID: b.repositoryID, ContractHash: b.contractHash, ManifestHash: b.manifestHash, BaseRef: b.baseRef, BaseCommit: b.baseCommit, CapturedAt: b.capturedAt.Format(time.RFC3339Nano)})
 	if err != nil || identity != b.identity {
 		return fmt.Errorf("%w: canonical binding identity differs", ErrInvalidBinding)
 	}
@@ -119,6 +128,10 @@ func (b *Binding) ContractHash() string {
 }
 func (b *Binding) ManifestHash() string {
 	return bindingValue(b, func() string { return b.manifestHash })
+}
+func (b *Binding) BaseRef() string { return bindingValue(b, func() string { return b.baseRef }) }
+func (b *Binding) BaseCommit() string {
+	return bindingValue(b, func() string { return b.baseCommit })
 }
 func (b *Binding) RepositoryID() int64 {
 	if b == nil {
@@ -147,7 +160,20 @@ type canonicalBinding struct {
 	RepositoryID int64  `json:"repository_id"`
 	ContractHash string `json:"contract_hash"`
 	ManifestHash string `json:"manifest_hash"`
+	BaseRef      string `json:"base_ref"`
+	BaseCommit   string `json:"base_commit"`
 	CapturedAt   string `json:"captured_at"`
+}
+
+func requireExactBase(ctx context.Context, client Client, fullName string, repositoryID int64, baseRef, baseCommit string) error {
+	observation, err := client.ExactRef(ctx, fullName, repositoryID, baseRef, baseCommit)
+	if err != nil || observation.Status == RefUnavailable {
+		return fmt.Errorf("%w: remote base observation failed", ErrUnavailable)
+	}
+	if observation.Status != RefPresentExact || observation.OID != baseCommit {
+		return fmt.Errorf("%w: remote base %s does not equal bound commit", ErrRepositoryChanged, observation.Status)
+	}
+	return nil
 }
 
 func hashCanonical(value any) (string, error) {
@@ -291,4 +317,25 @@ func validOID(value string) bool {
 	}
 	_, err := hex.DecodeString(value)
 	return err == nil
+}
+
+func validBranchRef(ref string) bool {
+	if len(ref) <= len("refs/heads/") || len(ref) > maxReferenceSize || !strings.HasPrefix(ref, "refs/heads/") {
+		return false
+	}
+	name := strings.TrimPrefix(ref, "refs/heads/")
+	if strings.HasPrefix(name, "/") || strings.HasSuffix(name, "/") || strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".") || strings.Contains(name, "..") || strings.Contains(name, "@{") || strings.Contains(name, "//") {
+		return false
+	}
+	for _, part := range strings.Split(name, "/") {
+		if part == "" || strings.HasSuffix(part, ".lock") {
+			return false
+		}
+	}
+	for _, r := range name {
+		if r <= 0x20 || r == 0x7f || strings.ContainsRune("~^:?*[\\", r) {
+			return false
+		}
+	}
+	return true
 }

@@ -21,9 +21,10 @@ func TestM53LiveGitHubCreateOnlyPublication(t *testing.T) {
 		t.Skip("set MIRAGE_M53_LIVE=1 for the explicit one-branch GitHub proof")
 	}
 	repositoryName := strings.TrimSpace(os.Getenv("MIRAGE_M53_TEST_REPO"))
+	repositoryRoot := strings.TrimSpace(os.Getenv("MIRAGE_M53_TEST_REPO_ROOT"))
 	token := strings.TrimSpace(os.Getenv("MIRAGE_GITHUB_TOKEN"))
-	if repositoryName == "" || token == "" {
-		t.Fatal("MIRAGE_M53_TEST_REPO and MIRAGE_GITHUB_TOKEN are both required; ambient credentials are forbidden")
+	if repositoryName == "" || repositoryRoot == "" || token == "" {
+		t.Fatal("MIRAGE_M53_TEST_REPO, MIRAGE_M53_TEST_REPO_ROOT, and MIRAGE_GITHUB_TOKEN are required; ambient credentials are forbidden")
 	}
 	canonicalRepository, err := contracts.CanonicalGitHubRepository(repositoryName)
 	if err != nil {
@@ -31,11 +32,14 @@ func TestM53LiveGitHubCreateOnlyPublication(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	runID := fmt.Sprintf("m53-live-%d", now.UnixNano())
-	real := lifecycleRealWorkspace(t)
-	runLifecycleGit(t, real, "init", "-b", "main")
-	writeLifecycleFile(t, real, "README.md", "before\n", 0o600)
-	runLifecycleGit(t, real, "add", "README.md")
-	runLifecycleGit(t, real, "-c", "user.name=MIRAGE Test", "-c", "user.email=mirage@example.invalid", "commit", "-m", "initial")
+	real, err := filepath.Abs(repositoryRoot)
+	if err != nil || filepath.Clean(real) != real {
+		t.Fatalf("invalid dedicated live repository root: %v", err)
+	}
+	before, err := os.ReadFile(filepath.Join(real, "README.md"))
+	if err != nil {
+		t.Fatalf("dedicated live repository must contain README.md: %v", err)
+	}
 	disposable, err := workspace.Prepare(real)
 	if err != nil {
 		t.Fatal(err)
@@ -72,7 +76,8 @@ func TestM53LiveGitHubCreateOnlyPublication(t *testing.T) {
 		t.Fatal(err)
 	}
 	runToStarted(t, lifecycle)
-	if err := os.WriteFile(filepath.Join(disposable.Path(), "README.md"), []byte("MIRAGE M5.3 live publication proof\n"), 0o600); err != nil {
+	authorized := append(append([]byte(nil), before...), []byte(fmt.Sprintf("\nMIRAGE M5.3 live publication proof %s\n", runID))...)
+	if err := os.WriteFile(filepath.Join(disposable.Path(), "README.md"), authorized, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	freezeAndVerify(t, lifecycle)

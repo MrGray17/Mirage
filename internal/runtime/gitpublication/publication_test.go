@@ -47,9 +47,11 @@ func newPublicationFixture(t *testing.T) publicationFixture {
 	at := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
 	root := t.TempDir()
 	runFixtureGit(t, root, "init", "-b", "main")
-	writeFixtureFile(t, root, "README.md", []byte("before\n"))
 	writeFixtureFile(t, root, "unchanged.txt", []byte("unchanged\n"))
 	runFixtureGit(t, root, "add", "--", ".")
+	runFixtureGit(t, root, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "seed")
+	writeFixtureFile(t, root, "README.md", []byte("before\n"))
+	runFixtureGit(t, root, "add", "--", "README.md")
 	runFixtureGit(t, root, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "base")
 	repository, err := gitbinding.Capture(root, publicationManifest, at.Add(-time.Minute))
 	if err != nil {
@@ -86,8 +88,9 @@ func newPublicationFixture(t *testing.T) publicationFixture {
 	t.Cleanup(func() { _ = artifact.Cleanup() })
 	remote := filepath.Join(t.TempDir(), "remote.git")
 	runFixtureGit(t, filepath.Dir(remote), "init", "--bare", remote)
+	runFixtureGit(t, root, "push", remote, repository.HeadCommit()+":"+repository.HeadRef())
 	observer := &bareObserver{remote: remote, repository: githubbinding.Repository{ID: 1729, FullName: publicationRepo}}
-	github, err := githubbinding.Capture(context.Background(), observer, publicationRepo, contract.Hash(), publicationManifest, at.Add(time.Minute))
+	github, err := githubbinding.Capture(context.Background(), observer, publicationRepo, contract.Hash(), publicationManifest, gitPlan.BaseRef(), gitPlan.BaseCommit(), at.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +103,7 @@ func newPublicationFixture(t *testing.T) publicationFixture {
 
 func TestPublicationPlanBindsExactArtifactDestinationAndIsIdempotent(t *testing.T) {
 	fixture := newPublicationFixture(t)
-	if fixture.plan.CommitOID() != fixture.artifact.CommitOID() || fixture.plan.ArtifactIdentity() != fixture.artifact.Identity() || fixture.plan.TargetRef() != fixture.gitPlan.TargetRef() || fixture.plan.RepositoryFullName() != publicationRepo || fixture.plan.GitHubRepositoryID() != 1729 || fixture.plan.Operation() != contracts.GitHubCreateBranch || fixture.plan.Identity() == "" {
+	if fixture.plan.CommitOID() != fixture.artifact.CommitOID() || fixture.plan.ArtifactIdentity() != fixture.artifact.Identity() || fixture.plan.BaseRef() != fixture.gitPlan.BaseRef() || fixture.plan.BaseCommit() != fixture.gitPlan.BaseCommit() || fixture.plan.TargetRef() != fixture.gitPlan.TargetRef() || fixture.plan.RepositoryFullName() != publicationRepo || fixture.plan.GitHubRepositoryID() != 1729 || fixture.plan.Operation() != contracts.GitHubCreateBranch || fixture.plan.Identity() == "" {
 		t.Fatalf("plan = %#v", fixture.plan)
 	}
 	spec := PlanSpec{ManifestHash: publicationManifest, Contract: fixture.contract, Repository: fixture.repository, GitPlan: fixture.gitPlan, Artifact: fixture.artifact, GitHub: fixture.github, CreatedAt: fixture.plan.CreatedAt()}
@@ -111,8 +114,84 @@ func TestPublicationPlanBindsExactArtifactDestinationAndIsIdempotent(t *testing.
 	if err != nil || second.Identity() != fixture.plan.Identity() {
 		t.Fatalf("second = %#v, %v", second, err)
 	}
+	tampered := *fixture.plan
+	tampered.baseRef = "refs/heads/other"
+	if err := RevalidatePlan(&tampered, spec); !errors.Is(err, ErrAuthorityChanged) {
+		t.Fatalf("base ref was not identity-bound: %v", err)
+	}
+	tampered = *fixture.plan
+	tampered.baseCommit = strings.Repeat("f", 40)
+	if err := RevalidatePlan(&tampered, spec); !errors.Is(err, ErrAuthorityChanged) {
+		t.Fatalf("base commit was not identity-bound: %v", err)
+	}
 	if strings.Contains(fmt.Sprintf("%#v %#v", fixture.plan, fixture.artifact), fakeSecret) {
 		t.Fatal("secret entered immutable authority")
+	}
+}
+
+func TestRemoteBaseMustAlreadyContainTrustedHistoryBeforeAuthorityExists(t *testing.T) {
+	fixture := newPublicationFixture(t)
+	for _, test := range []struct {
+		name string
+		oid  string
+	}{
+		{name: "empty"},
+		{name: "behind", oid: runFixtureGit(t, fixture.repositoryRoot, "rev-parse", "HEAD^")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			remote := filepath.Join(t.TempDir(), "remote.git")
+			runFixtureGit(t, filepath.Dir(remote), "init", "--bare", remote)
+			if test.oid != "" {
+				runFixtureGit(t, fixture.repositoryRoot, "push", remote, test.oid+":"+fixture.gitPlan.BaseRef())
+			}
+			observer := &bareObserver{remote: remote, repository: githubbinding.Repository{ID: 1729, FullName: publicationRepo}}
+			if _, err := githubbinding.Capture(context.Background(), observer, publicationRepo, fixture.contract.Hash(), publicationManifest, fixture.gitPlan.BaseRef(), fixture.gitPlan.BaseCommit(), fixture.at); !errors.Is(err, githubbinding.ErrRepositoryChanged) {
+				t.Fatalf("capture = %v", err)
+			}
+			if observed := observer.observe(fixture.gitPlan.TargetRef(), fixture.artifact.CommitOID()); observed.Status != githubbinding.RefAbsent {
+				t.Fatalf("target changed without authority: %#v", observed)
+			}
+			if gitObjectExists(remote, fixture.gitPlan.BaseCommit()) || gitObjectExists(remote, fixture.artifact.CommitOID()) {
+				t.Fatal("M5.3 exported local-only base or candidate history before authority existed")
+			}
+		})
+	}
+}
+
+func TestRemoteBaseDisappearingBeforePublicationPerformsNoPush(t *testing.T) {
+	fixture := newPublicationFixture(t)
+	runFixtureGit(t, fixture.remote, "update-ref", "-d", fixture.plan.BaseRef())
+	runner := &countRunner{}
+	engine, _ := NewEngine(fixture.observer, func() (string, error) { return fakeSecret, nil })
+	engine.runner = runner
+	result, err := engine.Publish(context.Background(), fixture.github, fixture.plan, fixture.artifact, fixture.repository, trustedDispatch(fixture.at))
+	if !errors.Is(err, githubbinding.ErrRepositoryChanged) || result.Attempted || result.Record != nil || runner.calls != 0 {
+		t.Fatalf("result=%#v err=%v calls=%d", result, err, runner.calls)
+	}
+	if observed := fixture.observer.observe(fixture.plan.TargetRef(), fixture.plan.CommitOID()); observed.Status != githubbinding.RefAbsent {
+		t.Fatalf("target changed: %#v", observed)
+	}
+}
+
+func TestRemoteBaseMovingBeforeFinalAuthorityPerformsNoPush(t *testing.T) {
+	fixture := newPublicationFixture(t)
+	runner := &countRunner{}
+	engine, _ := NewEngine(fixture.observer, func() (string, error) { return fakeSecret, nil })
+	engine.runner = runner
+	parent := runFixtureGit(t, fixture.repositoryRoot, "rev-parse", "HEAD^")
+	final := func(ctx context.Context) (time.Time, error) {
+		runFixtureGit(t, fixture.remote, "update-ref", fixture.plan.BaseRef(), parent)
+		if err := fixture.github.Revalidate(ctx, fixture.observer, fixture.plan.ContractHash(), fixture.plan.ManifestHash()); err != nil {
+			return time.Time{}, err
+		}
+		return fixture.at.Add(3 * time.Minute), nil
+	}
+	result, err := engine.Publish(context.Background(), fixture.github, fixture.plan, fixture.artifact, fixture.repository, final)
+	if !errors.Is(err, githubbinding.ErrRepositoryChanged) || result.Attempted || result.Record != nil || runner.calls != 0 {
+		t.Fatalf("result=%#v err=%v calls=%d", result, err, runner.calls)
+	}
+	if observed := fixture.observer.observe(fixture.plan.TargetRef(), fixture.plan.CommitOID()); observed.Status != githubbinding.RefAbsent {
+		t.Fatalf("target changed: %#v", observed)
 	}
 }
 
@@ -136,7 +215,8 @@ func TestLocalBarePublicationCreatesExactlyOneNewRefAndLeavesLocalGitIdentical(t
 		t.Fatalf("remote = %#v", observed)
 	}
 	refs := runFixtureGit(t, fixture.remote, "for-each-ref", "--format=%(refname) %(objectname)")
-	if refs != fixture.gitPlan.TargetRef()+" "+fixture.artifact.CommitOID() || strings.Contains(refs, "refs/tags/") {
+	wantRefs := fixture.plan.BaseRef() + " " + fixture.plan.BaseCommit() + "\n" + fixture.gitPlan.TargetRef() + " " + fixture.artifact.CommitOID()
+	if refs != wantRefs || strings.Contains(refs, "refs/tags/") {
 		t.Fatalf("unexpected refs: %q", refs)
 	}
 	after, err := snapshotGit(fixture.repository.GitDir())
@@ -197,7 +277,7 @@ func TestPostAttemptReconciliationClassifiesEveryRemoteTruthWithoutRetry(t *test
 	})
 	t.Run("query unavailable", func(t *testing.T) {
 		fixture := newPublicationFixture(t)
-		fixture.observer.unavailableAfter = fixture.observer.calls + 1
+		fixture.observer.unavailableAfter = fixture.observer.calls + 2
 		runner := &countRunner{}
 		engine, _ := NewEngine(fixture.observer, func() (string, error) { return fakeSecret, nil })
 		engine.runner = runner
@@ -423,6 +503,11 @@ func runFixtureGit(t *testing.T, root string, args ...string) string {
 		t.Fatalf("git %v: %v (%s)", args, err, output)
 	}
 	return strings.TrimSpace(string(output))
+}
+func gitObjectExists(gitDir, oid string) bool {
+	command := exec.Command("git", "--git-dir="+gitDir, "cat-file", "-e", oid+"^{object}")
+	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	return command.Run() == nil
 }
 func sha256Prefix(value string) string {
 	digest := fmt.Sprintf("%x", sha256Bytes([]byte(value)))

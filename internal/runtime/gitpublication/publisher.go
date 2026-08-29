@@ -59,12 +59,15 @@ func (e *Engine) Publish(ctx context.Context, binding *githubbinding.Binding, pl
 	if e == nil || e.observer == nil || e.credential == nil || e.runner == nil || binding == nil || plan == nil || artifact == nil || repository == nil || final == nil {
 		return Result{}, fmt.Errorf("%w: complete lifecycle-mediated inputs are required", ErrPublication)
 	}
-	if binding.Identity() != plan.GitHubBindingIdentity() || binding.RepositoryID() != plan.GitHubRepositoryID() || binding.FullName() != plan.RepositoryFullName() || repository.Identity() != plan.RepositoryBindingIdentity() || artifact.Identity() != plan.ArtifactIdentity() || artifact.CommitOID() != plan.CommitOID() || artifact.TargetRef() != plan.TargetRef() {
+	if binding.Identity() != plan.GitHubBindingIdentity() || binding.RepositoryID() != plan.GitHubRepositoryID() || binding.FullName() != plan.RepositoryFullName() || binding.BaseRef() != plan.BaseRef() || binding.BaseCommit() != plan.BaseCommit() || repository.Identity() != plan.RepositoryBindingIdentity() || artifact.Identity() != plan.ArtifactIdentity() || artifact.CommitOID() != plan.CommitOID() || artifact.TargetRef() != plan.TargetRef() {
 		return Result{}, fmt.Errorf("%w: artifact, plan, local repository, or GitHub binding differs", ErrAuthorityChanged)
 	}
 	token, err := e.credential()
 	if err != nil || strings.TrimSpace(token) == "" {
 		return Result{}, ErrCredential
+	}
+	if err := binding.Revalidate(ctx, e.observer, plan.ContractHash(), plan.ManifestHash()); err != nil {
+		return Result{}, err
 	}
 	preflight, err := e.observer.ExactRef(ctx, binding.FullName(), binding.RepositoryID(), plan.TargetRef(), plan.CommitOID())
 	if err != nil || preflight.Status == githubbinding.RefUnavailable {

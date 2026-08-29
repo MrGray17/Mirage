@@ -175,7 +175,7 @@ func (l *Lifecycle) BindGitHubRepository(ctx context.Context, fullName string, c
 	if !decision.Allowed {
 		return nil, fmt.Errorf("%w: %s", ErrCommitAuthority, decision.RuleID)
 	}
-	binding, err := githubbinding.Capture(ctx, client, fullName, l.manifest.contract.Hash(), l.manifest.identity, at)
+	binding, err := githubbinding.Capture(ctx, client, fullName, l.manifest.contract.Hash(), l.manifest.identity, l.gitBinding.HeadRef(), l.gitBinding.HeadCommit(), at)
 	if err != nil {
 		return nil, fmt.Errorf("bind trusted GitHub repository: %w", err)
 	}

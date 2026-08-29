@@ -46,6 +46,7 @@ type Plan struct {
 	artifactIdentity          string
 	commitOID                 string
 	baseCommit                string
+	baseRef                   string
 	githubBindingIdentity     string
 	githubRepositoryID        int64
 	repositoryFullName        string
@@ -67,7 +68,7 @@ func NewPlan(spec PlanSpec) (*Plan, error) {
 		version: PlanVersion, identity: identity, manifestHash: spec.ManifestHash,
 		contractHash: spec.Contract.Hash(), repositoryBindingIdentity: spec.Repository.Identity(),
 		gitPlanIdentity: spec.GitPlan.Identity(), artifactIdentity: spec.Artifact.Identity(),
-		commitOID: spec.Artifact.CommitOID(), baseCommit: spec.Artifact.BaseCommit(),
+		commitOID: spec.Artifact.CommitOID(), baseCommit: spec.Artifact.BaseCommit(), baseRef: spec.GitPlan.BaseRef(),
 		githubBindingIdentity: spec.GitHub.Identity(), githubRepositoryID: spec.GitHub.RepositoryID(),
 		repositoryFullName: spec.GitHub.FullName(), targetRef: spec.GitPlan.TargetRef(),
 		operation: contracts.GitHubCreateBranch, createdAt: spec.CreatedAt.UTC(),
@@ -83,7 +84,7 @@ func RevalidatePlan(plan *Plan, spec PlanSpec) error {
 		return err
 	}
 	identity, err := hashCanonical(canonical)
-	if err != nil || identity != plan.identity || plan.version != PlanVersion || plan.manifestHash != spec.ManifestHash || plan.contractHash != spec.Contract.Hash() || plan.repositoryBindingIdentity != spec.Repository.Identity() || plan.gitPlanIdentity != spec.GitPlan.Identity() || plan.artifactIdentity != spec.Artifact.Identity() || plan.commitOID != spec.Artifact.CommitOID() || plan.baseCommit != spec.Artifact.BaseCommit() || plan.githubBindingIdentity != spec.GitHub.Identity() || plan.githubRepositoryID != spec.GitHub.RepositoryID() || plan.repositoryFullName != spec.GitHub.FullName() || plan.targetRef != spec.GitPlan.TargetRef() || plan.operation != contracts.GitHubCreateBranch || !plan.createdAt.Equal(spec.CreatedAt.UTC()) {
+	if err != nil || identity != plan.identity || plan.version != PlanVersion || plan.manifestHash != spec.ManifestHash || plan.contractHash != spec.Contract.Hash() || plan.repositoryBindingIdentity != spec.Repository.Identity() || plan.gitPlanIdentity != spec.GitPlan.Identity() || plan.artifactIdentity != spec.Artifact.Identity() || plan.commitOID != spec.Artifact.CommitOID() || plan.baseCommit != spec.Artifact.BaseCommit() || plan.baseRef != spec.GitPlan.BaseRef() || plan.githubBindingIdentity != spec.GitHub.Identity() || plan.githubRepositoryID != spec.GitHub.RepositoryID() || plan.repositoryFullName != spec.GitHub.FullName() || plan.targetRef != spec.GitPlan.TargetRef() || plan.operation != contracts.GitHubCreateBranch || !plan.createdAt.Equal(spec.CreatedAt.UTC()) {
 		return fmt.Errorf("%w: immutable plan identity differs", ErrAuthorityChanged)
 	}
 	return nil
@@ -99,7 +100,7 @@ func validatePlanAuthority(spec PlanSpec) (canonicalPlan, error) {
 	if spec.CreatedAt.UTC().Before(spec.GitHub.CapturedAt()) || spec.CreatedAt.UTC().Before(spec.GitPlan.CreatedAt()) {
 		return canonicalPlan{}, fmt.Errorf("%w: publication plan predates upstream authority", ErrAuthorityChanged)
 	}
-	if spec.Contract.Version() != contracts.VersionV2 || spec.ManifestHash != spec.Artifact.ManifestHash() || spec.ManifestHash != spec.GitPlan.ManifestHash() || spec.ManifestHash != spec.GitHub.ManifestHash() || spec.Contract.Hash() != spec.GitPlan.ContractHash() || spec.Contract.Hash() != spec.GitHub.ContractHash() || spec.Repository.Identity() != spec.GitPlan.RepositoryBindingHash() || spec.Repository.Identity() != spec.Artifact.RepositoryBindingIdentity() || spec.GitPlan.Identity() != spec.Artifact.GitPlanIdentity() || spec.GitPlan.BaseCommit() != spec.Artifact.BaseCommit() || spec.GitPlan.TargetRef() != spec.Artifact.TargetRef() || spec.GitPlan.TargetRef() == "" || !validOID(spec.Artifact.CommitOID()) || !validOID(spec.Artifact.BaseCommit()) {
+	if spec.Contract.Version() != contracts.VersionV2 || spec.ManifestHash != spec.Artifact.ManifestHash() || spec.ManifestHash != spec.GitPlan.ManifestHash() || spec.ManifestHash != spec.GitHub.ManifestHash() || spec.Contract.Hash() != spec.GitPlan.ContractHash() || spec.Contract.Hash() != spec.GitHub.ContractHash() || spec.Repository.Identity() != spec.GitPlan.RepositoryBindingHash() || spec.Repository.Identity() != spec.Artifact.RepositoryBindingIdentity() || spec.GitPlan.Identity() != spec.Artifact.GitPlanIdentity() || spec.GitPlan.BaseCommit() != spec.Artifact.BaseCommit() || spec.GitPlan.BaseRef() != spec.GitHub.BaseRef() || spec.GitPlan.BaseCommit() != spec.GitHub.BaseCommit() || spec.GitPlan.TargetRef() != spec.Artifact.TargetRef() || spec.GitPlan.TargetRef() == "" || !validOID(spec.Artifact.CommitOID()) || !validOID(spec.Artifact.BaseCommit()) {
 		return canonicalPlan{}, fmt.Errorf("%w: upstream identities differ", ErrAuthorityChanged)
 	}
 	decision := spec.Contract.EvaluateGitHubPublication(contracts.GitHubCreateBranch, spec.GitHub.FullName(), spec.GitPlan.TargetRef(), spec.CreatedAt)
@@ -109,7 +110,7 @@ func validatePlanAuthority(spec PlanSpec) (canonicalPlan, error) {
 	return canonicalPlan{
 		Version: PlanVersion, ManifestHash: spec.ManifestHash, ContractHash: spec.Contract.Hash(),
 		RepositoryBindingIdentity: spec.Repository.Identity(), GitPlanIdentity: spec.GitPlan.Identity(),
-		ArtifactIdentity: spec.Artifact.Identity(), CommitOID: spec.Artifact.CommitOID(), BaseCommit: spec.Artifact.BaseCommit(),
+		ArtifactIdentity: spec.Artifact.Identity(), CommitOID: spec.Artifact.CommitOID(), BaseCommit: spec.Artifact.BaseCommit(), BaseRef: spec.GitPlan.BaseRef(),
 		GitHubBindingIdentity: spec.GitHub.Identity(), GitHubRepositoryID: spec.GitHub.RepositoryID(),
 		RepositoryFullName: spec.GitHub.FullName(), TargetRef: spec.GitPlan.TargetRef(),
 		Operation: contracts.GitHubCreateBranch, CreatedAt: spec.CreatedAt.UTC().Format(time.RFC3339Nano),
@@ -125,6 +126,7 @@ type canonicalPlan struct {
 	ArtifactIdentity          string                               `json:"artifact_identity"`
 	CommitOID                 string                               `json:"commit_oid"`
 	BaseCommit                string                               `json:"base_commit"`
+	BaseRef                   string                               `json:"base_ref"`
 	GitHubBindingIdentity     string                               `json:"github_binding_identity"`
 	GitHubRepositoryID        int64                                `json:"github_repository_id"`
 	RepositoryFullName        string                               `json:"repository_full_name"`
@@ -148,6 +150,7 @@ func (p *Plan) ArtifactIdentity() string {
 }
 func (p *Plan) CommitOID() string  { return planString(p, func() string { return p.commitOID }) }
 func (p *Plan) BaseCommit() string { return planString(p, func() string { return p.baseCommit }) }
+func (p *Plan) BaseRef() string    { return planString(p, func() string { return p.baseRef }) }
 func (p *Plan) GitHubBindingIdentity() string {
 	return planString(p, func() string { return p.githubBindingIdentity })
 }
