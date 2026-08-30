@@ -43,6 +43,10 @@ type publicationFixture struct {
 }
 
 func newPublicationFixture(t *testing.T) publicationFixture {
+	return newPublicationFixtureVersion(t, contracts.VersionV2)
+}
+
+func newPublicationFixtureVersion(t *testing.T, contractVersion string) publicationFixture {
 	t.Helper()
 	at := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
 	root := t.TempDir()
@@ -69,7 +73,17 @@ func newPublicationFixture(t *testing.T) publicationFixture {
 	writeFixtureFile(t, finalRoot, "unchanged.txt", []byte("unchanged\n"))
 	runID := "m53-publication"
 	targetRef := "refs/heads/mirage/run-" + sha256Prefix(runID)
-	contract, err := contracts.New(contracts.Spec{Version: contracts.VersionV2, RunID: runID, ActorID: "agent", ExpiresAt: at.Add(time.Hour), Filesystem: contracts.FilesystemPolicy{Write: contracts.AccessRules{Allow: []string{"/workspace/README.md"}}}, GitHub: contracts.GitHubPublicationPolicy{RepositoryFullName: publicationRepo, TargetRef: targetRef, Operation: contracts.GitHubCreateBranch}})
+	contractSpec := contracts.Spec{Version: contractVersion, RunID: runID, ActorID: "agent", ExpiresAt: at.Add(time.Hour), Filesystem: contracts.FilesystemPolicy{Write: contracts.AccessRules{Allow: []string{"/workspace/README.md"}}}}
+	if contractVersion == contracts.VersionV2 {
+		contractSpec.GitHub = contracts.GitHubPublicationPolicy{RepositoryFullName: publicationRepo, TargetRef: targetRef, Operation: contracts.GitHubCreateBranch}
+	} else {
+		contractSpec.GitHubV3 = contracts.GitHubEffectsPolicy{
+			RepositoryFullName: publicationRepo,
+			Branch:             contracts.GitHubBranchPolicy{TargetRef: targetRef, Operation: contracts.GitHubCreateBranch},
+			PullRequest:        contracts.GitHubPullRequestPolicy{BaseRef: repository.HeadRef(), TargetRef: targetRef, Operation: contracts.GitHubCreatePullRequest, MetadataPolicy: contracts.PullRequestMetadataV1},
+		}
+	}
+	contract, err := contracts.New(contractSpec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,6 +113,21 @@ func newPublicationFixture(t *testing.T) publicationFixture {
 		t.Fatal(err)
 	}
 	return publicationFixture{at: at, repositoryRoot: root, repository: repository, contract: contract, reconciliation: reconciliation, decision: decision, gitPlan: gitPlan, artifact: artifact, remote: remote, observer: observer, github: github, plan: plan}
+}
+
+func TestPublicationPlanAcceptsV3OnlyThroughExactBranchEvaluation(t *testing.T) {
+	fixture := newPublicationFixtureVersion(t, contracts.VersionV3)
+	if fixture.plan == nil || fixture.plan.ContractHash() != fixture.contract.Hash() {
+		t.Fatal("v3 publication plan did not bind the exact contract")
+	}
+	decision := fixture.contract.EvaluateGitHubPublication(contracts.GitHubCreateBranch, publicationRepo, fixture.plan.TargetRef(), fixture.plan.CreatedAt())
+	if !decision.Allowed {
+		t.Fatalf("v3 exact branch authority denied: %#v", decision)
+	}
+	wrong := fixture.contract.EvaluateGitHubPublication(contracts.GitHubCreateBranch, publicationRepo, fixture.plan.TargetRef()+"x", fixture.plan.CreatedAt())
+	if wrong.Allowed {
+		t.Fatalf("v3 mismatched branch unexpectedly allowed: %#v", wrong)
+	}
 }
 
 func TestPublicationPlanBindsExactArtifactDestinationAndIsIdempotent(t *testing.T) {

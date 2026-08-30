@@ -84,6 +84,9 @@ func TestContractV2AuthorizesOnlyExactGitHubCreateBranch(t *testing.T) {
 	if contract.Version() != contracts.VersionV2 || contract.GitHubPublication().RepositoryFullName != "mrgray17/mirage-test" {
 		t.Fatalf("canonical v2 policy = %#v", contract.GitHubPublication())
 	}
+	if contract.Hash() != "sha256:fd907f9ea01f55e5e30ebf1dc8bacc0a936b64f7e27d3afdfe6e4c326aaad1fd" {
+		t.Fatalf("v2 canonical hash changed: %s", contract.Hash())
+	}
 	allowed := contract.EvaluateGitHubPublication(contracts.GitHubCreateBranch, "MRGRAY17/MIRAGE-TEST", target, now)
 	if !allowed.Allowed || allowed.RuleID != "github.exact_create_branch" {
 		t.Fatalf("allowed = %#v", allowed)
@@ -102,6 +105,114 @@ func TestContractV2AuthorizesOnlyExactGitHubCreateBranch(t *testing.T) {
 	v1 := newContract(t, now.Add(time.Hour), contracts.FilesystemPolicy{})
 	if decision := v1.EvaluateGitHubPublication(contracts.GitHubCreateBranch, "mrgray17/mirage-test", target, now); decision.Allowed || decision.RuleID != "github.version_default_deny" {
 		t.Fatalf("v1 publication = %#v", decision)
+	}
+	for name, earlier := range map[string]*contracts.Contract{"v1": v1, "v2": contract} {
+		decision := earlier.EvaluateGitHubPullRequest(contracts.GitHubCreatePullRequest, "mrgray17/mirage-test", "refs/heads/main", target, contracts.PullRequestMetadataV1, now)
+		if decision.Allowed || decision.RuleID != "github_pr.version_default_deny" {
+			t.Fatalf("%s pull request = %#v", name, decision)
+		}
+	}
+}
+
+func TestContractV3CanonicalAuthorityAndExactEvaluation(t *testing.T) {
+	now := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+	target := "refs/heads/mirage/run-bf9f6cfdef1dd1c62bf3afa7"
+	spec := contracts.Spec{
+		Version: contracts.VersionV3, RunID: "m52-artifact", ActorID: "agent", ExpiresAt: now.Add(time.Hour),
+		Filesystem: contracts.FilesystemPolicy{Write: contracts.AccessRules{Allow: []string{"/workspace/README.md"}}},
+		GitHubV3: contracts.GitHubEffectsPolicy{
+			RepositoryFullName: "MrGray17/Mirage-Test",
+			Branch:             contracts.GitHubBranchPolicy{TargetRef: target, Operation: contracts.GitHubCreateBranch},
+			PullRequest: contracts.GitHubPullRequestPolicy{
+				BaseRef: "refs/heads/main", TargetRef: target,
+				Operation: contracts.GitHubCreatePullRequest, MetadataPolicy: contracts.PullRequestMetadataV1,
+			},
+		},
+	}
+	contract, err := contracts.New(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contract.Hash() != "sha256:28b1cdd5ac340a687a11452ee12e5628db6a89ba5ec9c6e558a5f13fd9be1651" {
+		t.Fatalf("v3 canonical hash changed: %s", contract.Hash())
+	}
+	reordered := spec
+	reordered.RunID = " m52-artifact "
+	reordered.ActorID = " agent "
+	reordered.ExpiresAt = spec.ExpiresAt.In(time.FixedZone("other", 2*60*60))
+	reordered.Filesystem.Write.Allow = []string{"/workspace/README.md", "/workspace/README.md"}
+	reorderedContract, err := contracts.New(reordered)
+	if err != nil || reorderedContract.Hash() != contract.Hash() {
+		t.Fatalf("v3 deterministic canonicalization: hash=%v err=%v", reorderedContract, err)
+	}
+	branch := contract.GitHubPublication()
+	pr := contract.GitHubPullRequest()
+	if branch.RepositoryFullName != "mrgray17/mirage-test" || branch.TargetRef != target || pr.BaseRef != "refs/heads/main" || pr.TargetRef != target || pr.MetadataPolicy != contracts.PullRequestMetadataV1 {
+		t.Fatalf("canonical v3 policies branch=%#v pr=%#v", branch, pr)
+	}
+	if decision := contract.EvaluateGitHubPublication(contracts.GitHubCreateBranch, "MRGRAY17/MIRAGE-TEST", target, now); !decision.Allowed {
+		t.Fatalf("v3 branch denied: %#v", decision)
+	}
+	if decision := contract.EvaluateGitHubPullRequest(contracts.GitHubCreatePullRequest, "MRGRAY17/MIRAGE-TEST", "refs/heads/main", target, contracts.PullRequestMetadataV1, now); !decision.Allowed || decision.RuleID != "github_pr.exact_create" {
+		t.Fatalf("v3 PR denied: %#v", decision)
+	}
+
+	for name, decision := range map[string]contracts.Decision{
+		"unknown operation": contract.EvaluateGitHubPullRequest("UPDATE_PULL_REQUEST", "mrgray17/mirage-test", "refs/heads/main", target, contracts.PullRequestMetadataV1, now),
+		"wrong repository":  contract.EvaluateGitHubPullRequest(contracts.GitHubCreatePullRequest, "mrgray17/other", "refs/heads/main", target, contracts.PullRequestMetadataV1, now),
+		"wrong base":        contract.EvaluateGitHubPullRequest(contracts.GitHubCreatePullRequest, "mrgray17/mirage-test", "refs/heads/release", target, contracts.PullRequestMetadataV1, now),
+		"wrong head":        contract.EvaluateGitHubPullRequest(contracts.GitHubCreatePullRequest, "mrgray17/mirage-test", "refs/heads/main", target+"x", contracts.PullRequestMetadataV1, now),
+		"wrong metadata":    contract.EvaluateGitHubPullRequest(contracts.GitHubCreatePullRequest, "mrgray17/mirage-test", "refs/heads/main", target, "agent-owned", now),
+	} {
+		if decision.Allowed {
+			t.Fatalf("%s unexpectedly allowed: %#v", name, decision)
+		}
+	}
+
+	// Construction inputs are copied; mutation cannot widen the contract.
+	spec.GitHubV3.PullRequest.BaseRef = "refs/heads/release"
+	if contract.GitHubPullRequest().BaseRef != "refs/heads/main" || contract.Hash() == "" {
+		t.Fatal("v3 contract changed after construction input mutation")
+	}
+}
+
+func TestContractV3RejectsMalformedOrAmbiguousAuthority(t *testing.T) {
+	now := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+	target := "refs/heads/mirage/run-bf9f6cfdef1dd1c62bf3afa7"
+	valid := contracts.Spec{
+		Version: contracts.VersionV3, RunID: "m52-artifact", ActorID: "agent", ExpiresAt: now.Add(time.Hour),
+		GitHubV3: contracts.GitHubEffectsPolicy{
+			RepositoryFullName: "owner/repo",
+			Branch:             contracts.GitHubBranchPolicy{TargetRef: target, Operation: contracts.GitHubCreateBranch},
+			PullRequest:        contracts.GitHubPullRequestPolicy{BaseRef: "refs/heads/main", TargetRef: target, Operation: contracts.GitHubCreatePullRequest, MetadataPolicy: contracts.PullRequestMetadataV1},
+		},
+	}
+	tests := map[string]func(*contracts.Spec){
+		"unknown branch operation": func(spec *contracts.Spec) { spec.GitHubV3.Branch.Operation = "UPDATE_BRANCH" },
+		"unknown PR operation":     func(spec *contracts.Spec) { spec.GitHubV3.PullRequest.Operation = "MERGE_PULL_REQUEST" },
+		"malformed base ref":       func(spec *contracts.Spec) { spec.GitHubV3.PullRequest.BaseRef = "main" },
+		"tag base ref":             func(spec *contracts.Spec) { spec.GitHubV3.PullRequest.BaseRef = "refs/tags/main" },
+		"unsafe base ref":          func(spec *contracts.Spec) { spec.GitHubV3.PullRequest.BaseRef = "refs/heads/a..b" },
+		"mismatched target":        func(spec *contracts.Spec) { spec.GitHubV3.PullRequest.TargetRef += "x" },
+		"same base and target":     func(spec *contracts.Spec) { spec.GitHubV3.PullRequest.BaseRef = target },
+		"unknown metadata":         func(spec *contracts.Spec) { spec.GitHubV3.PullRequest.MetadataPolicy = "mirage.pr-metadata/v2" },
+		"duplicate legacy policy": func(spec *contracts.Spec) {
+			spec.GitHub = contracts.GitHubPublicationPolicy{RepositoryFullName: "owner/repo", TargetRef: target, Operation: contracts.GitHubCreateBranch}
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			spec := valid
+			mutate(&spec)
+			if _, err := contracts.New(spec); !errors.Is(err, contracts.ErrInvalidContract) {
+				t.Fatalf("error=%v, want ErrInvalidContract", err)
+			}
+		})
+	}
+
+	v2 := contracts.Spec{Version: contracts.VersionV2, RunID: "m52-artifact", ActorID: "agent", ExpiresAt: now.Add(time.Hour), GitHub: contracts.GitHubPublicationPolicy{RepositoryFullName: "owner/repo", TargetRef: target, Operation: contracts.GitHubCreateBranch}, GitHubV3: valid.GitHubV3}
+	if _, err := contracts.New(v2); !errors.Is(err, contracts.ErrInvalidContract) {
+		t.Fatalf("v2 accepted duplicate v3 policy: %v", err)
 	}
 }
 

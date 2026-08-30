@@ -21,6 +21,9 @@ import (
 const (
 	VersionV1 = "mirage.contract/v1"
 	VersionV2 = "mirage.contract/v2"
+	VersionV3 = "mirage.contract/v3"
+
+	PullRequestMetadataV1 = "mirage.pr-metadata/v1"
 )
 
 var ErrInvalidContract = errors.New("invalid effect contract")
@@ -46,11 +49,14 @@ type FilesystemPolicy struct {
 	Write AccessRules
 }
 
-// GitHubPublicationOperation is deliberately not a generic Git operation.
-// M5.3 recognizes only creation of one previously absent branch.
+// GitHubPublicationOperation is deliberately not a generic GitHub operation.
+// The closed set contains only M5.3 branch creation and M5.4 PR creation.
 type GitHubPublicationOperation string
 
-const GitHubCreateBranch GitHubPublicationOperation = "CREATE_BRANCH"
+const (
+	GitHubCreateBranch      GitHubPublicationOperation = "CREATE_BRANCH"
+	GitHubCreatePullRequest GitHubPublicationOperation = "CREATE_PULL_REQUEST"
+)
 
 // GitHubPublicationPolicy authorizes one exact GitHub destination. Repository
 // is canonical owner/repo data, never a URL or credential-bearing locator.
@@ -58,6 +64,26 @@ type GitHubPublicationPolicy struct {
 	RepositoryFullName string
 	TargetRef          string
 	Operation          GitHubPublicationOperation
+}
+
+// GitHubBranchPolicy and GitHubPullRequestPolicy are the two independently
+// authorized irreversible effects in contract v3.
+type GitHubBranchPolicy struct {
+	TargetRef string
+	Operation GitHubPublicationOperation
+}
+
+type GitHubPullRequestPolicy struct {
+	BaseRef        string
+	TargetRef      string
+	Operation      GitHubPublicationOperation
+	MetadataPolicy string
+}
+
+type GitHubEffectsPolicy struct {
+	RepositoryFullName string
+	Branch             GitHubBranchPolicy
+	PullRequest        GitHubPullRequestPolicy
 }
 
 // Spec is mutable construction input. New copies and canonicalizes every field
@@ -69,6 +95,7 @@ type Spec struct {
 	ExpiresAt  time.Time
 	Filesystem FilesystemPolicy
 	GitHub     GitHubPublicationPolicy
+	GitHubV3   GitHubEffectsPolicy
 }
 
 // Contract is immutable after construction. Its fields are intentionally
@@ -80,6 +107,7 @@ type Contract struct {
 	expiresAt  time.Time
 	filesystem canonicalFilesystemPolicy
 	github     canonicalGitHubPublicationPolicy
+	githubV3   canonicalGitHubEffectsPolicy
 	hash       string
 }
 
@@ -116,6 +144,33 @@ type canonicalSpecV2 struct {
 	GitHub     canonicalGitHubPublicationPolicy `json:"github_publication"`
 }
 
+type canonicalGitHubBranchPolicy struct {
+	Operation GitHubPublicationOperation `json:"operation"`
+	TargetRef string                     `json:"target_ref"`
+}
+
+type canonicalGitHubPullRequestPolicy struct {
+	Operation      GitHubPublicationOperation `json:"operation"`
+	BaseRef        string                     `json:"base_ref"`
+	TargetRef      string                     `json:"target_ref"`
+	MetadataPolicy string                     `json:"metadata_policy"`
+}
+
+type canonicalGitHubEffectsPolicy struct {
+	RepositoryFullName string                           `json:"repository_full_name"`
+	Branch             canonicalGitHubBranchPolicy      `json:"branch"`
+	PullRequest        canonicalGitHubPullRequestPolicy `json:"pull_request"`
+}
+
+type canonicalSpecV3 struct {
+	Version    string                       `json:"version"`
+	RunID      string                       `json:"run_id"`
+	ActorID    string                       `json:"actor_id"`
+	ExpiresAt  string                       `json:"expires_at"`
+	Filesystem canonicalFilesystemPolicy    `json:"filesystem"`
+	GitHub     canonicalGitHubEffectsPolicy `json:"github"`
+}
+
 // Decision is structured policy evidence. Denials are never represented as a
 // bare boolean because callers must be able to reconstruct the rule applied.
 type Decision struct {
@@ -125,10 +180,11 @@ type Decision struct {
 	Evidence string
 }
 
-// New validates and canonicalizes a v1 or v2 contract. The v1 serialization
-// path is intentionally unchanged so all pre-M5.3 hashes remain compatible.
+// New validates and canonicalizes a v1, v2, or v3 contract. The v1 and v2
+// serialization paths are intentionally unchanged so earlier hashes remain
+// compatible.
 func New(spec Spec) (*Contract, error) {
-	if spec.Version != VersionV1 && spec.Version != VersionV2 {
+	if spec.Version != VersionV1 && spec.Version != VersionV2 && spec.Version != VersionV3 {
 		return nil, fmt.Errorf("%w: unsupported version %q", ErrInvalidContract, spec.Version)
 	}
 	runID := strings.TrimSpace(spec.RunID)
@@ -149,19 +205,38 @@ func New(spec Spec) (*Contract, error) {
 	}
 	expiresAt := spec.ExpiresAt.UTC()
 	github := canonicalGitHubPublicationPolicy{}
+	githubV3 := canonicalGitHubEffectsPolicy{}
 	var encoded []byte
-	if spec.Version == VersionV1 {
+	switch spec.Version {
+	case VersionV1:
 		canonical := canonicalSpec{
 			Version: VersionV1, RunID: runID, ActorID: actorID,
 			ExpiresAt: expiresAt.Format(time.RFC3339Nano), Filesystem: filesystem,
 		}
 		encoded, err = json.Marshal(canonical)
-	} else {
+	case VersionV2:
+		if spec.GitHubV3 != (GitHubEffectsPolicy{}) {
+			err = fmt.Errorf("%w: v2 cannot contain v3 GitHub policy", ErrInvalidContract)
+			break
+		}
 		github, err = canonicalizeGitHubPublicationPolicy(runID, spec.GitHub)
 		if err == nil {
 			canonical := canonicalSpecV2{
 				Version: VersionV2, RunID: runID, ActorID: actorID,
 				ExpiresAt: expiresAt.Format(time.RFC3339Nano), Filesystem: filesystem, GitHub: github,
+			}
+			encoded, err = json.Marshal(canonical)
+		}
+	case VersionV3:
+		if spec.GitHub != (GitHubPublicationPolicy{}) {
+			err = fmt.Errorf("%w: v3 cannot contain duplicate legacy GitHub policy", ErrInvalidContract)
+			break
+		}
+		githubV3, err = canonicalizeGitHubEffectsPolicy(runID, spec.GitHubV3)
+		if err == nil {
+			canonical := canonicalSpecV3{
+				Version: VersionV3, RunID: runID, ActorID: actorID,
+				ExpiresAt: expiresAt.Format(time.RFC3339Nano), Filesystem: filesystem, GitHub: githubV3,
 			}
 			encoded, err = json.Marshal(canonical)
 		}
@@ -178,6 +253,7 @@ func New(spec Spec) (*Contract, error) {
 		expiresAt:  expiresAt,
 		filesystem: filesystem,
 		github:     github,
+		githubV3:   githubV3,
 		hash:       fmt.Sprintf("sha256:%x", digest),
 	}, nil
 }
@@ -194,7 +270,7 @@ func (c *Contract) EvaluateGitHubPublication(operation GitHubPublicationOperatio
 	if c.ExpiredAt(at) {
 		return Decision{RuleID: "contract.expired", Reason: "effect contract has expired", Evidence: c.expiresAt.Format(time.RFC3339Nano)}
 	}
-	if c.version != VersionV2 {
+	if c.version != VersionV2 && c.version != VersionV3 {
 		return Decision{RuleID: "github.version_default_deny", Reason: "contract version has no remote publication authority", Evidence: c.version}
 	}
 	canonicalRepository, err := CanonicalGitHubRepository(repository)
@@ -204,21 +280,73 @@ func (c *Contract) EvaluateGitHubPublication(operation GitHubPublicationOperatio
 	if operation != GitHubCreateBranch {
 		return Decision{RuleID: "github.operation_default_deny", Reason: "GitHub operation is not authorized", Evidence: string(operation)}
 	}
-	if canonicalRepository != c.github.RepositoryFullName {
+	policy := c.github
+	if c.version == VersionV3 {
+		policy = canonicalGitHubPublicationPolicy{RepositoryFullName: c.githubV3.RepositoryFullName, TargetRef: c.githubV3.Branch.TargetRef, Operation: c.githubV3.Branch.Operation}
+	}
+	if canonicalRepository != policy.RepositoryFullName {
 		return Decision{RuleID: "github.repository_default_deny", Reason: "GitHub repository is not authorized", Evidence: canonicalRepository}
 	}
-	if targetRef != c.github.TargetRef {
+	if targetRef != policy.TargetRef {
 		return Decision{RuleID: "github.ref_default_deny", Reason: "Git ref is not authorized", Evidence: targetRef}
 	}
 	return Decision{Allowed: true, RuleID: "github.exact_create_branch", Reason: "exact create-only GitHub branch is authorized", Evidence: canonicalRepository + "@" + targetRef}
 }
 
-// GitHubPublication returns a value copy of the canonical v2 policy.
+// GitHubPublication returns a value copy of the exact branch policy in v2 or
+// v3. Callers must still evaluate it; possession is not authority.
 func (c *Contract) GitHubPublication() GitHubPublicationPolicy {
-	if c == nil || c.version != VersionV2 {
+	if c == nil || (c.version != VersionV2 && c.version != VersionV3) {
 		return GitHubPublicationPolicy{}
 	}
+	if c.version == VersionV3 {
+		return GitHubPublicationPolicy{RepositoryFullName: c.githubV3.RepositoryFullName, TargetRef: c.githubV3.Branch.TargetRef, Operation: c.githubV3.Branch.Operation}
+	}
 	return GitHubPublicationPolicy{RepositoryFullName: c.github.RepositoryFullName, TargetRef: c.github.TargetRef, Operation: c.github.Operation}
+}
+
+// GitHubPullRequest returns a value copy of the v3 PR policy. Earlier contract
+// versions return an empty policy and always default deny PR authority.
+func (c *Contract) GitHubPullRequest() GitHubPullRequestPolicy {
+	if c == nil || c.version != VersionV3 {
+		return GitHubPullRequestPolicy{}
+	}
+	return GitHubPullRequestPolicy{BaseRef: c.githubV3.PullRequest.BaseRef, TargetRef: c.githubV3.PullRequest.TargetRef, Operation: c.githubV3.PullRequest.Operation, MetadataPolicy: c.githubV3.PullRequest.MetadataPolicy}
+}
+
+// EvaluateGitHubPullRequest deterministically authorizes one exact v3 tuple.
+func (c *Contract) EvaluateGitHubPullRequest(operation GitHubPublicationOperation, repository, baseRef, targetRef, metadataPolicy string, at time.Time) Decision {
+	if c == nil {
+		return Decision{RuleID: "github_pr.invalid_contract", Reason: "effect contract is unavailable"}
+	}
+	if at.IsZero() {
+		return Decision{RuleID: "contract.invalid_time", Reason: "trusted evaluation time is unavailable"}
+	}
+	if c.ExpiredAt(at) {
+		return Decision{RuleID: "contract.expired", Reason: "effect contract has expired", Evidence: c.expiresAt.Format(time.RFC3339Nano)}
+	}
+	if c.version != VersionV3 {
+		return Decision{RuleID: "github_pr.version_default_deny", Reason: "contract version has no pull-request authority", Evidence: c.version}
+	}
+	canonicalRepository, err := CanonicalGitHubRepository(repository)
+	if err != nil {
+		return Decision{RuleID: "github_pr.invalid_repository", Reason: "repository identity is not canonical", Evidence: "invalid owner/repo"}
+	}
+	policy := c.githubV3.PullRequest
+	switch {
+	case operation != GitHubCreatePullRequest:
+		return Decision{RuleID: "github_pr.operation_default_deny", Reason: "GitHub operation is not authorized", Evidence: string(operation)}
+	case canonicalRepository != c.githubV3.RepositoryFullName:
+		return Decision{RuleID: "github_pr.repository_default_deny", Reason: "GitHub repository is not authorized", Evidence: canonicalRepository}
+	case baseRef != policy.BaseRef:
+		return Decision{RuleID: "github_pr.base_default_deny", Reason: "GitHub base ref is not authorized", Evidence: baseRef}
+	case targetRef != policy.TargetRef:
+		return Decision{RuleID: "github_pr.head_default_deny", Reason: "GitHub head ref is not authorized", Evidence: targetRef}
+	case metadataPolicy != policy.MetadataPolicy:
+		return Decision{RuleID: "github_pr.metadata_default_deny", Reason: "GitHub PR metadata policy is not authorized", Evidence: metadataPolicy}
+	default:
+		return Decision{Allowed: true, RuleID: "github_pr.exact_create", Reason: "exact GitHub pull request is authorized", Evidence: canonicalRepository + "@" + baseRef + "<-" + targetRef}
+	}
 }
 
 func canonicalizeGitHubPublicationPolicy(runID string, policy GitHubPublicationPolicy) (canonicalGitHubPublicationPolicy, error) {
@@ -233,6 +361,33 @@ func canonicalizeGitHubPublicationPolicy(runID string, policy GitHubPublicationP
 		return canonicalGitHubPublicationPolicy{}, fmt.Errorf("%w: GitHub target ref is not the deterministic run branch", ErrInvalidContract)
 	}
 	return canonicalGitHubPublicationPolicy{RepositoryFullName: repository, TargetRef: policy.TargetRef, Operation: policy.Operation}, nil
+}
+
+func canonicalizeGitHubEffectsPolicy(runID string, policy GitHubEffectsPolicy) (canonicalGitHubEffectsPolicy, error) {
+	repository, err := CanonicalGitHubRepository(policy.RepositoryFullName)
+	if err != nil {
+		return canonicalGitHubEffectsPolicy{}, err
+	}
+	if policy.Branch.Operation != GitHubCreateBranch || !gitrefs.IsRunTarget(runID, policy.Branch.TargetRef) {
+		return canonicalGitHubEffectsPolicy{}, fmt.Errorf("%w: v3 branch policy must authorize the deterministic CREATE_BRANCH", ErrInvalidContract)
+	}
+	if policy.PullRequest.Operation != GitHubCreatePullRequest {
+		return canonicalGitHubEffectsPolicy{}, fmt.Errorf("%w: v3 pull-request policy must authorize CREATE_PULL_REQUEST", ErrInvalidContract)
+	}
+	if _, ok := gitrefs.BranchName(policy.PullRequest.BaseRef); !ok {
+		return canonicalGitHubEffectsPolicy{}, fmt.Errorf("%w: v3 pull-request base ref is not canonical", ErrInvalidContract)
+	}
+	if policy.PullRequest.TargetRef != policy.Branch.TargetRef || policy.PullRequest.BaseRef == policy.PullRequest.TargetRef {
+		return canonicalGitHubEffectsPolicy{}, fmt.Errorf("%w: v3 pull-request head must equal the deterministic run branch and differ from base", ErrInvalidContract)
+	}
+	if policy.PullRequest.MetadataPolicy != PullRequestMetadataV1 {
+		return canonicalGitHubEffectsPolicy{}, fmt.Errorf("%w: unsupported pull-request metadata policy", ErrInvalidContract)
+	}
+	return canonicalGitHubEffectsPolicy{
+		RepositoryFullName: repository,
+		Branch:             canonicalGitHubBranchPolicy{Operation: GitHubCreateBranch, TargetRef: policy.Branch.TargetRef},
+		PullRequest:        canonicalGitHubPullRequestPolicy{Operation: GitHubCreatePullRequest, BaseRef: policy.PullRequest.BaseRef, TargetRef: policy.PullRequest.TargetRef, MetadataPolicy: PullRequestMetadataV1},
+	}, nil
 }
 
 // CanonicalGitHubRepository validates owner/repo data for github.com and
