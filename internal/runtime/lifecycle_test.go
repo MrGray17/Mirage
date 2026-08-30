@@ -12,8 +12,12 @@ import (
 	"time"
 
 	"github.com/MrGray17/Mirage/internal/contracts"
+	"github.com/MrGray17/Mirage/internal/gitrefs"
+	"github.com/MrGray17/Mirage/internal/runtime/gitbinding"
 	"github.com/MrGray17/Mirage/internal/runtime/gitcommit"
+	"github.com/MrGray17/Mirage/internal/runtime/githubbinding"
 	"github.com/MrGray17/Mirage/internal/runtime/gitplan"
+	"github.com/MrGray17/Mirage/internal/runtime/gitpublication"
 	"github.com/MrGray17/Mirage/internal/runtime/realcommit"
 	"github.com/MrGray17/Mirage/internal/runtime/tree"
 	"github.com/MrGray17/Mirage/internal/runtime/workspace"
@@ -30,6 +34,293 @@ type sandboxStub struct {
 	disposable string
 	token      string
 }
+
+func TestM53LifecycleMintsOnePlanAndRejectsStaleAuthorityBeforeDispatch(t *testing.T) {
+	t.Run("idempotent plan", func(t *testing.T) {
+		current := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+		lifecycle, _, client := preparedPublicationLifecycle(t, func() time.Time { return current }, current.Add(time.Hour))
+		first := lifecycle.GitPublicationPlan()
+		second, err := lifecycle.DeriveGitPublicationPlan(context.Background())
+		if err != nil || first == nil || second != first || first.Identity() == "" {
+			t.Fatalf("plans = %p/%p, %v", first, second, err)
+		}
+		if lifecycle.GitCommitArtifact() == nil {
+			t.Fatal("verified lifecycle lost artifact")
+		}
+		if client.refCalls != 1 {
+			t.Fatalf("plan derivation did not revalidate the bound remote base: calls=%d", client.refCalls)
+		}
+	})
+
+	t.Run("missing token", func(t *testing.T) {
+		current := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+		lifecycle, _, client := preparedPublicationLifecycle(t, func() time.Time { return current }, current.Add(time.Hour))
+		engine, _ := gitpublication.NewEngine(client, func() (string, error) { return "", nil })
+		if record, err := lifecycle.PublishGitHub(context.Background(), engine); !errors.Is(err, gitpublication.ErrCredential) || record != nil || client.refCalls != 0 || lifecycle.State() != StateFailed {
+			t.Fatalf("record=%#v err=%v refs=%d state=%s", record, err, client.refCalls, lifecycle.State())
+		}
+	})
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*testing.T, *Lifecycle, *workspace.Disposable, *m53LifecycleClient, *time.Time)
+		want   error
+		state  State
+	}{
+		{name: "expired", mutate: func(_ *testing.T, _ *Lifecycle, _ *workspace.Disposable, _ *m53LifecycleClient, current *time.Time) {
+			*current = current.Add(2 * time.Hour)
+		}, want: ErrContractExpired, state: StateRejected},
+		{name: "clock rollback", mutate: func(_ *testing.T, _ *Lifecycle, _ *workspace.Disposable, _ *m53LifecycleClient, current *time.Time) {
+			*current = current.Add(-time.Second)
+		}, want: ErrClockRollback, state: StateFailed},
+		{name: "GitHub identity changed", mutate: func(_ *testing.T, _ *Lifecycle, _ *workspace.Disposable, client *m53LifecycleClient, _ *time.Time) {
+			client.repository.ID++
+		}, want: githubbinding.ErrRepositoryChanged, state: StateConflicted},
+		{name: "stale commit artifact", mutate: func(t *testing.T, lifecycle *Lifecycle, _ *workspace.Disposable, _ *m53LifecycleClient, _ *time.Time) {
+			if err := lifecycle.gitArtifact.Cleanup(); err != nil {
+				t.Fatal(err)
+			}
+		}, want: gitcommit.ErrTransactionChanged, state: StateFailed},
+		{name: "frozen shadow changed", mutate: func(t *testing.T, _ *Lifecycle, disposable *workspace.Disposable, client *m53LifecycleClient, _ *time.Time) {
+			client.beforeRef = func() {
+				if err := os.WriteFile(filepath.Join(disposable.Path(), "README.md"), []byte("late mutation\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}, want: ErrShadowChanged, state: StateRejected},
+		{name: "real Git changed", mutate: func(t *testing.T, _ *Lifecycle, disposable *workspace.Disposable, client *m53LifecycleClient, _ *time.Time) {
+			client.beforeRef = func() {
+				writeLifecycleFile(t, disposable.RealWorkspace(), "other.txt", "other\n", 0o600)
+				runLifecycleGit(t, disposable.RealWorkspace(), "add", "other.txt")
+				runLifecycleGit(t, disposable.RealWorkspace(), "-c", "user.name=MIRAGE Test", "-c", "user.email=mirage@example.invalid", "commit", "-m", "concurrent")
+			}
+		}, want: gitplan.ErrRepositoryChanged, state: StateConflicted},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			current := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+			lifecycle, disposable, client := preparedPublicationLifecycle(t, func() time.Time { return current }, current.Add(time.Hour))
+			test.mutate(t, lifecycle, disposable, client, &current)
+			engine, _ := gitpublication.NewEngine(client, func() (string, error) { return "fake-host-token", nil })
+			record, err := lifecycle.PublishGitHub(context.Background(), engine)
+			if !errors.Is(err, test.want) || record != nil || lifecycle.State() != test.state {
+				t.Fatalf("record=%#v err=%v state=%s want %v/%s", record, err, lifecycle.State(), test.want, test.state)
+			}
+		})
+	}
+}
+
+func TestM53LifecycleOwnsPublicationIdempotencyAndUncertainReconciliation(t *testing.T) {
+	t.Run("published idempotency and drift", func(t *testing.T) {
+		current := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+		lifecycle, _, _ := preparedPublicationLifecycle(t, func() time.Time { return current }, current.Add(time.Hour))
+		plan := lifecycle.GitPublicationPlan()
+		engine := &m53LifecycleEngine{publishObservation: githubbinding.RefObservation{Status: githubbinding.RefPresentExact, OID: plan.CommitOID()}, acknowledged: true, reconcileObservation: githubbinding.RefObservation{Status: githubbinding.RefPresentExact, OID: plan.CommitOID()}}
+		first, err := lifecycle.PublishGitHub(context.Background(), engine)
+		if err != nil || first == nil || first.Outcome() != gitpublication.OutcomePublished || lifecycle.State() != StatePublished || engine.pushes != 1 {
+			t.Fatalf("first=%#v err=%v state=%s pushes=%d", first, err, lifecycle.State(), engine.pushes)
+		}
+		second, err := lifecycle.PublishGitHub(context.Background(), engine)
+		if err != nil || second != first || engine.pushes != 1 || engine.reads != 1 {
+			t.Fatalf("second=%#v err=%v pushes=%d reads=%d", second, err, engine.pushes, engine.reads)
+		}
+		engine.reconcileObservation = githubbinding.RefObservation{Status: githubbinding.RefPresentOther, OID: lifecycle.GitRepositoryBinding().HeadCommit()}
+		if record, err := lifecycle.PublishGitHub(context.Background(), engine); !errors.Is(err, gitpublication.ErrPreexistingRef) || record != nil || lifecycle.State() != StateConflicted || engine.pushes != 1 {
+			t.Fatalf("drift=%#v err=%v state=%s pushes=%d", record, err, lifecycle.State(), engine.pushes)
+		}
+	})
+
+	t.Run("uncertain permits reads only", func(t *testing.T) {
+		current := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+		lifecycle, _, _ := preparedPublicationLifecycle(t, func() time.Time { return current }, current.Add(time.Hour))
+		plan := lifecycle.GitPublicationPlan()
+		engine := &m53LifecycleEngine{publishObservation: githubbinding.RefObservation{Status: githubbinding.RefUnavailable}, publishErr: gitpublication.ErrPublicationUncertain, reconcileObservation: githubbinding.RefObservation{Status: githubbinding.RefPresentExact, OID: plan.CommitOID()}}
+		uncertain, err := lifecycle.PublishGitHub(context.Background(), engine)
+		if !errors.Is(err, gitpublication.ErrPublicationUncertain) || uncertain == nil || lifecycle.State() != StatePublicationUncertain || engine.pushes != 1 {
+			t.Fatalf("uncertain=%#v err=%v state=%s pushes=%d", uncertain, err, lifecycle.State(), engine.pushes)
+		}
+		if _, err := lifecycle.PublishGitHub(context.Background(), engine); !errors.Is(err, ErrInvalidTransition) || engine.pushes != 1 {
+			t.Fatalf("second push err=%v pushes=%d", err, engine.pushes)
+		}
+		resolved, err := lifecycle.ReconcileGitPublication(context.Background(), engine)
+		if err != nil || resolved == nil || resolved.Outcome() != gitpublication.OutcomePublished || !resolved.ResolvedByReconciliation() || lifecycle.State() != StatePublished || engine.pushes != 1 || engine.reads != 1 {
+			t.Fatalf("resolved=%#v err=%v state=%s pushes=%d reads=%d", resolved, err, lifecycle.State(), engine.pushes, engine.reads)
+		}
+	})
+
+	t.Run("published then unavailable then absent is drift", func(t *testing.T) {
+		current := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+		lifecycle, _, _ := preparedPublicationLifecycle(t, func() time.Time { return current }, current.Add(time.Hour))
+		plan := lifecycle.GitPublicationPlan()
+		engine := &m53LifecycleEngine{publishObservation: githubbinding.RefObservation{Status: githubbinding.RefPresentExact, OID: plan.CommitOID()}, acknowledged: true, reconcileObservation: githubbinding.RefObservation{Status: githubbinding.RefUnavailable}, reconcileOutcome: gitpublication.OutcomePublicationUncertain}
+		if _, err := lifecycle.PublishGitHub(context.Background(), engine); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := lifecycle.PublishGitHub(context.Background(), engine); !errors.Is(err, gitpublication.ErrPublicationUncertain) || lifecycle.State() != StatePublicationUncertain {
+			t.Fatalf("unavailable err=%v state=%s", err, lifecycle.State())
+		}
+		engine.reconcileObservation = githubbinding.RefObservation{Status: githubbinding.RefAbsent}
+		engine.reconcileOutcome = gitpublication.OutcomeNotPublished
+		record, err := lifecycle.ReconcileGitPublication(context.Background(), engine)
+		if err != nil || record.Outcome() != gitpublication.OutcomeNotPublished || lifecycle.State() != StateConflicted || engine.pushes != 1 {
+			t.Fatalf("drift record=%#v err=%v state=%s pushes=%d", record, err, lifecycle.State(), engine.pushes)
+		}
+	})
+
+	for _, test := range []struct {
+		name        string
+		observation githubbinding.RefObservation
+		outcome     gitpublication.Outcome
+		state       State
+	}{
+		{name: "absent terminal", observation: githubbinding.RefObservation{Status: githubbinding.RefAbsent}, outcome: gitpublication.OutcomeNotPublished, state: StateFailed},
+		{name: "other conflict", observation: githubbinding.RefObservation{Status: githubbinding.RefPresentOther, OID: "1111111111111111111111111111111111111111"}, outcome: gitpublication.OutcomeConflicted, state: StateConflicted},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			current := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+			lifecycle, _, _ := preparedPublicationLifecycle(t, func() time.Time { return current }, current.Add(time.Hour))
+			engine := &m53LifecycleEngine{publishObservation: githubbinding.RefObservation{Status: githubbinding.RefUnavailable}, publishErr: gitpublication.ErrPublicationUncertain, reconcileObservation: test.observation, reconcileOutcome: test.outcome}
+			if _, err := lifecycle.PublishGitHub(context.Background(), engine); !errors.Is(err, gitpublication.ErrPublicationUncertain) {
+				t.Fatal(err)
+			}
+			record, err := lifecycle.ReconcileGitPublication(context.Background(), engine)
+			if err != nil || record.Outcome() != test.outcome || lifecycle.State() != test.state || engine.pushes != 1 {
+				t.Fatalf("record=%#v err=%v state=%s pushes=%d", record, err, lifecycle.State(), engine.pushes)
+			}
+		})
+	}
+}
+
+type m53LifecycleEngine struct {
+	publishObservation   githubbinding.RefObservation
+	reconcileObservation githubbinding.RefObservation
+	reconcileOutcome     gitpublication.Outcome
+	acknowledged         bool
+	publishErr           error
+	pushes               int
+	reads                int
+}
+
+func (e *m53LifecycleEngine) Publish(ctx context.Context, _ *githubbinding.Binding, plan *gitpublication.Plan, _ *gitcommit.Artifact, _ *gitbinding.Binding, final gitpublication.FinalAuthority) (gitpublication.Result, error) {
+	dispatch, err := final(ctx)
+	if err != nil {
+		return gitpublication.Result{}, err
+	}
+	e.pushes++
+	record, err := gitpublication.NewRecordForObservation(plan, dispatch, e.acknowledged, e.publishObservation)
+	if err != nil {
+		return gitpublication.Result{Attempted: true}, err
+	}
+	return gitpublication.Result{Record: record, Attempted: true}, e.publishErr
+}
+func (e *m53LifecycleEngine) Reconcile(context.Context, *githubbinding.Binding, *gitpublication.Plan) (githubbinding.RefObservation, gitpublication.Outcome, error) {
+	e.reads++
+	outcome := e.reconcileOutcome
+	if outcome == "" {
+		if e.reconcileObservation.Status == githubbinding.RefPresentExact {
+			outcome = gitpublication.OutcomePublished
+		} else if e.reconcileObservation.Status == githubbinding.RefPresentOther {
+			outcome = gitpublication.OutcomeConflicted
+		} else if e.reconcileObservation.Status == githubbinding.RefAbsent {
+			outcome = gitpublication.OutcomeNotPublished
+		} else {
+			outcome = gitpublication.OutcomePublicationUncertain
+		}
+	}
+	if outcome == gitpublication.OutcomePublicationUncertain {
+		return e.reconcileObservation, outcome, gitpublication.ErrPublicationUncertain
+	}
+	return e.reconcileObservation, outcome, nil
+}
+
+type m53LifecycleClient struct {
+	repository githubbinding.Repository
+	beforeRef  func()
+	refCalls   int
+	baseRef    string
+	baseCommit string
+}
+
+func (c *m53LifecycleClient) Repository(context.Context, string) (githubbinding.Repository, error) {
+	return c.repository, nil
+}
+func (c *m53LifecycleClient) ExactRef(_ context.Context, _ string, _ int64, ref, expected string) (githubbinding.RefObservation, error) {
+	c.refCalls++
+	if c.beforeRef != nil {
+		hook := c.beforeRef
+		c.beforeRef = nil
+		hook()
+	}
+	if ref == c.baseRef {
+		if c.baseCommit == expected {
+			return githubbinding.RefObservation{Status: githubbinding.RefPresentExact, OID: c.baseCommit}, nil
+		}
+		return githubbinding.RefObservation{Status: githubbinding.RefPresentOther, OID: c.baseCommit}, nil
+	}
+	return githubbinding.RefObservation{Status: githubbinding.RefAbsent}, nil
+}
+
+func preparedPublicationLifecycle(t *testing.T, now func() time.Time, expires time.Time) (*Lifecycle, *workspace.Disposable, *m53LifecycleClient) {
+	t.Helper()
+	real := lifecycleRealWorkspace(t)
+	runLifecycleGit(t, real, "init", "-b", "main")
+	writeLifecycleFile(t, real, "README.md", "before\n", 0o600)
+	runLifecycleGit(t, real, "add", "README.md")
+	runLifecycleGit(t, real, "-c", "user.name=MIRAGE Test", "-c", "user.email=mirage@example.invalid", "commit", "-m", "initial")
+	disposable, err := workspace.Prepare(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := disposable.Cleanup(); err != nil {
+			t.Errorf("cleanup disposable: %v", err)
+		}
+	})
+	binding, err := disposable.Binding()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub := &sandboxStub{real: binding.RealWorkspace(), disposable: binding.DisposableWorkspace(), token: binding.Token()}
+	runID := "lifecycle-m53"
+	contract, err := contracts.New(contracts.Spec{Version: contracts.VersionV2, RunID: runID, ActorID: "hostile-fixture", ExpiresAt: expires, Filesystem: contracts.FilesystemPolicy{Write: contracts.AccessRules{Allow: []string{"/workspace/README.md"}}}, GitHub: contracts.GitHubPublicationPolicy{RepositoryFullName: publicationLifecycleRepo, TargetRef: gitrefs.RunTarget(runID), Operation: contracts.GitHubCreateBranch}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := NewRunManifest(contract, binding, stub, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifecycle, err := NewBoundLifecycle(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lifecycle.BindGitRepository(); err != nil {
+		t.Fatal(err)
+	}
+	localGit := lifecycle.GitRepositoryBinding()
+	client := &m53LifecycleClient{repository: githubbinding.Repository{ID: 1729, FullName: publicationLifecycleRepo}, baseRef: localGit.HeadRef(), baseCommit: localGit.HeadCommit()}
+	if _, err := lifecycle.BindGitHubRepository(context.Background(), publicationLifecycleRepo, client); err != nil {
+		t.Fatal(err)
+	}
+	runToStarted(t, lifecycle)
+	if err := os.WriteFile(filepath.Join(disposable.Path(), "README.md"), []byte("verified Git publication\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	freezeAndVerify(t, lifecycle)
+	if _, err := lifecycle.DeriveGitEffectPlan(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lifecycle.ConstructGitCommitArtifact(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lifecycle.DeriveGitPublicationPlan(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lifecycle.CleanupGitCommitArtifact() })
+	client.refCalls = 0
+	return lifecycle, disposable, client
+}
+
+const publicationLifecycleRepo = "mrgray17/mirage-test"
 
 func (s *sandboxStub) Identity() string {
 	if s.identity == "" {

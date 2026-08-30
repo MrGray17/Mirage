@@ -281,6 +281,90 @@ func (t *transaction) verifyObjectSet(expected map[string]struct{}) error {
 	return nil
 }
 
+func (t *transaction) exportObjects(destination string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if err := t.revalidateLocked(); err != nil {
+		return err
+	}
+	destination, err := filepath.Abs(destination)
+	if err != nil || pathsOverlap(destination, t.root) || pathsOverlap(destination, t.realRoot) {
+		return fmt.Errorf("%w: unsafe export destination", ErrTransaction)
+	}
+	destinationInfo, err := os.Lstat(destination)
+	if err != nil || !destinationInfo.IsDir() || destinationInfo.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%w: export destination is not an acquired directory", ErrTransaction)
+	}
+	entries, err := os.ReadDir(destination)
+	if err != nil || len(entries) != 0 {
+		return fmt.Errorf("%w: export destination must be empty", ErrTransaction)
+	}
+	var copied int64
+	err = filepath.WalkDir(t.objects, func(current string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(t.objects, current)
+		if err != nil {
+			return err
+		}
+		if relative == "." {
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return errors.New("symlink in transaction object store")
+		}
+		target := filepath.Join(destination, relative)
+		if entry.IsDir() {
+			if len(relative) != 2 || !validHex(relative) {
+				return errors.New("unexpected transaction object directory")
+			}
+			return os.Mkdir(target, 0o700)
+		}
+		parts := strings.Split(filepath.ToSlash(relative), "/")
+		if len(parts) != 2 || len(parts[0]) != 2 || len(parts[1]) != 38 || !validOID(parts[0]+parts[1]) {
+			return errors.New("unexpected transaction object path")
+		}
+		initial, err := os.Lstat(current)
+		if err != nil || !initial.Mode().IsRegular() || initial.Size() < 0 || copied > maxTransactionBytes-initial.Size() {
+			return errors.New("unsafe or over-budget transaction object")
+		}
+		source, err := os.Open(current)
+		if err != nil {
+			return err
+		}
+		opened, err := source.Stat()
+		if err != nil || !os.SameFile(initial, opened) {
+			_ = source.Close()
+			return errors.New("transaction object changed during export")
+		}
+		output, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			_ = source.Close()
+			return err
+		}
+		written, copyErr := io.Copy(output, io.LimitReader(source, initial.Size()+1))
+		closeOutputErr := output.Close()
+		closeSourceErr := source.Close()
+		final, finalErr := os.Lstat(current)
+		if copyErr != nil || closeOutputErr != nil || closeSourceErr != nil || finalErr != nil || !os.SameFile(opened, final) || written != initial.Size() {
+			return errors.New("transaction object export changed or failed")
+		}
+		copied += written
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("%w: export transaction objects: %v", ErrTransaction, err)
+	}
+	currentDestination, err := os.Lstat(destination)
+	if err != nil || !os.SameFile(destinationInfo, currentDestination) {
+		return fmt.Errorf("%w: export destination identity changed", ErrTransactionChanged)
+	}
+	return nil
+}
+
+func validHex(value string) bool { _, err := hex.DecodeString(value); return err == nil }
+
 func (t *transaction) cleanup() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()

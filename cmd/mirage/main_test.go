@@ -50,6 +50,28 @@ func TestRunAgentRequiresNarrowInputsBeforeWorkspaceCreation(t *testing.T) {
 	}
 }
 
+func TestRunAgentRequiresExplicitGitHubPublicationAuthorityAndDedicatedCredential(t *testing.T) {
+	image := "example.invalid/image@sha256:" + strings.Repeat("0", 64)
+	base := []string{"run", "agent", "--image", image, "--helper-image", image, "--allow", "/workspace/README.md"}
+	command := []string{"--", "/agent"}
+	var stdout, stderr bytes.Buffer
+	args := append(append([]string(nil), base...), append([]string{"--github-repo", "owner/repo"}, command...)...)
+	if err := run(args, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "--publish-github") {
+		t.Fatalf("repository without opt-in = %v", err)
+	}
+	args = append(append([]string(nil), base...), append([]string{"--publish-github"}, command...)...)
+	if err := run(args, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "--github-repo") {
+		t.Fatalf("opt-in without repository = %v", err)
+	}
+	t.Setenv("MIRAGE_GITHUB_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "ambient-must-not-be-used")
+	t.Setenv("GH_TOKEN", "ambient-must-not-be-used")
+	args = append(append([]string(nil), base...), append([]string{"--publish-github", "--github-repo", "owner/repo"}, command...)...)
+	if err := run(args, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "MIRAGE_GITHUB_TOKEN") {
+		t.Fatalf("ambient credential fallback = %v", err)
+	}
+}
+
 func TestValidProviderResponseRejectedByAgentClassifiesProtocol(t *testing.T) {
 	agent := diagnostics.Record{
 		Class:         diagnostics.AgentExit,

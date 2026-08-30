@@ -47,6 +47,9 @@ func TestContractIsImmutableAndCanonical(t *testing.T) {
 	if contract.Hash() != reordered.Hash() {
 		t.Fatalf("canonical hashes differ: %s != %s", contract.Hash(), reordered.Hash())
 	}
+	if contract.Hash() != "sha256:a52d1d7cd8719a521fe7e5c96a1059c0daad0e8f63f696fb1fc6ae6717fd5a13" {
+		t.Fatalf("v1 canonical hash changed: %s", contract.Hash())
+	}
 	if contract.RunID() != "run-17" || contract.ActorID() != "coding-agent-17" {
 		t.Fatalf("identity = %q/%q", contract.RunID(), contract.ActorID())
 	}
@@ -64,6 +67,58 @@ func TestContractIsImmutableAndCanonical(t *testing.T) {
 	decision := contract.EvaluateFilesystem(contracts.FilesystemRead, "/workspace/.env", expires.Add(-time.Minute))
 	if decision.Allowed || decision.RuleID != "filesystem.explicit_deny" {
 		t.Fatalf("decision = %+v, want explicit deny", decision)
+	}
+}
+
+func TestContractV2AuthorizesOnlyExactGitHubCreateBranch(t *testing.T) {
+	now := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+	target := "refs/heads/mirage/run-bf9f6cfdef1dd1c62bf3afa7"
+	contract, err := contracts.New(contracts.Spec{
+		Version: contracts.VersionV2, RunID: "m52-artifact", ActorID: "agent", ExpiresAt: now.Add(time.Hour),
+		Filesystem: contracts.FilesystemPolicy{Write: contracts.AccessRules{Allow: []string{"/workspace/README.md"}}},
+		GitHub:     contracts.GitHubPublicationPolicy{RepositoryFullName: "MrGray17/Mirage-Test", TargetRef: target, Operation: contracts.GitHubCreateBranch},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contract.Version() != contracts.VersionV2 || contract.GitHubPublication().RepositoryFullName != "mrgray17/mirage-test" {
+		t.Fatalf("canonical v2 policy = %#v", contract.GitHubPublication())
+	}
+	allowed := contract.EvaluateGitHubPublication(contracts.GitHubCreateBranch, "MRGRAY17/MIRAGE-TEST", target, now)
+	if !allowed.Allowed || allowed.RuleID != "github.exact_create_branch" {
+		t.Fatalf("allowed = %#v", allowed)
+	}
+	for name, decision := range map[string]contracts.Decision{
+		"wrong repository": contract.EvaluateGitHubPublication(contracts.GitHubCreateBranch, "mrgray17/other", target, now),
+		"wrong ref":        contract.EvaluateGitHubPublication(contracts.GitHubCreateBranch, "mrgray17/mirage-test", "refs/heads/main", now),
+		"update":           contract.EvaluateGitHubPublication("UPDATE_BRANCH", "mrgray17/mirage-test", target, now),
+		"delete":           contract.EvaluateGitHubPublication("DELETE_BRANCH", "mrgray17/mirage-test", target, now),
+		"tag":              contract.EvaluateGitHubPublication("CREATE_TAG", "mrgray17/mirage-test", target, now),
+	} {
+		if decision.Allowed {
+			t.Fatalf("%s unexpectedly allowed: %#v", name, decision)
+		}
+	}
+	v1 := newContract(t, now.Add(time.Hour), contracts.FilesystemPolicy{})
+	if decision := v1.EvaluateGitHubPublication(contracts.GitHubCreateBranch, "mrgray17/mirage-test", target, now); decision.Allowed || decision.RuleID != "github.version_default_deny" {
+		t.Fatalf("v1 publication = %#v", decision)
+	}
+}
+
+func TestContractV2RejectsUntrustedGitHubDestinationForms(t *testing.T) {
+	now := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+	target := "refs/heads/mirage/run-bf9f6cfdef1dd1c62bf3afa7"
+	for _, repository := range []string{"https://github.com/o/r", "git@github.com:o/r", "o/r/extra", "o/../r", "user@example.com/r", "o/r?x=1", "o/r#x", "o/r\x00", "/r", "o/"} {
+		_, err := contracts.New(contracts.Spec{Version: contracts.VersionV2, RunID: "m52-artifact", ActorID: "agent", ExpiresAt: now.Add(time.Hour), GitHub: contracts.GitHubPublicationPolicy{RepositoryFullName: repository, TargetRef: target, Operation: contracts.GitHubCreateBranch}})
+		if !errors.Is(err, contracts.ErrInvalidContract) {
+			t.Fatalf("repository %q error = %v", repository, err)
+		}
+	}
+	for _, targetRef := range []string{"refs/heads/main", "refs/tags/x", target + "x", "refs/heads/mirage/run-../../main"} {
+		_, err := contracts.New(contracts.Spec{Version: contracts.VersionV2, RunID: "m52-artifact", ActorID: "agent", ExpiresAt: now.Add(time.Hour), GitHub: contracts.GitHubPublicationPolicy{RepositoryFullName: "owner/repo", TargetRef: targetRef, Operation: contracts.GitHubCreateBranch}})
+		if !errors.Is(err, contracts.ErrInvalidContract) {
+			t.Fatalf("target %q error = %v", targetRef, err)
+		}
 	}
 }
 

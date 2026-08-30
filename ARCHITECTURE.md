@@ -2063,7 +2063,12 @@ M5 is split so each new external authority receives a separate security review:
   user's worktree or refs. The implemented boundary and limitations are
   recorded in `docs/m5.2-deterministic-git-commit.md`.
 - **M5.3 — create-only remote branch:** push the exact verified commit with
-  conflict/CAS protection and uncertain-result reconciliation.
+  explicit `mirage.contract/v2` GitHub authority, stable repository-ID binding,
+  exact remote base-ref/base-commit binding, an empty-expected atomic ref lease,
+  host-only credentials, one mutation attempt, and authoritative uncertain-result reconciliation. Possession of an
+  M5.2 artifact is never publication authority; dispatch remains lifecycle-only.
+  The implemented boundary and limitations are recorded in
+  `docs/m5.3-create-only-github-publication.md`.
 - **M5.4 — GitHub pull request effect:** create one bounded PR with idempotency
   and explicit accounting when remote branch and PR outcomes differ.
 

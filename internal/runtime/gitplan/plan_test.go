@@ -29,6 +29,9 @@ func TestPlanBindsExactVerifiedReconciliationAndTrustedRepository(t *testing.T) 
 	if !strings.HasPrefix(plan.TargetRef(), branchPrefix) || strings.Contains(plan.TargetRef(), "..") || strings.Contains(plan.TargetRef(), "HEAD") || strings.Contains(plan.TargetRef(), ":") {
 		t.Fatalf("unsafe deterministic target ref %q", plan.TargetRef())
 	}
+	if plan.RunID() == "m52-artifact" && plan.TargetRef() != "refs/heads/mirage/run-bf9f6cfdef1dd1c62bf3afa7" {
+		t.Fatalf("M5.1 target-ref identity changed: %s", plan.TargetRef())
+	}
 	effects := plan.Effects()
 	if len(effects) != 1 || effects[0].Resource != "/workspace/README.md" || effects[0].Operation != tree.OperationModify || effects[0].BeforeDigest == effects[0].AfterDigest || effects[0].BaseBlobOID == "" {
 		t.Fatalf("effects = %#v", effects)
