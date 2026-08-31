@@ -85,7 +85,10 @@ func TestEngineInstallsAttemptBeforeOneExactPOSTAndUsesAuthoritativePostflight(t
 	}{
 		"acknowledged exact":              {postStatus: http.StatusCreated, postBody: exactBody, postflight: []apiPullRequest{exact}, wantAck: true, wantStatus: ObservationExact},
 		"lost acknowledgement exact":      {postErr: errors.New("connection reset secret"), postflight: []apiPullRequest{exact}, wantStatus: ObservationExact},
+		"deadline exact":                  {postErr: context.DeadlineExceeded, postflight: []apiPullRequest{exact}, wantStatus: ObservationExact},
+		"query create race exact":         {postStatus: http.StatusUnprocessableEntity, postBody: `{}`, postflight: []apiPullRequest{exact}, wantStatus: ObservationExact},
 		"rejected absent":                 {postStatus: http.StatusUnprocessableEntity, postBody: `{}`, wantStatus: ObservationAbsent},
+		"server failure absent":           {postStatus: http.StatusInternalServerError, postBody: `{}`, wantStatus: ObservationAbsent},
 		"malformed acknowledgement exact": {postStatus: http.StatusCreated, postBody: `{`, postflight: []apiPullRequest{exact}, wantStatus: ObservationExact},
 	}
 	for name, test := range tests {
@@ -174,6 +177,21 @@ func TestEngineErrorsNeverContainCredential(t *testing.T) {
 	})
 	if err == nil || strings.Contains(err.Error(), secret) {
 		t.Fatalf("unsanitized error=%v", err)
+	}
+}
+
+func TestMissingCredentialCannotConstructMutationEngine(t *testing.T) {
+	doer := doerFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("transport reached without a dedicated credential")
+		return nil, errors.New("unreachable")
+	})
+	client, err := NewHTTPClientForDoer("", doer)
+	if err == nil || client != nil {
+		t.Fatalf("client=%#v err=%v", client, err)
+	}
+	engine, err := NewEngine(client)
+	if !errors.Is(err, ErrCreateUnavailable) || engine != nil {
+		t.Fatalf("engine=%#v err=%v", engine, err)
 	}
 }
 
