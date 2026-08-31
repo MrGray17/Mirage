@@ -15,6 +15,7 @@ import (
 	"github.com/MrGray17/Mirage/internal/runtime/gitbinding"
 	"github.com/MrGray17/Mirage/internal/runtime/gitcommit"
 	"github.com/MrGray17/Mirage/internal/runtime/githubbinding"
+	"github.com/MrGray17/Mirage/internal/runtime/githubpullrequest"
 	"github.com/MrGray17/Mirage/internal/runtime/gitplan"
 	"github.com/MrGray17/Mirage/internal/runtime/gitpublication"
 	"github.com/MrGray17/Mirage/internal/runtime/realcommit"
@@ -55,6 +56,9 @@ const (
 	StatePublishing
 	StatePublished
 	StatePublicationUncertain
+	StatePRCreating
+	StatePREstablished
+	StatePRCreationUncertain
 	StateConflicted
 	StateRejected
 	StateFailed
@@ -90,6 +94,12 @@ func (s State) String() string {
 		return "PUBLISHED"
 	case StatePublicationUncertain:
 		return "PUBLICATION_UNCERTAIN"
+	case StatePRCreating:
+		return "PR_CREATING"
+	case StatePREstablished:
+		return "PR_ESTABLISHED"
+	case StatePRCreationUncertain:
+		return "PR_CREATION_UNCERTAIN"
 	case StateConflicted:
 		return "CONFLICTED"
 	case StateRejected:
@@ -118,6 +128,11 @@ type GitPublicationEngine interface {
 	Reconcile(context.Context, *githubbinding.Binding, *gitpublication.Plan) (githubbinding.RefObservation, gitpublication.Outcome, error)
 }
 
+type GitHubPullRequestEngine interface {
+	Establish(context.Context, *githubpullrequest.Plan, githubpullrequest.FinalAuthority) (githubpullrequest.EstablishResult, error)
+	Reconcile(context.Context, *githubpullrequest.Plan) (githubpullrequest.Observation, error)
+}
+
 // Lifecycle serializes sandbox actions with trusted state transitions.
 type Lifecycle struct {
 	mu                   sync.Mutex
@@ -138,6 +153,10 @@ type Lifecycle struct {
 	publicationPlan      *gitpublication.Plan
 	publicationRecord    *gitpublication.Record
 	publicationAttempted bool
+	pullRequestPlan      *githubpullrequest.Plan
+	pullRequestAttempt   *githubpullrequest.PullRequestAttempt
+	externalEffects      *githubpullrequest.ExternalEffectLedger
+	pullRequestAck       bool
 
 	// Test-only fault points remain nil in production. They exercise the final
 	// authority and cleanup rules without widening any public capability.
@@ -717,7 +736,7 @@ func (l *Lifecycle) GitHubRepositoryBinding() *githubbinding.Binding {
 func (l *Lifecycle) GitPublicationPlan() *gitpublication.Plan {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.state != StateVerified && l.state != StatePublishing && l.state != StatePublished && l.state != StatePublicationUncertain {
+	if l.state != StateVerified && l.state != StatePublishing && l.state != StatePublished && l.state != StatePublicationUncertain && l.state != StatePRCreating && l.state != StatePREstablished && l.state != StatePRCreationUncertain {
 		return nil
 	}
 	return l.publicationPlan
@@ -726,6 +745,237 @@ func (l *Lifecycle) PublicationRecord() *gitpublication.Record {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.publicationRecord
+}
+
+// DeriveGitHubPullRequestPlan mints one immutable M5.4 plan only after M5.3's
+// branch publication remains authoritatively exact. Repeated derivation
+// revalidates and returns the same plan identity.
+func (l *Lifecycle) DeriveGitHubPullRequestPlan(ctx context.Context) (*githubpullrequest.Plan, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.require(StatePublished, "derive GitHub pull-request plan"); err != nil {
+		return nil, err
+	}
+	at, err := l.clock.Observe()
+	if err != nil {
+		l.state = StateFailed
+		return nil, fmt.Errorf("observe trusted PR-plan time: %w", err)
+	}
+	if err := l.revalidatePullRequestAuthority(ctx, at, false); err != nil {
+		l.state = pullRequestFailureState(err)
+		return nil, err
+	}
+	if l.pullRequestPlan != nil {
+		if err := githubpullrequest.RevalidatePlan(l.pullRequestPlan, l.pullRequestPlanSpec(l.pullRequestPlan.CreatedAt())); err != nil {
+			l.state = pullRequestFailureState(err)
+			return nil, err
+		}
+		return l.pullRequestPlan, nil
+	}
+	plan, err := githubpullrequest.NewPlan(l.pullRequestPlanSpec(at))
+	if err != nil {
+		l.state = pullRequestFailureState(err)
+		return nil, fmt.Errorf("derive GitHub pull-request plan: %w", err)
+	}
+	ledger, err := githubpullrequest.NewExternalEffectLedger(githubpullrequest.LedgerSpec{Plan: plan, Outcome: githubpullrequest.OutcomeNotAttempted, Causality: githubpullrequest.CausalityNone})
+	if err != nil {
+		l.state = StateFailed
+		return nil, err
+	}
+	l.pullRequestPlan = plan
+	l.externalEffects = ledger
+	return plan, nil
+}
+
+// EstablishGitHubPullRequest is M5.4's sole lifecycle mutation entry point.
+// The final callback installs the one-way attempt latch while this lifecycle's
+// transition lock is held and before the engine can enter HTTP transport.
+func (l *Lifecycle) EstablishGitHubPullRequest(ctx context.Context, engine GitHubPullRequestEngine) (*githubpullrequest.ExternalEffectLedger, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.state == StatePREstablished {
+		return l.externalEffects, nil
+	}
+	if err := l.require(StatePublished, "establish GitHub pull request"); err != nil {
+		return l.externalEffects, err
+	}
+	if engine == nil || l.pullRequestPlan == nil || l.externalEffects == nil || l.pullRequestAttempt != nil {
+		return l.externalEffects, fmt.Errorf("%w: PR authority is incomplete or consumed", ErrCommitAuthority)
+	}
+	result, establishErr := engine.Establish(ctx, l.pullRequestPlan, func(callbackContext context.Context) (*githubpullrequest.PullRequestAttempt, error) {
+		at, observeErr := l.clock.Observe()
+		if observeErr != nil {
+			return nil, fmt.Errorf("observe trusted time immediately before PR dispatch: %w", observeErr)
+		}
+		if authorityErr := l.revalidatePullRequestAuthority(callbackContext, at, true); authorityErr != nil {
+			return nil, authorityErr
+		}
+		if l.pullRequestAttempt != nil || l.state != StatePublished {
+			return nil, fmt.Errorf("%w: PR attempt latch already installed", ErrCommitAuthority)
+		}
+		attempt, attemptErr := githubpullrequest.NewPullRequestAttempt(l.pullRequestPlan, at)
+		if attemptErr != nil {
+			return nil, attemptErr
+		}
+		// The transition lock is held by EstablishGitHubPullRequest. These two
+		// assignments form the one-way latch before callback return exposes the
+		// attempt to the engine's unexported POST path.
+		l.pullRequestAttempt = attempt
+		l.state = StatePRCreating
+		return attempt, nil
+	})
+
+	if !result.Attempted {
+		switch result.Preflight.Status {
+		case githubpullrequest.ObservationExact:
+			ledger, ledgerErr := githubpullrequest.NewExternalEffectLedger(githubpullrequest.LedgerSpec{Previous: l.externalEffects, Plan: l.pullRequestPlan, Outcome: githubpullrequest.OutcomeAlreadyPresent, Observation: result.Preflight, Causality: githubpullrequest.CausalityPreexisting})
+			if ledgerErr != nil {
+				l.state = StateFailed
+				return l.externalEffects, errors.Join(establishErr, ledgerErr)
+			}
+			l.externalEffects = ledger
+			l.state = StatePREstablished
+			return ledger, establishErr
+		case githubpullrequest.ObservationConflicting:
+			ledger, ledgerErr := githubpullrequest.NewExternalEffectLedger(githubpullrequest.LedgerSpec{Previous: l.externalEffects, Plan: l.pullRequestPlan, Outcome: githubpullrequest.OutcomeConflict, Observation: result.Preflight, Causality: githubpullrequest.CausalityNone})
+			if ledgerErr == nil {
+				l.externalEffects = ledger
+			}
+			l.state = StateConflicted
+			return l.externalEffects, errors.Join(establishErr, ledgerErr, githubpullrequest.ErrCreateRejected)
+		default:
+			l.state = pullRequestFailureState(establishErr)
+			return l.externalEffects, establishErr
+		}
+	}
+	if l.pullRequestAttempt == nil || result.Attempt == nil || l.pullRequestAttempt.Identity() != result.Attempt.Identity() {
+		l.state = StateFailed
+		return l.externalEffects, errors.Join(establishErr, fmt.Errorf("%w: engine attempt differs from installed latch", ErrCommitAuthority))
+	}
+	l.pullRequestAck = result.CompatibleAcknowledgement
+	ledger, state, classifyErr := l.pullRequestLedger(result.Postflight, true, result.CompatibleAcknowledgement)
+	if ledger != nil {
+		l.externalEffects = ledger
+	}
+	l.state = state
+	return l.externalEffects, errors.Join(establishErr, classifyErr)
+}
+
+// ReconcileGitHubPullRequest is read-only and is the only operation available
+// after an uncertain PR attempt. It synchronously owns a fresh trusted bounded
+// context under the lifecycle transition lock and can never dispatch POST.
+func (l *Lifecycle) ReconcileGitHubPullRequest(engine GitHubPullRequestEngine) (*githubpullrequest.ExternalEffectLedger, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if err := l.require(StatePRCreationUncertain, "reconcile GitHub pull request"); err != nil {
+		return l.externalEffects, err
+	}
+	if engine == nil || l.pullRequestPlan == nil || l.pullRequestAttempt == nil || l.externalEffects == nil {
+		return l.externalEffects, ErrCommitAuthority
+	}
+	reconcileCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	observation, observeErr := engine.Reconcile(reconcileCtx, l.pullRequestPlan)
+	cancel()
+	ledger, state, classifyErr := l.pullRequestLedger(observation, true, l.pullRequestAck)
+	if ledger != nil {
+		l.externalEffects = ledger
+	}
+	l.state = state
+	return l.externalEffects, errors.Join(observeErr, classifyErr)
+}
+
+func (l *Lifecycle) GitHubPullRequestPlan() *githubpullrequest.Plan {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.pullRequestPlan
+}
+
+func (l *Lifecycle) PullRequestAttempt() *githubpullrequest.PullRequestAttempt {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.pullRequestAttempt
+}
+
+func (l *Lifecycle) ExternalEffectLedger() *githubpullrequest.ExternalEffectLedger {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.externalEffects
+}
+
+func (l *Lifecycle) pullRequestLedger(observation githubpullrequest.Observation, postflight, acknowledged bool) (*githubpullrequest.ExternalEffectLedger, State, error) {
+	spec := githubpullrequest.LedgerSpec{Previous: l.externalEffects, Plan: l.pullRequestPlan, Attempt: l.pullRequestAttempt, Observation: observation, Postflight: postflight, CompatibleAcknowledgement: acknowledged, Reconciled: observation.Status != githubpullrequest.ObservationUnavailable}
+	switch observation.Status {
+	case githubpullrequest.ObservationExact:
+		if acknowledged {
+			spec.Outcome = githubpullrequest.OutcomeCreated
+			spec.Causality = githubpullrequest.CausalityMirageAcknowledged
+		} else {
+			spec.Outcome = githubpullrequest.OutcomeAlreadyPresent
+			spec.Causality = githubpullrequest.CausalityUnknown
+		}
+		ledger, err := githubpullrequest.NewExternalEffectLedger(spec)
+		return ledger, StatePREstablished, err
+	case githubpullrequest.ObservationAbsent:
+		if acknowledged {
+			spec.Observation = githubpullrequest.Observation{Status: githubpullrequest.ObservationConflicting, Evidence: "acknowledged_but_absent"}
+			spec.Outcome = githubpullrequest.OutcomeConflict
+			spec.Causality = githubpullrequest.CausalityNone
+			ledger, err := githubpullrequest.NewExternalEffectLedger(spec)
+			return ledger, StateConflicted, err
+		}
+		spec.Outcome = githubpullrequest.OutcomeNotCreated
+		spec.Causality = githubpullrequest.CausalityNone
+		ledger, err := githubpullrequest.NewExternalEffectLedger(spec)
+		return ledger, StateFailed, err
+	case githubpullrequest.ObservationConflicting:
+		spec.Outcome = githubpullrequest.OutcomeConflict
+		spec.Causality = githubpullrequest.CausalityNone
+		ledger, err := githubpullrequest.NewExternalEffectLedger(spec)
+		return ledger, StateConflicted, err
+	case githubpullrequest.ObservationUnavailable:
+		spec.Outcome = githubpullrequest.OutcomeUncertain
+		spec.Causality = githubpullrequest.CausalityUnknown
+		ledger, err := githubpullrequest.NewExternalEffectLedger(spec)
+		return ledger, StatePRCreationUncertain, err
+	default:
+		return nil, StateFailed, githubpullrequest.ErrObservationUnavailable
+	}
+}
+
+func (l *Lifecycle) revalidatePullRequestAuthority(ctx context.Context, at time.Time, requirePlan bool) error {
+	if l.publicationRecord == nil || l.publicationPlan == nil || l.githubClient == nil || l.githubBinding == nil || at.IsZero() {
+		return fmt.Errorf("%w: complete M5.3 publication evidence is required", ErrCommitAuthority)
+	}
+	if err := l.revalidatePublicationAuthority(ctx, at, true); err != nil {
+		return err
+	}
+	if l.publicationRecord.Outcome() != gitpublication.OutcomePublished || l.publicationRecord.PublicationPlanIdentity() != l.publicationPlan.Identity() || l.publicationRecord.CommitOID() != l.publicationPlan.CommitOID() || l.publicationRecord.TargetRef() != l.publicationPlan.TargetRef() || l.publicationRecord.RepositoryID() != l.githubBinding.RepositoryID() || l.publicationRecord.RepositoryFullName() != l.githubBinding.FullName() {
+		return fmt.Errorf("%w: immutable M5.3 publication record differs", ErrCommitAuthority)
+	}
+	observation, err := l.githubClient.ExactRef(ctx, l.githubBinding.FullName(), l.githubBinding.RepositoryID(), l.publicationPlan.TargetRef(), l.publicationPlan.CommitOID())
+	if err != nil || observation.Status == githubbinding.RefUnavailable {
+		return errors.Join(githubbinding.ErrUnavailable, err)
+	}
+	if observation.Status != githubbinding.RefPresentExact || observation.OID != l.publicationPlan.CommitOID() {
+		return fmt.Errorf("%w: published target ref changed", githubbinding.ErrRepositoryChanged)
+	}
+	decision := l.manifest.contract.EvaluateGitHubPullRequest(contracts.GitHubCreatePullRequest, l.githubBinding.FullName(), l.publicationPlan.BaseRef(), l.publicationPlan.TargetRef(), contracts.PullRequestMetadataV1, at)
+	if !decision.Allowed {
+		return fmt.Errorf("%w: %s", ErrCommitAuthority, decision.RuleID)
+	}
+	if requirePlan {
+		if l.pullRequestPlan == nil {
+			return fmt.Errorf("%w: PR plan is unavailable", ErrCommitAuthority)
+		}
+		if err := githubpullrequest.RevalidatePlan(l.pullRequestPlan, l.pullRequestPlanSpec(l.pullRequestPlan.CreatedAt())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (l *Lifecycle) pullRequestPlanSpec(createdAt time.Time) githubpullrequest.PlanSpec {
+	return githubpullrequest.PlanSpec{ManifestHash: l.manifest.identity, Contract: l.manifest.contract, Repository: l.gitBinding, GitPlan: l.gitPlan, Artifact: l.gitArtifact, GitHub: l.githubBinding, PublicationPlan: l.publicationPlan, PublicationRecord: l.publicationRecord, CreatedAt: createdAt}
 }
 
 func (l *Lifecycle) revalidatePublished(ctx context.Context, engine GitPublicationEngine) (*gitpublication.Record, error) {
@@ -1122,6 +1372,19 @@ func gitPublicationFailureState(err error) State {
 		return StateConflicted
 	case errors.Is(err, ErrContractExpired), errors.Is(err, ErrShadowChanged), errors.Is(err, ErrCommitAuthority), errors.Is(err, gitpublication.ErrExpired), errors.Is(err, gitpublication.ErrAuthorityChanged), errors.Is(err, gitcommit.ErrAuthorityChanged):
 		return StateRejected
+	default:
+		return StateFailed
+	}
+}
+
+func pullRequestFailureState(err error) State {
+	switch {
+	case errors.Is(err, githubbinding.ErrRepositoryChanged), errors.Is(err, gitplan.ErrRepositoryChanged), errors.Is(err, gitcommit.ErrRepositoryChanged):
+		return StateConflicted
+	case errors.Is(err, ErrClockRollback), errors.Is(err, ErrTrustedTime), errors.Is(err, githubbinding.ErrUnavailable), errors.Is(err, githubpullrequest.ErrObservationUnavailable), errors.Is(err, githubpullrequest.ErrInvalidLedger), errors.Is(err, githubpullrequest.ErrInvalidAttempt):
+		return StateFailed
+	case errors.Is(err, ErrContractExpired), errors.Is(err, ErrCommitAuthority), errors.Is(err, githubpullrequest.ErrAuthorityChanged):
+		return StateFailed
 	default:
 		return StateFailed
 	}
