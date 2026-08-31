@@ -279,6 +279,19 @@ func TestM54LifecycleClassifiesExactPartialEffectsWithoutRetry(t *testing.T) {
 			if test.wantPosts == 0 && (ledger.Attempted() || lifecycle.PullRequestAttempt() != nil) {
 				t.Fatal("zero-POST outcome installed an attempt")
 			}
+			if test.wantPosts == 1 && test.wantState != StatePRCreationUncertain {
+				repeated, repeatedErr := lifecycle.EstablishGitHubPullRequest(context.Background(), engine)
+				if test.wantState == StatePREstablished {
+					if repeatedErr != nil || repeated != ledger {
+						t.Fatalf("established repeat ledger=%#v err=%v", repeated, repeatedErr)
+					}
+				} else if !errors.Is(repeatedErr, ErrInvalidTransition) {
+					t.Fatalf("terminal repeat err=%v", repeatedErr)
+				}
+				if engine.postCount() != 1 {
+					t.Fatalf("later call dispatched another POST: %d", engine.postCount())
+				}
+			}
 			if test.wantState == StatePRCreationUncertain {
 				if _, err := lifecycle.EstablishGitHubPullRequest(context.Background(), engine); !errors.Is(err, ErrInvalidTransition) || engine.postCount() != 1 {
 					t.Fatalf("uncertain retry err=%v posts=%d", err, engine.postCount())
@@ -338,6 +351,18 @@ func TestM54LifecycleAuthorityChangesBeforeLatchPerformZeroPOSTs(t *testing.T) {
 			client.targetOID = lifecycle.GitRepositoryBinding().HeadCommit()
 			client.targetState = githubbinding.RefPresentOther
 		}, want: githubbinding.ErrRepositoryChanged},
+		{name: "published head missing", mutate: func(_ *Lifecycle, client *m53LifecycleClient, _ *time.Time) {
+			client.targetState = githubbinding.RefAbsent
+		}, want: githubbinding.ErrRepositoryChanged},
+		{name: "base moved", mutate: func(_ *Lifecycle, client *m53LifecycleClient, _ *time.Time) {
+			client.baseCommit = strings.Repeat("f", 40)
+		}, want: githubbinding.ErrRepositoryChanged},
+		{name: "repository identity changed", mutate: func(_ *Lifecycle, client *m53LifecycleClient, _ *time.Time) {
+			client.repository.ID++
+		}, want: githubbinding.ErrRepositoryChanged},
+		{name: "publication record missing", mutate: func(lifecycle *Lifecycle, _ *m53LifecycleClient, _ *time.Time) {
+			lifecycle.publicationRecord = nil
+		}, want: ErrCommitAuthority},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			current := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)

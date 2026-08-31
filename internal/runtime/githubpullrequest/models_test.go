@@ -125,6 +125,38 @@ func TestLedgerRejectsImpossibleSnapshots(t *testing.T) {
 	}
 }
 
+func TestLedgerRejectsRewrittenOrDowngradedHistory(t *testing.T) {
+	plan := testPlan(t)
+	attempt, err := NewPullRequestAttempt(plan, plan.CreatedAt().Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherAttempt, err := NewPullRequestAttempt(plan, plan.CreatedAt().Add(2*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	exact := testPullRequestIdentity(t, plan)
+	initial := mustLedger(t, LedgerSpec{Plan: plan, Outcome: OutcomeNotAttempted, Causality: CausalityNone})
+	created := mustLedger(t, LedgerSpec{Previous: initial, Plan: plan, Attempt: attempt, Outcome: OutcomeCreated, Observation: Observation{Status: ObservationExact, Exact: exact}, Postflight: true, CompatibleAcknowledgement: true, Reconciled: true, Causality: CausalityMirageAcknowledged})
+	uncertain := mustLedger(t, LedgerSpec{Previous: initial, Plan: plan, Attempt: attempt, Outcome: OutcomeUncertain, Observation: Observation{Status: ObservationUnavailable}, Postflight: true, Causality: CausalityUnknown})
+
+	tests := map[string]LedgerSpec{
+		"noninitial first snapshot":         {Plan: plan, Attempt: attempt, Outcome: OutcomeNotCreated, Observation: Observation{Status: ObservationAbsent}, Postflight: true, Reconciled: true, Causality: CausalityNone},
+		"duplicate initial snapshot":        {Previous: initial, Plan: plan, Outcome: OutcomeNotAttempted, Causality: CausalityNone},
+		"terminal result downgraded":        {Previous: created, Plan: plan, Attempt: attempt, Outcome: OutcomeNotCreated, Observation: Observation{Status: ObservationAbsent}, Postflight: true, Reconciled: true, Causality: CausalityNone},
+		"uncertain loses attempt":           {Previous: uncertain, Plan: plan, Outcome: OutcomeConflict, Observation: Observation{Status: ObservationConflicting, Evidence: "changed"}, Causality: CausalityNone},
+		"uncertain changes attempt":         {Previous: uncertain, Plan: plan, Attempt: otherAttempt, Outcome: OutcomeNotCreated, Observation: Observation{Status: ObservationAbsent}, Postflight: true, Reconciled: true, Causality: CausalityNone},
+		"uncertain changes acknowledgement": {Previous: uncertain, Plan: plan, Attempt: attempt, Outcome: OutcomeCreated, Observation: Observation{Status: ObservationExact, Exact: exact}, Postflight: true, CompatibleAcknowledgement: true, Reconciled: true, Causality: CausalityMirageAcknowledged},
+	}
+	for name, spec := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, err := NewExternalEffectLedger(spec); !errors.Is(err, ErrInvalidLedger) {
+				t.Fatalf("error=%v, want ErrInvalidLedger", err)
+			}
+		})
+	}
+}
+
 func TestPullRequestIdentityRequiresExactExternalIdentity(t *testing.T) {
 	plan := testPlan(t)
 	valid := PullRequestIdentitySpec{Plan: plan, Number: 17, StableID: 1700, URL: "https://github.com/owner/repo/pull/17", RepositoryID: plan.RepositoryID(), RepositoryFullName: plan.RepositoryFullName(), BaseRef: plan.BaseRef(), TargetRef: plan.TargetRef(), HeadOID: plan.CommitOID(), MetadataPolicy: plan.Metadata().Version(), Title: plan.Metadata().Title(), Body: plan.Metadata().Body(), Open: true}

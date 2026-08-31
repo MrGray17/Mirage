@@ -251,6 +251,9 @@ func NewExternalEffectLedger(spec LedgerSpec) (*ExternalEffectLedger, error) {
 	if err := validateOutcome(spec, attempted); err != nil {
 		return nil, err
 	}
+	if err := validateLedgerTransition(spec); err != nil {
+		return nil, err
+	}
 	branch := canonicalBranchEffect{Operation: contracts.GitHubCreateBranch, Outcome: "PUBLISHED", Ref: spec.Plan.TargetRef(), OID: spec.Plan.CommitOID(), PublicationRecordIdentity: spec.Plan.PublicationRecordIdentity()}
 	pr := canonicalPullRequestEffect{
 		Operation: contracts.GitHubCreatePullRequest, Outcome: spec.Outcome, Attempted: attempted, RepositoryID: spec.Plan.RepositoryID(), RepositoryFullName: spec.Plan.RepositoryFullName(), BaseRef: spec.Plan.BaseRef(), TargetRef: spec.Plan.TargetRef(), HeadOID: spec.Plan.CommitOID(),
@@ -277,6 +280,30 @@ func NewExternalEffectLedger(spec LedgerSpec) (*ExternalEffectLedger, error) {
 		return nil, err
 	}
 	return &ExternalEffectLedger{identity: identity, previousIdentity: previousIdentity, planIdentity: spec.Plan.Identity(), branch: branch, pullRequest: pr}, nil
+}
+
+func validateLedgerTransition(spec LedgerSpec) error {
+	if spec.Previous == nil {
+		if spec.Outcome != OutcomeNotAttempted {
+			return fmt.Errorf("%w: the initial snapshot must be NOT_ATTEMPTED", ErrInvalidLedger)
+		}
+		return nil
+	}
+
+	previous := spec.Previous.pullRequest
+	switch previous.Outcome {
+	case OutcomeNotAttempted:
+		if spec.Outcome == OutcomeNotAttempted {
+			return fmt.Errorf("%w: a ledger update must add new external-effect evidence", ErrInvalidLedger)
+		}
+	case OutcomeUncertain:
+		if spec.Attempt == nil || spec.Attempt.Identity() != previous.AttemptIdentity || spec.CompatibleAcknowledgement != previous.TransportAcknowledged || spec.Outcome == OutcomeNotAttempted {
+			return fmt.Errorf("%w: uncertain reconciliation must retain the exact attempt and acknowledgement evidence", ErrInvalidLedger)
+		}
+	default:
+		return fmt.Errorf("%w: terminal PR evidence cannot be rewritten or downgraded", ErrInvalidLedger)
+	}
+	return nil
 }
 
 func validateOutcome(spec LedgerSpec, attempted bool) error {
