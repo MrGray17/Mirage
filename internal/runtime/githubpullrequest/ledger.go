@@ -100,17 +100,40 @@ func NewPullRequestIdentity(spec PullRequestIdentitySpec) (*PullRequestIdentity,
 	if spec.Plan == nil || spec.Plan.Metadata() == nil || spec.Number <= 0 || spec.StableID <= 0 || spec.Draft || !spec.Open || spec.RepositoryID != spec.Plan.RepositoryID() || spec.RepositoryFullName != spec.Plan.RepositoryFullName() || spec.BaseRef != spec.Plan.BaseRef() || spec.TargetRef != spec.Plan.TargetRef() || spec.HeadOID != spec.Plan.CommitOID() || spec.MetadataPolicy != spec.Plan.Metadata().Version() || spec.Title != spec.Plan.Metadata().Title() || spec.Body != spec.Plan.Metadata().Body() {
 		return nil, fmt.Errorf("%w: observed PR does not equal the authorized plan", ErrInvalidPullRequestIdentity)
 	}
-	expectedURL := "https://github.com/" + spec.RepositoryFullName + "/pull/" + strconv.FormatInt(spec.Number, 10)
-	parsed, err := url.Parse(spec.URL)
-	if err != nil || spec.URL != expectedURL || parsed.Scheme != "https" || parsed.Host != "github.com" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+	canonicalURL, err := canonicalizePullRequestURL(spec.URL, spec.RepositoryFullName, spec.Number)
+	if err != nil {
 		return nil, fmt.Errorf("%w: PR URL is not the exact canonical github.com URL", ErrInvalidPullRequestIdentity)
 	}
-	canonical := canonicalPullRequestIdentity{Version: PullRequestIDVersion, Number: spec.Number, StableID: spec.StableID, URL: spec.URL, RepositoryID: spec.RepositoryID, RepositoryFullName: spec.RepositoryFullName, BaseRef: spec.BaseRef, TargetRef: spec.TargetRef, HeadOID: spec.HeadOID, MetadataPolicy: spec.MetadataPolicy, TitleDigest: bytesDigest([]byte(spec.Title)), BodyDigest: bytesDigest([]byte(spec.Body))}
+	canonical := canonicalPullRequestIdentity{Version: PullRequestIDVersion, Number: spec.Number, StableID: spec.StableID, URL: canonicalURL, RepositoryID: spec.RepositoryID, RepositoryFullName: spec.RepositoryFullName, BaseRef: spec.BaseRef, TargetRef: spec.TargetRef, HeadOID: spec.HeadOID, MetadataPolicy: spec.MetadataPolicy, TitleDigest: bytesDigest([]byte(spec.Title)), BodyDigest: bytesDigest([]byte(spec.Body))}
 	identity, err := canonicalHash(canonical)
 	if err != nil {
 		return nil, err
 	}
-	return &PullRequestIdentity{identity: identity, number: spec.Number, stableID: spec.StableID, url: spec.URL, repositoryID: spec.RepositoryID, repositoryFullName: spec.RepositoryFullName, baseRef: spec.BaseRef, targetRef: spec.TargetRef, headOID: spec.HeadOID, metadataPolicy: spec.MetadataPolicy, titleDigest: canonical.TitleDigest, bodyDigest: canonical.BodyDigest}, nil
+	return &PullRequestIdentity{identity: identity, number: spec.Number, stableID: spec.StableID, url: canonicalURL, repositoryID: spec.RepositoryID, repositoryFullName: spec.RepositoryFullName, baseRef: spec.BaseRef, targetRef: spec.TargetRef, headOID: spec.HeadOID, metadataPolicy: spec.MetadataPolicy, titleDigest: canonical.TitleDigest, bodyDigest: canonical.BodyDigest}, nil
+}
+
+func canonicalizePullRequestURL(providerURL, expectedRepository string, expectedNumber int64) (string, error) {
+	canonicalExpected, err := contracts.CanonicalGitHubRepository(expectedRepository)
+	if err != nil || canonicalExpected != expectedRepository {
+		return "", ErrInvalidPullRequestIdentity
+	}
+	parsed, err := url.Parse(providerURL)
+	if err != nil || parsed.Scheme != "https" || parsed.Host != "github.com" || parsed.User != nil || parsed.Opaque != "" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawFragment != "" || strings.ContainsAny(providerURL, "%?#") {
+		return "", ErrInvalidPullRequestIdentity
+	}
+	parts := strings.Split(parsed.Path, "/")
+	if len(parts) != 5 || parts[0] != "" || parts[1] == "" || parts[2] == "" || parts[3] != "pull" || parts[4] == "" {
+		return "", ErrInvalidPullRequestIdentity
+	}
+	repository, err := contracts.CanonicalGitHubRepository(parts[1] + "/" + parts[2])
+	if err != nil || repository != expectedRepository {
+		return "", ErrInvalidPullRequestIdentity
+	}
+	number, err := strconv.ParseInt(parts[4], 10, 64)
+	if err != nil || number <= 0 || number != expectedNumber || strconv.FormatInt(number, 10) != parts[4] {
+		return "", ErrInvalidPullRequestIdentity
+	}
+	return "https://github.com/" + expectedRepository + "/pull/" + strconv.FormatInt(expectedNumber, 10), nil
 }
 
 func (p *PullRequestIdentity) Identity() string {

@@ -43,6 +43,32 @@ func TestObserveExactPullRequestUsesFixedBoundAuthority(t *testing.T) {
 	}
 }
 
+func TestObserveExactPullRequestCanonicalizesProviderDisplayCasing(t *testing.T) {
+	plan := testPlanForRepository(t, "mrgray17/mirage")
+	candidate := exactAPIPullRequest(plan)
+	candidate.HTMLURL = "https://github.com/MrGray17/Mirage/pull/17"
+	candidate.Head.Repo.FullName = "MrGray17/Mirage"
+	candidate.Base.Repo.FullName = "MrGray17/Mirage"
+	client, err := NewHTTPClientForDoer("secret", doerFunc(func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Path {
+		case "/repos/mrgray17/mirage":
+			return response(http.StatusOK, `{"id":42,"full_name":"MrGray17/Mirage"}`), nil
+		case "/repos/mrgray17/mirage/pulls":
+			return jsonResponse(t, []apiPullRequest{candidate}), nil
+		default:
+			t.Fatalf("unexpected request path %q", request.URL.Path)
+			return nil, errors.New("unexpected request")
+		}
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation, err := client.ObserveExactPullRequest(context.Background(), plan)
+	if err != nil || observation.Status != ObservationExact || observation.Exact == nil || observation.Exact.URL() != "https://github.com/mrgray17/mirage/pull/17" {
+		t.Fatalf("observation=%#v error=%v", observation, err)
+	}
+}
+
 func TestObserveExactPullRequestClassifiesAbsentAndHostileCandidates(t *testing.T) {
 	plan := testPlan(t)
 	exact := exactAPIPullRequest(plan)
