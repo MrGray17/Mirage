@@ -57,6 +57,7 @@ type PullRequestIdentitySpec struct {
 	RepositoryID       int64
 	RepositoryFullName string
 	BaseRef            string
+	BaseCommit         string
 	TargetRef          string
 	HeadOID            string
 	MetadataPolicy     string
@@ -74,6 +75,7 @@ type PullRequestIdentity struct {
 	repositoryID       int64
 	repositoryFullName string
 	baseRef            string
+	baseCommit         string
 	targetRef          string
 	headOID            string
 	metadataPolicy     string
@@ -89,6 +91,7 @@ type canonicalPullRequestIdentity struct {
 	RepositoryID       int64  `json:"repository_id"`
 	RepositoryFullName string `json:"repository_full_name"`
 	BaseRef            string `json:"base_ref"`
+	BaseCommit         string `json:"base_commit"`
 	TargetRef          string `json:"target_ref"`
 	HeadOID            string `json:"head_oid"`
 	MetadataPolicy     string `json:"metadata_policy"`
@@ -97,19 +100,19 @@ type canonicalPullRequestIdentity struct {
 }
 
 func NewPullRequestIdentity(spec PullRequestIdentitySpec) (*PullRequestIdentity, error) {
-	if spec.Plan == nil || spec.Plan.Metadata() == nil || spec.Number <= 0 || spec.StableID <= 0 || spec.Draft || !spec.Open || spec.RepositoryID != spec.Plan.RepositoryID() || spec.RepositoryFullName != spec.Plan.RepositoryFullName() || spec.BaseRef != spec.Plan.BaseRef() || spec.TargetRef != spec.Plan.TargetRef() || spec.HeadOID != spec.Plan.CommitOID() || spec.MetadataPolicy != spec.Plan.Metadata().Version() || spec.Title != spec.Plan.Metadata().Title() || spec.Body != spec.Plan.Metadata().Body() {
+	if spec.Plan == nil || spec.Plan.Metadata() == nil || spec.Number <= 0 || spec.StableID <= 0 || spec.Draft || !spec.Open || spec.RepositoryID != spec.Plan.RepositoryID() || spec.RepositoryFullName != spec.Plan.RepositoryFullName() || spec.BaseRef != spec.Plan.BaseRef() || spec.BaseCommit != spec.Plan.BaseCommit() || spec.TargetRef != spec.Plan.TargetRef() || spec.HeadOID != spec.Plan.CommitOID() || spec.MetadataPolicy != spec.Plan.Metadata().Version() || spec.Title != spec.Plan.Metadata().Title() || spec.Body != spec.Plan.Metadata().Body() {
 		return nil, fmt.Errorf("%w: observed PR does not equal the authorized plan", ErrInvalidPullRequestIdentity)
 	}
 	canonicalURL, err := canonicalizePullRequestURL(spec.URL, spec.RepositoryFullName, spec.Number)
 	if err != nil {
 		return nil, fmt.Errorf("%w: PR URL is not the exact canonical github.com URL", ErrInvalidPullRequestIdentity)
 	}
-	canonical := canonicalPullRequestIdentity{Version: PullRequestIDVersion, Number: spec.Number, StableID: spec.StableID, URL: canonicalURL, RepositoryID: spec.RepositoryID, RepositoryFullName: spec.RepositoryFullName, BaseRef: spec.BaseRef, TargetRef: spec.TargetRef, HeadOID: spec.HeadOID, MetadataPolicy: spec.MetadataPolicy, TitleDigest: bytesDigest([]byte(spec.Title)), BodyDigest: bytesDigest([]byte(spec.Body))}
+	canonical := canonicalPullRequestIdentity{Version: PullRequestIDVersion, Number: spec.Number, StableID: spec.StableID, URL: canonicalURL, RepositoryID: spec.RepositoryID, RepositoryFullName: spec.RepositoryFullName, BaseRef: spec.BaseRef, BaseCommit: spec.BaseCommit, TargetRef: spec.TargetRef, HeadOID: spec.HeadOID, MetadataPolicy: spec.MetadataPolicy, TitleDigest: bytesDigest([]byte(spec.Title)), BodyDigest: bytesDigest([]byte(spec.Body))}
 	identity, err := canonicalHash(canonical)
 	if err != nil {
 		return nil, err
 	}
-	return &PullRequestIdentity{identity: identity, number: spec.Number, stableID: spec.StableID, url: canonicalURL, repositoryID: spec.RepositoryID, repositoryFullName: spec.RepositoryFullName, baseRef: spec.BaseRef, targetRef: spec.TargetRef, headOID: spec.HeadOID, metadataPolicy: spec.MetadataPolicy, titleDigest: canonical.TitleDigest, bodyDigest: canonical.BodyDigest}, nil
+	return &PullRequestIdentity{identity: identity, number: spec.Number, stableID: spec.StableID, url: canonicalURL, repositoryID: spec.RepositoryID, repositoryFullName: spec.RepositoryFullName, baseRef: spec.BaseRef, baseCommit: spec.BaseCommit, targetRef: spec.TargetRef, headOID: spec.HeadOID, metadataPolicy: spec.MetadataPolicy, titleDigest: canonical.TitleDigest, bodyDigest: canonical.BodyDigest}, nil
 }
 
 func canonicalizePullRequestURL(providerURL, expectedRepository string, expectedNumber int64) (string, error) {
@@ -145,6 +148,9 @@ func (p *PullRequestIdentity) RepositoryFullName() string {
 }
 func (p *PullRequestIdentity) BaseRef() string {
 	return prString(p, func() string { return p.baseRef })
+}
+func (p *PullRequestIdentity) BaseCommit() string {
+	return prString(p, func() string { return p.baseCommit })
 }
 func (p *PullRequestIdentity) TargetRef() string {
 	return prString(p, func() string { return p.targetRef })
@@ -228,6 +234,7 @@ type canonicalPullRequestEffect struct {
 	RepositoryID          int64                                `json:"repository_id"`
 	RepositoryFullName    string                               `json:"repository_full_name"`
 	BaseRef               string                               `json:"base_ref"`
+	BaseCommit            string                               `json:"base_commit"`
 	TargetRef             string                               `json:"target_ref"`
 	HeadOID               string                               `json:"head_oid"`
 	MetadataPolicy        string                               `json:"metadata_policy"`
@@ -279,7 +286,7 @@ func NewExternalEffectLedger(spec LedgerSpec) (*ExternalEffectLedger, error) {
 	}
 	branch := canonicalBranchEffect{Operation: contracts.GitHubCreateBranch, Outcome: "PUBLISHED", Ref: spec.Plan.TargetRef(), OID: spec.Plan.CommitOID(), PublicationRecordIdentity: spec.Plan.PublicationRecordIdentity()}
 	pr := canonicalPullRequestEffect{
-		Operation: contracts.GitHubCreatePullRequest, Outcome: spec.Outcome, Attempted: attempted, RepositoryID: spec.Plan.RepositoryID(), RepositoryFullName: spec.Plan.RepositoryFullName(), BaseRef: spec.Plan.BaseRef(), TargetRef: spec.Plan.TargetRef(), HeadOID: spec.Plan.CommitOID(),
+		Operation: contracts.GitHubCreatePullRequest, Outcome: spec.Outcome, Attempted: attempted, RepositoryID: spec.Plan.RepositoryID(), RepositoryFullName: spec.Plan.RepositoryFullName(), BaseRef: spec.Plan.BaseRef(), BaseCommit: spec.Plan.BaseCommit(), TargetRef: spec.Plan.TargetRef(), HeadOID: spec.Plan.CommitOID(),
 		MetadataPolicy: spec.Plan.Metadata().Version(), TitleDigest: spec.Plan.Metadata().TitleDigest(), BodyDigest: spec.Plan.Metadata().BodyDigest(), PlanIdentity: spec.Plan.Identity(), Observation: spec.Observation.Status, ConflictEvidence: spec.Observation.Evidence,
 		TransportAcknowledged: spec.CompatibleAcknowledgement, ExactPostflight: spec.Postflight && spec.Observation.Status == ObservationExact, Reconciled: spec.Reconciled, Causality: spec.Causality,
 	}
@@ -368,7 +375,7 @@ func validateOutcome(spec LedgerSpec, attempted bool) error {
 	}
 	if exact {
 		pr := spec.Observation.Exact
-		if pr.RepositoryID() != spec.Plan.RepositoryID() || pr.RepositoryFullName() != spec.Plan.RepositoryFullName() || pr.BaseRef() != spec.Plan.BaseRef() || pr.TargetRef() != spec.Plan.TargetRef() || pr.HeadOID() != spec.Plan.CommitOID() || pr.MetadataPolicy() != spec.Plan.Metadata().Version() || pr.TitleDigest() != spec.Plan.Metadata().TitleDigest() || pr.BodyDigest() != spec.Plan.Metadata().BodyDigest() || pr.Number() <= 0 || pr.StableID() <= 0 || pr.URL() == "" {
+		if pr.RepositoryID() != spec.Plan.RepositoryID() || pr.RepositoryFullName() != spec.Plan.RepositoryFullName() || pr.BaseRef() != spec.Plan.BaseRef() || pr.BaseCommit() != spec.Plan.BaseCommit() || pr.TargetRef() != spec.Plan.TargetRef() || pr.HeadOID() != spec.Plan.CommitOID() || pr.MetadataPolicy() != spec.Plan.Metadata().Version() || pr.TitleDigest() != spec.Plan.Metadata().TitleDigest() || pr.BodyDigest() != spec.Plan.Metadata().BodyDigest() || pr.Number() <= 0 || pr.StableID() <= 0 || pr.URL() == "" {
 			return fmt.Errorf("%w: established PR identity differs from the plan", ErrInvalidLedger)
 		}
 	} else if spec.Observation.Exact != nil {
@@ -434,4 +441,10 @@ func (l *ExternalEffectLedger) PullRequestURL() string {
 		return ""
 	}
 	return l.pullRequest.URL
+}
+func (l *ExternalEffectLedger) PullRequestBaseCommit() string {
+	if l == nil {
+		return ""
+	}
+	return l.pullRequest.BaseCommit
 }

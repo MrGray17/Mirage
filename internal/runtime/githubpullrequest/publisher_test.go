@@ -75,21 +75,26 @@ func TestEngineInstallsAttemptBeforeOneExactPOSTAndUsesAuthoritativePostflight(t
 	plan := testPlan(t)
 	exact := exactAPIPullRequest(plan)
 	exactBody := string(mustJSON(t, exact))
+	wrongBase := mutateCandidate(exact, func(pr *apiPullRequest) { pr.Base.SHA = plan.CommitOID() })
+	wrongBaseBody := string(mustJSON(t, wrongBase))
 	tests := map[string]struct {
-		postStatus int
-		postBody   string
-		postErr    error
-		postflight []apiPullRequest
-		wantAck    bool
-		wantStatus ObservationStatus
+		postStatus   int
+		postBody     string
+		postErr      error
+		postflight   []apiPullRequest
+		wantAck      bool
+		wantStatus   ObservationStatus
+		wantEvidence string
 	}{
-		"acknowledged exact":              {postStatus: http.StatusCreated, postBody: exactBody, postflight: []apiPullRequest{exact}, wantAck: true, wantStatus: ObservationExact},
-		"lost acknowledgement exact":      {postErr: errors.New("connection reset secret"), postflight: []apiPullRequest{exact}, wantStatus: ObservationExact},
-		"deadline exact":                  {postErr: context.DeadlineExceeded, postflight: []apiPullRequest{exact}, wantStatus: ObservationExact},
-		"query create race exact":         {postStatus: http.StatusUnprocessableEntity, postBody: `{}`, postflight: []apiPullRequest{exact}, wantStatus: ObservationExact},
-		"rejected absent":                 {postStatus: http.StatusUnprocessableEntity, postBody: `{}`, wantStatus: ObservationAbsent},
-		"server failure absent":           {postStatus: http.StatusInternalServerError, postBody: `{}`, wantStatus: ObservationAbsent},
-		"malformed acknowledgement exact": {postStatus: http.StatusCreated, postBody: `{`, postflight: []apiPullRequest{exact}, wantStatus: ObservationExact},
+		"acknowledged exact":               {postStatus: http.StatusCreated, postBody: exactBody, postflight: []apiPullRequest{exact}, wantAck: true, wantStatus: ObservationExact},
+		"lost acknowledgement exact":       {postErr: errors.New("connection reset secret"), postflight: []apiPullRequest{exact}, wantStatus: ObservationExact},
+		"deadline exact":                   {postErr: context.DeadlineExceeded, postflight: []apiPullRequest{exact}, wantStatus: ObservationExact},
+		"query create race exact":          {postStatus: http.StatusUnprocessableEntity, postBody: `{}`, postflight: []apiPullRequest{exact}, wantStatus: ObservationExact},
+		"wrong base acknowledgement":       {postStatus: http.StatusCreated, postBody: wrongBaseBody, postflight: []apiPullRequest{exact}, wantStatus: ObservationExact},
+		"base moves after final authority": {postStatus: http.StatusCreated, postBody: wrongBaseBody, postflight: []apiPullRequest{wrongBase}, wantStatus: ObservationConflicting, wantEvidence: "base_oid_mismatch"},
+		"rejected absent":                  {postStatus: http.StatusUnprocessableEntity, postBody: `{}`, wantStatus: ObservationAbsent},
+		"server failure absent":            {postStatus: http.StatusInternalServerError, postBody: `{}`, wantStatus: ObservationAbsent},
+		"malformed acknowledgement exact":  {postStatus: http.StatusCreated, postBody: `{`, postflight: []apiPullRequest{exact}, wantStatus: ObservationExact},
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -109,7 +114,7 @@ func TestEngineInstallsAttemptBeforeOneExactPOSTAndUsesAuthoritativePostflight(t
 				return attempt, attemptErr
 			})
 			posts, pulls := doer.counts()
-			if posts != 1 || pulls != 2 || !result.Attempted || result.Attempt == nil || result.CompatibleAcknowledgement != test.wantAck || result.Postflight.Status != test.wantStatus {
+			if posts != 1 || pulls != 2 || !result.Attempted || result.Attempt == nil || result.CompatibleAcknowledgement != test.wantAck || result.Postflight.Status != test.wantStatus || result.Postflight.Evidence != test.wantEvidence {
 				t.Fatalf("result=%#v posts=%d pulls=%d", result, posts, pulls)
 			}
 		})
@@ -135,8 +140,9 @@ func TestEnginePreflightAndFinalAuthorityFailuresPerformNoPOST(t *testing.T) {
 	plan := testPlan(t)
 	exact := exactAPIPullRequest(plan)
 	for name, preflight := range map[string][]apiPullRequest{
-		"already exact": {exact},
-		"conflicting":   {mutateCandidate(exact, func(pr *apiPullRequest) { pr.Draft = true })},
+		"already exact":     {exact},
+		"conflicting":       {mutateCandidate(exact, func(pr *apiPullRequest) { pr.Draft = true })},
+		"base OID conflict": {mutateCandidate(exact, func(pr *apiPullRequest) { pr.Base.SHA = plan.CommitOID() })},
 	} {
 		t.Run(name, func(t *testing.T) {
 			doer := &scriptedPRDoer{t: t, plan: plan, pullResponses: [][]apiPullRequest{preflight}}

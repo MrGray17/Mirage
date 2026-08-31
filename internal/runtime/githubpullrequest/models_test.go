@@ -85,7 +85,7 @@ func TestLedgerAcceptsOnlyTruthfulOutcomeShapes(t *testing.T) {
 		t.Fatalf("preexisting ledger=%#v", preexisting)
 	}
 	created := mustLedger(t, LedgerSpec{Previous: initial, Plan: plan, Attempt: attempt, Outcome: OutcomeCreated, Observation: Observation{Status: ObservationExact, Exact: exact}, Postflight: true, CompatibleAcknowledgement: true, Reconciled: true, Causality: CausalityMirageAcknowledged})
-	if !created.Attempted() || !created.TransportAcknowledged() || created.Causality() != CausalityMirageAcknowledged || created.PullRequestURL() == "" {
+	if !created.Attempted() || !created.TransportAcknowledged() || created.Causality() != CausalityMirageAcknowledged || created.PullRequestURL() == "" || created.PullRequestBaseCommit() != plan.BaseCommit() {
 		t.Fatalf("created ledger=%#v", created)
 	}
 	mustLedger(t, LedgerSpec{Previous: initial, Plan: plan, Attempt: attempt, Outcome: OutcomeAlreadyPresent, Observation: Observation{Status: ObservationExact, Exact: exact}, Postflight: true, Reconciled: true, Causality: CausalityUnknown})
@@ -104,6 +104,8 @@ func TestLedgerRejectsImpossibleSnapshots(t *testing.T) {
 	exact := testPullRequestIdentity(t, plan)
 	wrong := *exact
 	wrong.repositoryID++
+	wrongBase := *exact
+	wrongBase.baseCommit = plan.CommitOID()
 
 	tests := map[string]LedgerSpec{
 		"created without identity":        {Plan: plan, Attempt: attempt, Outcome: OutcomeCreated, Observation: Observation{Status: ObservationExact}, Postflight: true, CompatibleAcknowledgement: true, Causality: CausalityMirageAcknowledged},
@@ -115,6 +117,7 @@ func TestLedgerRejectsImpossibleSnapshots(t *testing.T) {
 		"uncertain without attempt":       {Plan: plan, Outcome: OutcomeUncertain, Observation: Observation{Status: ObservationUnavailable}, Postflight: true, Causality: CausalityUnknown},
 		"acknowledged wrong causality":    {Plan: plan, Attempt: attempt, Outcome: OutcomeCreated, Observation: Observation{Status: ObservationExact, Exact: exact}, Postflight: true, CompatibleAcknowledgement: true, Causality: CausalityUnknown},
 		"established wrong repository":    {Plan: plan, Attempt: attempt, Outcome: OutcomeCreated, Observation: Observation{Status: ObservationExact, Exact: &wrong}, Postflight: true, CompatibleAcknowledgement: true, Causality: CausalityMirageAcknowledged},
+		"established wrong base commit":   {Plan: plan, Attempt: attempt, Outcome: OutcomeCreated, Observation: Observation{Status: ObservationExact, Exact: &wrongBase}, Postflight: true, CompatibleAcknowledgement: true, Causality: CausalityMirageAcknowledged},
 	}
 	for name, spec := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -159,7 +162,7 @@ func TestLedgerRejectsRewrittenOrDowngradedHistory(t *testing.T) {
 
 func TestPullRequestIdentityRequiresExactExternalIdentity(t *testing.T) {
 	plan := testPlan(t)
-	valid := PullRequestIdentitySpec{Plan: plan, Number: 17, StableID: 1700, URL: "https://github.com/owner/repo/pull/17", RepositoryID: plan.RepositoryID(), RepositoryFullName: plan.RepositoryFullName(), BaseRef: plan.BaseRef(), TargetRef: plan.TargetRef(), HeadOID: plan.CommitOID(), MetadataPolicy: plan.Metadata().Version(), Title: plan.Metadata().Title(), Body: plan.Metadata().Body(), Open: true}
+	valid := PullRequestIdentitySpec{Plan: plan, Number: 17, StableID: 1700, URL: "https://github.com/owner/repo/pull/17", RepositoryID: plan.RepositoryID(), RepositoryFullName: plan.RepositoryFullName(), BaseRef: plan.BaseRef(), BaseCommit: plan.BaseCommit(), TargetRef: plan.TargetRef(), HeadOID: plan.CommitOID(), MetadataPolicy: plan.Metadata().Version(), Title: plan.Metadata().Title(), Body: plan.Metadata().Body(), Open: true}
 	casePreserving := valid
 	casePreserving.URL = "https://github.com/Owner/Repo/pull/17"
 	identity, err := NewPullRequestIdentity(casePreserving)
@@ -175,6 +178,7 @@ func TestPullRequestIdentityRequiresExactExternalIdentity(t *testing.T) {
 		"wrong URL":      func(spec *PullRequestIdentitySpec) { spec.URL = "https://evil.invalid/pull/17" },
 		"wrong repo":     func(spec *PullRequestIdentitySpec) { spec.RepositoryID++ },
 		"wrong base":     func(spec *PullRequestIdentitySpec) { spec.BaseRef = "refs/heads/other" },
+		"wrong base OID": func(spec *PullRequestIdentitySpec) { spec.BaseCommit = plan.CommitOID() },
 		"wrong head":     func(spec *PullRequestIdentitySpec) { spec.TargetRef += "x" },
 		"wrong OID":      func(spec *PullRequestIdentitySpec) { spec.HeadOID = testBaseOID },
 		"wrong metadata": func(spec *PullRequestIdentitySpec) { spec.Title += "agent" },
@@ -193,7 +197,7 @@ func TestPullRequestIdentityRequiresExactExternalIdentity(t *testing.T) {
 
 func TestPullRequestIdentityRejectsAmbiguousProviderURLs(t *testing.T) {
 	plan := testPlan(t)
-	valid := PullRequestIdentitySpec{Plan: plan, Number: 17, StableID: 1700, URL: "https://github.com/owner/repo/pull/17", RepositoryID: plan.RepositoryID(), RepositoryFullName: plan.RepositoryFullName(), BaseRef: plan.BaseRef(), TargetRef: plan.TargetRef(), HeadOID: plan.CommitOID(), MetadataPolicy: plan.Metadata().Version(), Title: plan.Metadata().Title(), Body: plan.Metadata().Body(), Open: true}
+	valid := PullRequestIdentitySpec{Plan: plan, Number: 17, StableID: 1700, URL: "https://github.com/owner/repo/pull/17", RepositoryID: plan.RepositoryID(), RepositoryFullName: plan.RepositoryFullName(), BaseRef: plan.BaseRef(), BaseCommit: plan.BaseCommit(), TargetRef: plan.TargetRef(), HeadOID: plan.CommitOID(), MetadataPolicy: plan.Metadata().Version(), Title: plan.Metadata().Title(), Body: plan.Metadata().Body(), Open: true}
 	tests := map[string]string{
 		"wrong repository":  "https://github.com/owner/other/pull/17",
 		"wrong PR number":   "https://github.com/owner/repo/pull/18",
@@ -239,7 +243,7 @@ func testPlanForRepository(t *testing.T, repository string) *Plan {
 
 func testPullRequestIdentity(t *testing.T, plan *Plan) *PullRequestIdentity {
 	t.Helper()
-	identity, err := NewPullRequestIdentity(PullRequestIdentitySpec{Plan: plan, Number: 17, StableID: 1700, URL: "https://github.com/owner/repo/pull/17", RepositoryID: plan.RepositoryID(), RepositoryFullName: plan.RepositoryFullName(), BaseRef: plan.BaseRef(), TargetRef: plan.TargetRef(), HeadOID: plan.CommitOID(), MetadataPolicy: plan.Metadata().Version(), Title: plan.Metadata().Title(), Body: plan.Metadata().Body(), Open: true})
+	identity, err := NewPullRequestIdentity(PullRequestIdentitySpec{Plan: plan, Number: 17, StableID: 1700, URL: "https://github.com/owner/repo/pull/17", RepositoryID: plan.RepositoryID(), RepositoryFullName: plan.RepositoryFullName(), BaseRef: plan.BaseRef(), BaseCommit: plan.BaseCommit(), TargetRef: plan.TargetRef(), HeadOID: plan.CommitOID(), MetadataPolicy: plan.Metadata().Version(), Title: plan.Metadata().Title(), Body: plan.Metadata().Body(), Open: true})
 	if err != nil {
 		t.Fatal(err)
 	}

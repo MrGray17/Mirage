@@ -259,6 +259,7 @@ func TestM54LifecycleClassifiesExactPartialEffectsWithoutRetry(t *testing.T) {
 		"lost acknowledgement exact": {preflight: githubpullrequest.ObservationAbsent, postflight: githubpullrequest.ObservationExact, establishErr: githubpullrequest.ErrCreateUnavailable, wantState: StatePREstablished, wantOutcome: githubpullrequest.OutcomeAlreadyPresent, wantPosts: 1},
 		"attempted absent":           {preflight: githubpullrequest.ObservationAbsent, postflight: githubpullrequest.ObservationAbsent, establishErr: githubpullrequest.ErrCreateRejected, wantState: StateFailed, wantOutcome: githubpullrequest.OutcomeNotCreated, wantPosts: 1},
 		"preflight conflict":         {preflight: githubpullrequest.ObservationConflicting, wantState: StateConflicted, wantOutcome: githubpullrequest.OutcomeConflict},
+		"postflight base conflict":   {preflight: githubpullrequest.ObservationAbsent, postflight: githubpullrequest.ObservationConflicting, wantState: StateConflicted, wantOutcome: githubpullrequest.OutcomeConflict, wantPosts: 1},
 		"postflight unavailable":     {preflight: githubpullrequest.ObservationAbsent, postflight: githubpullrequest.ObservationUnavailable, establishErr: githubpullrequest.ErrObservationUnavailable, wantState: StatePRCreationUncertain, wantOutcome: githubpullrequest.OutcomeUncertain, wantPosts: 1},
 	}
 	for name, test := range tests {
@@ -452,7 +453,7 @@ func lifecyclePRObservation(t *testing.T, plan *githubpullrequest.Plan, status g
 	t.Helper()
 	switch status {
 	case githubpullrequest.ObservationExact:
-		identity, err := githubpullrequest.NewPullRequestIdentity(githubpullrequest.PullRequestIdentitySpec{Plan: plan, Number: 17, StableID: 1700, URL: "https://github.com/" + plan.RepositoryFullName() + "/pull/17", RepositoryID: plan.RepositoryID(), RepositoryFullName: plan.RepositoryFullName(), BaseRef: plan.BaseRef(), TargetRef: plan.TargetRef(), HeadOID: plan.CommitOID(), MetadataPolicy: plan.Metadata().Version(), Title: plan.Metadata().Title(), Body: plan.Metadata().Body(), Open: true})
+		identity, err := githubpullrequest.NewPullRequestIdentity(githubpullrequest.PullRequestIdentitySpec{Plan: plan, Number: 17, StableID: 1700, URL: "https://github.com/" + plan.RepositoryFullName() + "/pull/17", RepositoryID: plan.RepositoryID(), RepositoryFullName: plan.RepositoryFullName(), BaseRef: plan.BaseRef(), BaseCommit: plan.BaseCommit(), TargetRef: plan.TargetRef(), HeadOID: plan.CommitOID(), MetadataPolicy: plan.Metadata().Version(), Title: plan.Metadata().Title(), Body: plan.Metadata().Body(), Open: true})
 		if err != nil {
 			t.Fatal(err)
 		}
