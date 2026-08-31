@@ -83,6 +83,7 @@ type apiPullRequest struct {
 	} `json:"head"`
 	Base struct {
 		Ref  string        `json:"ref"`
+		SHA  string        `json:"sha"`
 		Repo apiRepository `json:"repo"`
 	} `json:"base"`
 }
@@ -143,7 +144,7 @@ func classifyPullRequests(plan *Plan, baseBranch, headBranch string, candidates 
 		return Observation{Status: ObservationConflicting, Evidence: "duplicate_candidates"}, nil
 	}
 	candidate := candidates[0]
-	if candidate.Number <= 0 || candidate.ID <= 0 || candidate.HTMLURL == "" || candidate.Head.Repo.ID <= 0 || candidate.Base.Repo.ID <= 0 || candidate.Head.Repo.FullName == "" || candidate.Base.Repo.FullName == "" || !validOID(candidate.Head.SHA) {
+	if candidate.Number <= 0 || candidate.ID <= 0 || candidate.HTMLURL == "" || candidate.Head.Repo.ID <= 0 || candidate.Base.Repo.ID <= 0 || candidate.Head.Repo.FullName == "" || candidate.Base.Repo.FullName == "" || !validOID(candidate.Head.SHA) || !validOID(candidate.Base.SHA) {
 		return Observation{Status: ObservationUnavailable}, fmt.Errorf("%w: incomplete pull-request identity", ErrObservationUnavailable)
 	}
 	headName, headNameErr := contracts.CanonicalGitHubRepository(candidate.Head.Repo.FullName)
@@ -157,13 +158,16 @@ func classifyPullRequests(plan *Plan, baseBranch, headBranch string, candidates 
 	if candidate.Head.Ref != headBranch || candidate.Base.Ref != baseBranch || candidate.Head.SHA != plan.CommitOID() {
 		return Observation{Status: ObservationConflicting, Evidence: "ref_or_oid_mismatch"}, nil
 	}
+	if candidate.Base.SHA != plan.BaseCommit() {
+		return Observation{Status: ObservationConflicting, Evidence: "base_oid_mismatch"}, nil
+	}
 	if candidate.State != "open" || candidate.Draft {
 		return Observation{Status: ObservationConflicting, Evidence: "closed_or_draft"}, nil
 	}
 	if candidate.Title != plan.Metadata().Title() || candidate.Body != plan.Metadata().Body() {
 		return Observation{Status: ObservationConflicting, Evidence: "metadata_mismatch"}, nil
 	}
-	identity, err := NewPullRequestIdentity(PullRequestIdentitySpec{Plan: plan, Number: candidate.Number, StableID: candidate.ID, URL: candidate.HTMLURL, RepositoryID: candidate.Base.Repo.ID, RepositoryFullName: baseName, BaseRef: plan.BaseRef(), TargetRef: plan.TargetRef(), HeadOID: candidate.Head.SHA, MetadataPolicy: plan.Metadata().Version(), Title: candidate.Title, Body: candidate.Body, Draft: candidate.Draft, Open: candidate.State == "open"})
+	identity, err := NewPullRequestIdentity(PullRequestIdentitySpec{Plan: plan, Number: candidate.Number, StableID: candidate.ID, URL: candidate.HTMLURL, RepositoryID: candidate.Base.Repo.ID, RepositoryFullName: baseName, BaseRef: plan.BaseRef(), BaseCommit: candidate.Base.SHA, TargetRef: plan.TargetRef(), HeadOID: candidate.Head.SHA, MetadataPolicy: plan.Metadata().Version(), Title: candidate.Title, Body: candidate.Body, Draft: candidate.Draft, Open: candidate.State == "open"})
 	if err != nil {
 		return Observation{Status: ObservationUnavailable}, fmt.Errorf("%w: invalid exact PR identity", ErrObservationUnavailable)
 	}

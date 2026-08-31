@@ -77,15 +77,16 @@ func TestObserveExactPullRequestClassifiesAbsentAndHostileCandidates(t *testing.
 		want       ObservationStatus
 		evidence   string
 	}{
-		"absent":      {want: ObservationAbsent},
-		"duplicate":   {candidates: []apiPullRequest{exact, exact}, want: ObservationConflicting, evidence: "duplicate_candidates"},
-		"closed":      {candidates: []apiPullRequest{mutateCandidate(exact, func(pr *apiPullRequest) { pr.State = "closed" })}, want: ObservationConflicting, evidence: "closed_or_draft"},
-		"draft":       {candidates: []apiPullRequest{mutateCandidate(exact, func(pr *apiPullRequest) { pr.Draft = true })}, want: ObservationConflicting, evidence: "closed_or_draft"},
-		"fork":        {candidates: []apiPullRequest{mutateCandidate(exact, func(pr *apiPullRequest) { pr.Head.Repo.ID = 99; pr.Head.Repo.FullName = "fork/repo" })}, want: ObservationConflicting, evidence: "fork_or_repository_mismatch"},
-		"wrong base":  {candidates: []apiPullRequest{mutateCandidate(exact, func(pr *apiPullRequest) { pr.Base.Ref = "release" })}, want: ObservationConflicting, evidence: "ref_or_oid_mismatch"},
-		"wrong head":  {candidates: []apiPullRequest{mutateCandidate(exact, func(pr *apiPullRequest) { pr.Head.Ref = "other" })}, want: ObservationConflicting, evidence: "ref_or_oid_mismatch"},
-		"wrong OID":   {candidates: []apiPullRequest{mutateCandidate(exact, func(pr *apiPullRequest) { pr.Head.SHA = testBaseOID })}, want: ObservationConflicting, evidence: "ref_or_oid_mismatch"},
-		"wrong title": {candidates: []apiPullRequest{mutateCandidate(exact, func(pr *apiPullRequest) { pr.Title += " agent" })}, want: ObservationConflicting, evidence: "metadata_mismatch"},
+		"absent":         {want: ObservationAbsent},
+		"duplicate":      {candidates: []apiPullRequest{exact, exact}, want: ObservationConflicting, evidence: "duplicate_candidates"},
+		"closed":         {candidates: []apiPullRequest{mutateCandidate(exact, func(pr *apiPullRequest) { pr.State = "closed" })}, want: ObservationConflicting, evidence: "closed_or_draft"},
+		"draft":          {candidates: []apiPullRequest{mutateCandidate(exact, func(pr *apiPullRequest) { pr.Draft = true })}, want: ObservationConflicting, evidence: "closed_or_draft"},
+		"fork":           {candidates: []apiPullRequest{mutateCandidate(exact, func(pr *apiPullRequest) { pr.Head.Repo.ID = 99; pr.Head.Repo.FullName = "fork/repo" })}, want: ObservationConflicting, evidence: "fork_or_repository_mismatch"},
+		"wrong base":     {candidates: []apiPullRequest{mutateCandidate(exact, func(pr *apiPullRequest) { pr.Base.Ref = "release" })}, want: ObservationConflicting, evidence: "ref_or_oid_mismatch"},
+		"wrong base OID": {candidates: []apiPullRequest{mutateCandidate(exact, func(pr *apiPullRequest) { pr.Base.SHA = plan.CommitOID() })}, want: ObservationConflicting, evidence: "base_oid_mismatch"},
+		"wrong head":     {candidates: []apiPullRequest{mutateCandidate(exact, func(pr *apiPullRequest) { pr.Head.Ref = "other" })}, want: ObservationConflicting, evidence: "ref_or_oid_mismatch"},
+		"wrong OID":      {candidates: []apiPullRequest{mutateCandidate(exact, func(pr *apiPullRequest) { pr.Head.SHA = testBaseOID })}, want: ObservationConflicting, evidence: "ref_or_oid_mismatch"},
+		"wrong title":    {candidates: []apiPullRequest{mutateCandidate(exact, func(pr *apiPullRequest) { pr.Title += " agent" })}, want: ObservationConflicting, evidence: "metadata_mismatch"},
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -93,6 +94,23 @@ func TestObserveExactPullRequestClassifiesAbsentAndHostileCandidates(t *testing.
 			observation, err := client.ObserveExactPullRequest(context.Background(), plan)
 			if err != nil || observation.Status != test.want || observation.Evidence != test.evidence {
 				t.Fatalf("observation=%#v err=%v, want %s/%s", observation, err, test.want, test.evidence)
+			}
+		})
+	}
+}
+
+func TestObserveExactPullRequestTreatsMissingOrMalformedBaseOIDAsUnavailable(t *testing.T) {
+	plan := testPlan(t)
+	exact := exactAPIPullRequest(plan)
+	for name, baseOID := range map[string]string{
+		"missing":   "",
+		"malformed": "not-a-git-object-id",
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := mutateCandidate(exact, func(pr *apiPullRequest) { pr.Base.SHA = baseOID })
+			observation, err := observerWithCandidates(t, plan, []apiPullRequest{candidate}).ObserveExactPullRequest(context.Background(), plan)
+			if !errors.Is(err, ErrObservationUnavailable) || observation.Status != ObservationUnavailable {
+				t.Fatalf("observation=%#v error=%v", observation, err)
 			}
 		})
 	}
@@ -192,6 +210,7 @@ func exactAPIPullRequest(plan *Plan) apiPullRequest {
 	candidate.Head.SHA = plan.CommitOID()
 	candidate.Head.Repo = apiRepository{ID: plan.RepositoryID(), FullName: plan.RepositoryFullName()}
 	candidate.Base.Ref = "main"
+	candidate.Base.SHA = plan.BaseCommit()
 	candidate.Base.Repo = apiRepository{ID: plan.RepositoryID(), FullName: plan.RepositoryFullName()}
 	return candidate
 }
