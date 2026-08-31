@@ -160,8 +160,15 @@ func TestLedgerRejectsRewrittenOrDowngradedHistory(t *testing.T) {
 func TestPullRequestIdentityRequiresExactExternalIdentity(t *testing.T) {
 	plan := testPlan(t)
 	valid := PullRequestIdentitySpec{Plan: plan, Number: 17, StableID: 1700, URL: "https://github.com/owner/repo/pull/17", RepositoryID: plan.RepositoryID(), RepositoryFullName: plan.RepositoryFullName(), BaseRef: plan.BaseRef(), TargetRef: plan.TargetRef(), HeadOID: plan.CommitOID(), MetadataPolicy: plan.Metadata().Version(), Title: plan.Metadata().Title(), Body: plan.Metadata().Body(), Open: true}
-	if _, err := NewPullRequestIdentity(valid); err != nil {
-		t.Fatal(err)
+	casePreserving := valid
+	casePreserving.URL = "https://github.com/Owner/Repo/pull/17"
+	identity, err := NewPullRequestIdentity(casePreserving)
+	if err != nil || identity.URL() != valid.URL {
+		t.Fatalf("case-preserving provider URL identity=%#v error=%v", identity, err)
+	}
+	canonicalIdentity, err := NewPullRequestIdentity(valid)
+	if err != nil || canonicalIdentity.Identity() != identity.Identity() {
+		t.Fatalf("provider display casing changed canonical identity: canonical=%#v display=%#v error=%v", canonicalIdentity, identity, err)
 	}
 	for name, mutate := range map[string]func(*PullRequestIdentitySpec){
 		"missing ID":     func(spec *PullRequestIdentitySpec) { spec.StableID = 0 },
@@ -184,13 +191,46 @@ func TestPullRequestIdentityRequiresExactExternalIdentity(t *testing.T) {
 	}
 }
 
+func TestPullRequestIdentityRejectsAmbiguousProviderURLs(t *testing.T) {
+	plan := testPlan(t)
+	valid := PullRequestIdentitySpec{Plan: plan, Number: 17, StableID: 1700, URL: "https://github.com/owner/repo/pull/17", RepositoryID: plan.RepositoryID(), RepositoryFullName: plan.RepositoryFullName(), BaseRef: plan.BaseRef(), TargetRef: plan.TargetRef(), HeadOID: plan.CommitOID(), MetadataPolicy: plan.Metadata().Version(), Title: plan.Metadata().Title(), Body: plan.Metadata().Body(), Open: true}
+	tests := map[string]string{
+		"wrong repository":  "https://github.com/owner/other/pull/17",
+		"wrong PR number":   "https://github.com/owner/repo/pull/18",
+		"evil host":         "https://evil.invalid/owner/repo/pull/17",
+		"userinfo":          "https://user@github.com/owner/repo/pull/17",
+		"explicit port":     "https://github.com:443/owner/repo/pull/17",
+		"query":             "https://github.com/owner/repo/pull/17?view=1",
+		"empty query":       "https://github.com/owner/repo/pull/17?",
+		"fragment":          "https://github.com/owner/repo/pull/17#issue",
+		"extra component":   "https://github.com/owner/repo/pull/17/files",
+		"missing component": "https://github.com/owner/pull/17",
+		"non-decimal":       "https://github.com/owner/repo/pull/seventeen",
+		"leading zero":      "https://github.com/owner/repo/pull/017",
+		"percent encoded":   "https://github.com/own%65r/repo/pull/17",
+	}
+	for name, providerURL := range tests {
+		t.Run(name, func(t *testing.T) {
+			candidate := valid
+			candidate.URL = providerURL
+			if _, err := NewPullRequestIdentity(candidate); !errors.Is(err, ErrInvalidPullRequestIdentity) {
+				t.Fatalf("URL=%q error=%v, want ErrInvalidPullRequestIdentity", providerURL, err)
+			}
+		})
+	}
+}
+
 func testPlan(t *testing.T) *Plan {
+	return testPlanForRepository(t, "owner/repo")
+}
+
+func testPlanForRepository(t *testing.T, repository string) *Plan {
 	t.Helper()
 	metadata, err := NewMetadata(MetadataSpec{RunID: "run-1", ContractHash: testContractHash, Operation: "MODIFY", Resource: "/workspace/README.md", CommitOID: testCommitOID, PublicationRecordIdentity: testRecordHash})
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan, err := newPlan(planAuthority{ManifestHash: "sha256:manifest", ContractHash: testContractHash, RepositoryBindingIdentity: "sha256:repository", GitPlanIdentity: "sha256:git-plan", ArtifactIdentity: "sha256:artifact", GitPublicationPlanIdentity: "sha256:publication-plan", PublicationRecordIdentity: testRecordHash, GitHubBindingIdentity: "sha256:github-binding", RepositoryID: 42, RepositoryFullName: "owner/repo", BaseRef: "refs/heads/main", BaseCommit: testBaseOID, TargetRef: "refs/heads/mirage/run-123456789012345678901234", CommitOID: testCommitOID, Metadata: metadata, CreatedAt: time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)})
+	plan, err := newPlan(planAuthority{ManifestHash: "sha256:manifest", ContractHash: testContractHash, RepositoryBindingIdentity: "sha256:repository", GitPlanIdentity: "sha256:git-plan", ArtifactIdentity: "sha256:artifact", GitPublicationPlanIdentity: "sha256:publication-plan", PublicationRecordIdentity: testRecordHash, GitHubBindingIdentity: "sha256:github-binding", RepositoryID: 42, RepositoryFullName: repository, BaseRef: "refs/heads/main", BaseCommit: testBaseOID, TargetRef: "refs/heads/mirage/run-123456789012345678901234", CommitOID: testCommitOID, Metadata: metadata, CreatedAt: time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)})
 	if err != nil {
 		t.Fatal(err)
 	}
