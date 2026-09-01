@@ -15,7 +15,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -31,14 +34,24 @@ import (
 )
 
 const (
-	m54LiveRepositoryInput = "MrGray17/test"
-	m54LiveRepository      = "mrgray17/test"
-	m54LiveRepositoryID    = int64(1351679704)
-	m54ReviewedHead        = "17483b55a2395181ae2ea62aef6a099e61240acc"
-	m54LiveRunID           = "m54-live-17483b55a2395181ae2ea62aef6a099e61240acc"
-	m54LiveHarnessPath     = "internal/runtime/m54_live_test.go"
-	m54LiveResponseLimit   = int64(2 << 20)
-	m54LiveInventoryPages  = 5
+	m54LiveRepositoryInput  = "MrGray17/test"
+	m54LiveRepository       = "mrgray17/test"
+	m54LiveRepositoryID     = int64(1351679704)
+	m54ReviewedHead         = "17483b55a2395181ae2ea62aef6a099e61240acc"
+	m54LiveRunID            = "m54-live-proof-2-2c1ebcd6d1351551e1d3da1d011573f4434f4172"
+	m54LiveHarnessPath      = "internal/runtime/m54_live_test.go"
+	m54LiveResponseLimit    = int64(2 << 20)
+	m54LiveInventoryPages   = 5
+	m54DiagnosticValueLimit = 512
+	m54RetryAfterMaxSeconds = 24 * 60 * 60
+
+	m54LiveBaseRef           = "refs/heads/main"
+	m54LiveBaseOID           = "3f7b3d9d0ba3185008572756a9193e77808247b3"
+	m53LiveEvidenceRef       = "refs/heads/mirage/run-86dc0b907b8b25114873736a"
+	m53LiveEvidenceOID       = "0d62e0eafd7f0b8ffbd8da488ea3bfdc28579a3a"
+	m54FailedLiveEvidenceRef = "refs/heads/mirage/run-725991efe593ed4120479276"
+	m54FailedLiveEvidenceOID = "fac9b2cabb096dfd03ace6f25e28470b9780a7ed"
+	m54FreshLiveTargetRef    = "refs/heads/mirage/run-3cd302b9301ff95e1e83b54b"
 )
 
 // TestM54LiveGitHubPullRequestProof is intentionally skipped unless every
@@ -125,6 +138,9 @@ func TestM54LiveGitHubPullRequestProof(t *testing.T) {
 	}
 	sandbox := &sandboxStub{real: binding.RealWorkspace(), disposable: binding.DisposableWorkspace(), token: binding.Token()}
 	targetRef := gitrefs.RunTarget(m54LiveRunID)
+	if targetRef != m54FreshLiveTargetRef || targetRef == m54FailedLiveEvidenceRef {
+		t.Fatalf("fresh fixed RunID derived unexpected target ref %q", targetRef)
+	}
 	now := time.Now().UTC()
 	contract, err := contracts.New(contracts.Spec{
 		Version:   contracts.VersionV3,
@@ -207,13 +223,17 @@ func TestM54LiveGitHubPullRequestProof(t *testing.T) {
 	if remoteBefore.repositoryID != m54LiveRepositoryID {
 		t.Fatal("read-only inventory did not prove the hard-bound repository ID")
 	}
+	requireM54EvidenceBranches(t, remoteBefore)
+	if len(remoteBefore.pullRequests) != 0 {
+		t.Fatalf("single-use proof requires an empty PR inventory, got %d", len(remoteBefore.pullRequests))
+	}
 	if _, exists := remoteBefore.branches[targetRef]; exists {
 		t.Fatalf("single-use target ref already exists: %s", targetRef)
 	}
 	if remoteBefore.hasPullRequestTuple("refs/heads/main", targetRef) {
 		t.Fatal("single-use pull-request tuple already exists")
 	}
-	baseBefore, err := readClient.ExactRef(ctx, m54LiveRepository, m54LiveRepositoryID, "refs/heads/main", gitBinding.HeadCommit())
+	baseBefore, err := readClient.ExactRef(ctx, m54LiveRepository, m54LiveRepositoryID, m54LiveBaseRef, gitBinding.HeadCommit())
 	if err != nil || baseBefore.Status != githubbinding.RefPresentExact || baseBefore.OID != gitBinding.HeadCommit() {
 		t.Fatalf("base preflight is not exact: observation=%#v err=%v", baseBefore, err)
 	}
@@ -255,18 +275,62 @@ func TestM54LiveGitHubPullRequestProof(t *testing.T) {
 		// Once attempted, the only permitted recovery is this read-only path.
 		ledger, establishErr = lifecycle.ReconcileGitHubPullRequest(prEngine)
 	}
-	if establishErr != nil || ledger == nil {
-		t.Fatalf("PR effect did not establish exact truth: state=%s err=%v", lifecycle.State(), establishErr)
+	if ledger == nil {
+		t.Fatalf("PR effect returned no immutable external-effect ledger: state=%s err=%v", lifecycle.State(), establishErr)
 	}
 	if prEngine.establishes.Load() != 1 || prTransport.posts.Load() != 1 || prEngine.reconciles.Load() > 1 {
 		t.Fatalf("mutation budget violated: establish=%d POST=%d reconcile=%d", prEngine.establishes.Load(), prTransport.posts.Load(), prEngine.reconciles.Load())
 	}
-	if lifecycle.State() != StatePREstablished || ledger.PullRequestOutcome() != githubpullrequest.OutcomeCreated || !ledger.Attempted() || !ledger.TransportAcknowledged() || ledger.ObservationStatus() != githubpullrequest.ObservationExact || ledger.Causality() != githubpullrequest.CausalityMirageAcknowledged {
-		t.Fatalf("final PR ledger is not acknowledged exact creation: state=%s outcome=%s observation=%s", lifecycle.State(), ledger.PullRequestOutcome(), ledger.ObservationStatus())
-	}
 	attempt := lifecycle.PullRequestAttempt()
 	if attempt == nil || attempt.Identity() != ledger.AttemptIdentity() || attempt.PlanIdentity() != prPlan.Identity() {
 		t.Fatal("PR attempt latch is absent or differs from the immutable plan/ledger")
+	}
+	diagnostic, diagnosticAvailable := prTransport.postDiagnostic()
+	if !diagnosticAvailable {
+		diagnostic = normalizeM54PostDiagnostic(nil)
+	}
+	diagnosticEvidence := diagnostic.evidence(t)
+	if strings.Contains(diagnosticEvidence, token) {
+		t.Fatal("credential entered normalized POST diagnostics")
+	}
+
+	if establishErr != nil {
+		if lifecycle.State() != StateFailed || ledger.PullRequestOutcome() != githubpullrequest.OutcomeNotCreated || !ledger.Attempted() || ledger.TransportAcknowledged() || ledger.ObservationStatus() != githubpullrequest.ObservationAbsent || ledger.Causality() != githubpullrequest.CausalityNone {
+			t.Fatalf("PR rejection did not preserve exact partial-effect truth: state=%s outcome=%s observation=%s err=%v", lifecycle.State(), ledger.PullRequestOutcome(), ledger.ObservationStatus(), establishErr)
+		}
+
+		// This fresh read is independent of the engine's mandatory postflight.
+		providerObservation, observeErr := prClient.ObserveExactPullRequest(ctx, prPlan)
+		if observeErr != nil || providerObservation.Status != githubpullrequest.ObservationAbsent || providerObservation.Exact != nil {
+			t.Fatalf("independent rejection postflight is not authoritative absence: status=%s err=%v", providerObservation.Status, observeErr)
+		}
+		baseAfter, baseErr := readClient.ExactRef(ctx, m54LiveRepository, m54LiveRepositoryID, prPlan.BaseRef(), prPlan.BaseCommit())
+		if baseErr != nil || baseAfter.Status != githubbinding.RefPresentExact || baseAfter.OID != prPlan.BaseCommit() {
+			t.Fatalf("provider base moved during rejected proof: observation=%#v err=%v", baseAfter, baseErr)
+		}
+		targetAfter, targetErr := readClient.ExactRef(ctx, m54LiveRepository, m54LiveRepositoryID, prPlan.TargetRef(), prPlan.CommitOID())
+		if targetErr != nil || targetAfter.Status != githubbinding.RefPresentExact || targetAfter.OID != prPlan.CommitOID() {
+			t.Fatalf("provider target differs after rejected proof: observation=%#v err=%v", targetAfter, targetErr)
+		}
+		remoteAfter := audit.capture(t, ctx)
+		assertM54RejectedRemoteDelta(t, remoteBefore, remoteAfter, prPlan)
+		requireM54EvidenceBranches(t, remoteAfter)
+		requireM54LiveLocalTruth(t, sourceRoot, real, disposablePath, readmeBefore, token)
+
+		evidence := fmt.Sprintf("run=%s repository=%s repository_id=%d base_ref=%s base_commit=%s target_ref=%s commit_oid=%s publication_record=%s branch_outcome=PUBLISHED branch_transport_acknowledged=%t branch_reconciled=%t pr_plan=%s metadata_policy=%s title_digest=%s body_digest=%s attempt=%s outcome=%s attempted=%t transport_acknowledged=%t observation=%s exact_postflight=false reconciled=true causality=%s ledger=%s ledger_base_commit=%s lifecycle=%s source_head=%s branch_inventory_before=%s pr_inventory_before=%s branch_inventory_after=%s pr_inventory_after=%s provider_rejected=%t diagnostic_available=%t diagnostic=%s",
+			m54LiveRunID, m54LiveRepository, m54LiveRepositoryID, prPlan.BaseRef(), prPlan.BaseCommit(), prPlan.TargetRef(), prPlan.CommitOID(), record.Identity(), record.TransportAcknowledged(), record.ResolvedByReconciliation(), prPlan.Identity(), prPlan.Metadata().Version(), prPlan.Metadata().TitleDigest(), prPlan.Metadata().BodyDigest(), attempt.Identity(), ledger.PullRequestOutcome(), ledger.Attempted(), ledger.TransportAcknowledged(), ledger.ObservationStatus(), ledger.Causality(), ledger.Identity(), ledger.PullRequestBaseCommit(), lifecycle.State(), sourceHead, remoteBefore.branchDigest, remoteBefore.pullRequestDigest, remoteAfter.branchDigest, remoteAfter.pullRequestDigest, errors.Is(establishErr, githubpullrequest.ErrCreateRejected), diagnosticAvailable, diagnosticEvidence)
+		if strings.Contains(evidence, token) {
+			t.Fatal("credential entered sanitized rejection evidence")
+		}
+		finishM54LiveLocalProof(t, lifecycle, disposable, disposablePath, real, localBefore, &destroyed, &cleanedDisposable)
+		t.Log(evidence)
+		t.Fatalf("deterministic provider rejection after complete partial-effect evidence: status=%d", diagnostic.HTTPStatus)
+	}
+	if !diagnosticAvailable {
+		t.Fatal("acknowledged PR creation returned no normalized POST diagnostics")
+	}
+	if lifecycle.State() != StatePREstablished || ledger.PullRequestOutcome() != githubpullrequest.OutcomeCreated || !ledger.Attempted() || !ledger.TransportAcknowledged() || ledger.ObservationStatus() != githubpullrequest.ObservationExact || ledger.Causality() != githubpullrequest.CausalityMirageAcknowledged {
+		t.Fatalf("final PR ledger is not acknowledged exact creation: state=%s outcome=%s observation=%s", lifecycle.State(), ledger.PullRequestOutcome(), ledger.ObservationStatus())
 	}
 
 	// This fresh provider read is independent of the engine's postflight and is
@@ -289,36 +353,16 @@ func TestM54LiveGitHubPullRequestProof(t *testing.T) {
 	}
 	remoteAfter := audit.capture(t, ctx)
 	assertM54RemoteDelta(t, remoteBefore, remoteAfter, prPlan, pullRequest)
+	requireM54EvidenceBranches(t, remoteAfter)
 
-	if !bytes.Equal(mustReadM54(t, filepath.Join(real, "README.md")), readmeBefore) {
-		t.Fatal("trusted worktree README changed during publication proof")
-	}
-	if containsM54Secret(t, sourceRoot, token) || containsM54Secret(t, real, token) || containsM54Secret(t, disposablePath, token) {
-		t.Fatal("host credential entered a repository or disposable workspace")
-	}
-	evidence := fmt.Sprintf("run=%s repository=%s repository_id=%d base_ref=%s base_commit=%s target_ref=%s commit_oid=%s publication_record=%s branch_transport_acknowledged=%t branch_reconciled=%t pr_plan=%s metadata_policy=%s title_digest=%s body_digest=%s attempt=%s outcome=%s pr_number=%d pr_stable_id=%d pr_url=%s pr_identity=%s transport_acknowledged=%t exact_postflight=%t reconciled=%t causality=%s ledger=%s ledger_base_commit=%s lifecycle=%s source_head=%s branch_inventory_before=%s pr_inventory_before=%s branch_inventory_after=%s pr_inventory_after=%s",
-		m54LiveRunID, m54LiveRepository, m54LiveRepositoryID, prPlan.BaseRef(), prPlan.BaseCommit(), prPlan.TargetRef(), prPlan.CommitOID(), record.Identity(), record.TransportAcknowledged(), record.ResolvedByReconciliation(), prPlan.Identity(), prPlan.Metadata().Version(), prPlan.Metadata().TitleDigest(), prPlan.Metadata().BodyDigest(), attempt.Identity(), ledger.PullRequestOutcome(), pullRequest.Number(), pullRequest.StableID(), pullRequest.URL(), pullRequest.Identity(), ledger.TransportAcknowledged(), ledger.ObservationStatus() == githubpullrequest.ObservationExact, ledger.ObservationStatus() != githubpullrequest.ObservationUnavailable, ledger.Causality(), ledger.Identity(), ledger.PullRequestBaseCommit(), lifecycle.State(), sourceHead, remoteBefore.branchDigest, remoteBefore.pullRequestDigest, remoteAfter.branchDigest, remoteAfter.pullRequestDigest)
+	requireM54LiveLocalTruth(t, sourceRoot, real, disposablePath, readmeBefore, token)
+	evidence := fmt.Sprintf("run=%s repository=%s repository_id=%d base_ref=%s base_commit=%s target_ref=%s commit_oid=%s publication_record=%s branch_outcome=PUBLISHED branch_transport_acknowledged=%t branch_reconciled=%t pr_plan=%s metadata_policy=%s title_digest=%s body_digest=%s attempt=%s outcome=%s pr_number=%d pr_stable_id=%d pr_url=%s pr_identity=%s transport_acknowledged=%t exact_postflight=%t reconciled=%t causality=%s ledger=%s ledger_base_commit=%s lifecycle=%s source_head=%s branch_inventory_before=%s pr_inventory_before=%s branch_inventory_after=%s pr_inventory_after=%s diagnostic=%s",
+		m54LiveRunID, m54LiveRepository, m54LiveRepositoryID, prPlan.BaseRef(), prPlan.BaseCommit(), prPlan.TargetRef(), prPlan.CommitOID(), record.Identity(), record.TransportAcknowledged(), record.ResolvedByReconciliation(), prPlan.Identity(), prPlan.Metadata().Version(), prPlan.Metadata().TitleDigest(), prPlan.Metadata().BodyDigest(), attempt.Identity(), ledger.PullRequestOutcome(), pullRequest.Number(), pullRequest.StableID(), pullRequest.URL(), pullRequest.Identity(), ledger.TransportAcknowledged(), ledger.ObservationStatus() == githubpullrequest.ObservationExact, ledger.ObservationStatus() != githubpullrequest.ObservationUnavailable, ledger.Causality(), ledger.Identity(), ledger.PullRequestBaseCommit(), lifecycle.State(), sourceHead, remoteBefore.branchDigest, remoteBefore.pullRequestDigest, remoteAfter.branchDigest, remoteAfter.pullRequestDigest, diagnosticEvidence)
 	if strings.Contains(evidence, token) {
 		t.Fatal("credential entered sanitized live evidence")
 	}
+	finishM54LiveLocalProof(t, lifecycle, disposable, disposablePath, real, localBefore, &destroyed, &cleanedDisposable)
 	t.Log(evidence)
-
-	if err := lifecycle.Destroy(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	destroyed = true
-	if err := disposable.Cleanup(); err != nil {
-		t.Fatal(err)
-	}
-	cleanedDisposable = true
-	if _, err := os.Lstat(disposablePath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("disposable workspace leaked: %v", err)
-	}
-	localAfter := captureM54LocalState(t, real)
-	if localAfter != localBefore {
-		t.Fatalf("trusted checkout Git state changed:\nbefore=%+v\nafter=%+v", localBefore, localAfter)
-	}
-	requireM54CleanRepository(t, real)
 }
 
 type m54CountingPublicationEngine struct {
@@ -357,7 +401,9 @@ type m54CountingDoer struct {
 	client interface {
 		Do(*http.Request) (*http.Response, error)
 	}
-	posts atomic.Int64
+	posts      atomic.Int64
+	diagnostic sync.Mutex
+	postResult *m54PostDiagnostic
 }
 
 func (d *m54CountingDoer) Do(request *http.Request) (*http.Response, error) {
@@ -383,7 +429,294 @@ func (d *m54CountingDoer) Do(request *http.Request) (*http.Response, error) {
 	default:
 		return nil, errors.New("live proof transport rejected unsupported method")
 	}
-	return d.client.Do(request)
+	response, err := d.client.Do(request)
+	if request.Method == http.MethodPost && response != nil {
+		diagnostic := normalizeM54PostDiagnostic(response)
+		d.diagnostic.Lock()
+		if d.postResult == nil {
+			d.postResult = &diagnostic
+		}
+		d.diagnostic.Unlock()
+	}
+	return response, err
+}
+
+type m54DiagnosticState string
+
+const (
+	m54DiagnosticMissing   m54DiagnosticState = "MISSING"
+	m54DiagnosticValid     m54DiagnosticState = "VALID"
+	m54DiagnosticMalformed m54DiagnosticState = "MALFORMED"
+	m54RetryAfterNone      m54DiagnosticState = "NONE"
+	m54RetryAfterSeconds   m54DiagnosticState = "SECONDS"
+	m54RetryAfterHTTPDate  m54DiagnosticState = "HTTP_DATE"
+)
+
+type m54NormalizedPermission struct {
+	Name  string `json:"name"`
+	Level string `json:"level"`
+}
+
+type m54PostDiagnostic struct {
+	HTTPStatus               int                       `json:"http_status"`
+	AcceptedPermissionsState m54DiagnosticState        `json:"accepted_permissions_state"`
+	AcceptedPermissions      []m54NormalizedPermission `json:"accepted_permissions,omitempty"`
+	RateLimitRemainingState  m54DiagnosticState        `json:"rate_limit_remaining_state"`
+	RateLimitRemaining       uint64                    `json:"rate_limit_remaining,omitempty"`
+	RateLimitResourceState   m54DiagnosticState        `json:"rate_limit_resource_state"`
+	RateLimitResource        string                    `json:"rate_limit_resource,omitempty"`
+	RetryAfterState          m54DiagnosticState        `json:"retry_after_state"`
+	RetryAfterSeconds        uint64                    `json:"retry_after_seconds,omitempty"`
+	RequestIDState           m54DiagnosticState        `json:"request_id_state"`
+	RequestIDDigest          string                    `json:"request_id_digest,omitempty"`
+}
+
+func (d *m54CountingDoer) postDiagnostic() (m54PostDiagnostic, bool) {
+	if d == nil {
+		return m54PostDiagnostic{}, false
+	}
+	d.diagnostic.Lock()
+	defer d.diagnostic.Unlock()
+	if d.postResult == nil {
+		return m54PostDiagnostic{}, false
+	}
+	result := *d.postResult
+	result.AcceptedPermissions = append([]m54NormalizedPermission(nil), d.postResult.AcceptedPermissions...)
+	return result, true
+}
+
+func (d m54PostDiagnostic) evidence(t *testing.T) string {
+	t.Helper()
+	encoded, err := json.Marshal(d)
+	if err != nil {
+		t.Fatalf("encode trusted POST diagnostics: %v", err)
+	}
+	return string(encoded)
+}
+
+func normalizeM54PostDiagnostic(response *http.Response) m54PostDiagnostic {
+	result := m54PostDiagnostic{
+		AcceptedPermissionsState: m54DiagnosticMissing,
+		RateLimitRemainingState:  m54DiagnosticMissing,
+		RateLimitResourceState:   m54DiagnosticMissing,
+		RetryAfterState:          m54RetryAfterNone,
+		RequestIDState:           m54DiagnosticMissing,
+	}
+	if response == nil {
+		return result
+	}
+	result.HTTPStatus = response.StatusCode
+	result.AcceptedPermissions, result.AcceptedPermissionsState = normalizeM54AcceptedPermissions(response.Header)
+	result.RateLimitRemaining, result.RateLimitRemainingState = normalizeM54RateLimitRemaining(response.Header)
+	result.RateLimitResource, result.RateLimitResourceState = normalizeM54RateLimitResource(response.Header)
+	result.RetryAfterState, result.RetryAfterSeconds = normalizeM54RetryAfter(response.Header)
+	result.RequestIDDigest, result.RequestIDState = normalizeM54RequestID(response.Header)
+	return result
+}
+
+func normalizeM54AcceptedPermissions(header http.Header) ([]m54NormalizedPermission, m54DiagnosticState) {
+	value, state := m54SingleDiagnosticHeader(header, "X-Accepted-GitHub-Permissions")
+	if state != m54DiagnosticValid {
+		return nil, state
+	}
+	knownNames := map[string]bool{"contents": true, "metadata": true, "pull_requests": true}
+	seen := make(map[string]bool)
+	permissions := make([]m54NormalizedPermission, 0, 3)
+	for _, entry := range strings.Split(value, ";") {
+		entry = strings.Trim(entry, " ")
+		if strings.Count(entry, "=") != 1 {
+			return nil, m54DiagnosticMalformed
+		}
+		parts := strings.SplitN(entry, "=", 2)
+		name, level := parts[0], parts[1]
+		if !knownNames[name] || (level != "read" && level != "write") || seen[name] {
+			return nil, m54DiagnosticMalformed
+		}
+		seen[name] = true
+		permissions = append(permissions, m54NormalizedPermission{Name: name, Level: level})
+	}
+	if len(permissions) == 0 {
+		return nil, m54DiagnosticMalformed
+	}
+	sort.Slice(permissions, func(i, j int) bool { return permissions[i].Name < permissions[j].Name })
+	return permissions, m54DiagnosticValid
+}
+
+func normalizeM54RateLimitRemaining(header http.Header) (uint64, m54DiagnosticState) {
+	value, state := m54SingleDiagnosticHeader(header, "X-RateLimit-Remaining")
+	if state != m54DiagnosticValid {
+		return 0, state
+	}
+	if value == "" || strings.Trim(value, "0123456789") != "" {
+		return 0, m54DiagnosticMalformed
+	}
+	remaining, err := strconv.ParseUint(value, 10, 32)
+	if err != nil {
+		return 0, m54DiagnosticMalformed
+	}
+	return remaining, m54DiagnosticValid
+}
+
+func normalizeM54RateLimitResource(header http.Header) (string, m54DiagnosticState) {
+	value, state := m54SingleDiagnosticHeader(header, "X-RateLimit-Resource")
+	if state != m54DiagnosticValid {
+		return "", state
+	}
+	known := map[string]bool{
+		"actions_runner_registration": true,
+		"audit_log":                   true,
+		"code_scanning_upload":        true,
+		"core":                        true,
+		"dependency_snapshots":        true,
+		"graphql":                     true,
+		"integration_manifest":        true,
+		"scim":                        true,
+		"search":                      true,
+		"source_import":               true,
+	}
+	if !known[value] {
+		return "", m54DiagnosticMalformed
+	}
+	return value, m54DiagnosticValid
+}
+
+func normalizeM54RetryAfter(header http.Header) (m54DiagnosticState, uint64) {
+	value, state := m54SingleDiagnosticHeader(header, "Retry-After")
+	if state == m54DiagnosticMissing {
+		return m54RetryAfterNone, 0
+	}
+	if state != m54DiagnosticValid {
+		return m54DiagnosticMalformed, 0
+	}
+	if value != "" && strings.Trim(value, "0123456789") == "" {
+		seconds, err := strconv.ParseUint(value, 10, 32)
+		if err == nil && seconds <= m54RetryAfterMaxSeconds {
+			return m54RetryAfterSeconds, seconds
+		}
+		return m54DiagnosticMalformed, 0
+	}
+	if _, err := http.ParseTime(value); err == nil {
+		return m54RetryAfterHTTPDate, 0
+	}
+	return m54DiagnosticMalformed, 0
+}
+
+func normalizeM54RequestID(header http.Header) (string, m54DiagnosticState) {
+	value, state := m54SingleDiagnosticHeader(header, "X-GitHub-Request-Id")
+	if state != m54DiagnosticValid {
+		return "", state
+	}
+	if value == "" || len(value) > 128 {
+		return "", m54DiagnosticMalformed
+	}
+	for _, character := range value {
+		if !((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == ':' || character == '-') {
+			return "", m54DiagnosticMalformed
+		}
+	}
+	digest := sha256.Sum256([]byte(value))
+	return "sha256:" + hex.EncodeToString(digest[:]), m54DiagnosticValid
+}
+
+func m54SingleDiagnosticHeader(header http.Header, name string) (string, m54DiagnosticState) {
+	values := header.Values(name)
+	if len(values) == 0 {
+		return "", m54DiagnosticMissing
+	}
+	if len(values) != 1 || len(values[0]) == 0 || len(values[0]) > m54DiagnosticValueLimit {
+		return "", m54DiagnosticMalformed
+	}
+	for _, character := range values[0] {
+		if character < 0x20 || character > 0x7e {
+			return "", m54DiagnosticMalformed
+		}
+	}
+	return values[0], m54DiagnosticValid
+}
+
+func TestM54FreshLiveRunTargetIsSingleUse(t *testing.T) {
+	if target := gitrefs.RunTarget(m54LiveRunID); target != m54FreshLiveTargetRef || target == m54FailedLiveEvidenceRef {
+		t.Fatalf("fresh fixed RunID target = %q", target)
+	}
+	for _, oid := range []string{m54LiveBaseOID, m53LiveEvidenceOID, m54FailedLiveEvidenceOID} {
+		if !validM54OID(oid) {
+			t.Fatalf("pinned live evidence OID is malformed: %q", oid)
+		}
+	}
+}
+
+func TestM54PostDiagnosticNormalization(t *testing.T) {
+	t.Run("valid allowlisted values", func(t *testing.T) {
+		header := make(http.Header)
+		header.Set("X-Accepted-GitHub-Permissions", "pull_requests=write; contents=read")
+		header.Set("X-RateLimit-Remaining", "4999")
+		header.Set("X-RateLimit-Resource", "core")
+		header.Set("Retry-After", "120")
+		header.Set("X-GitHub-Request-Id", "ABCD:1234:EFGH:5678")
+		diagnostic := normalizeM54PostDiagnostic(&http.Response{StatusCode: http.StatusForbidden, Header: header})
+		if diagnostic.HTTPStatus != http.StatusForbidden || diagnostic.AcceptedPermissionsState != m54DiagnosticValid || len(diagnostic.AcceptedPermissions) != 2 || diagnostic.AcceptedPermissions[0] != (m54NormalizedPermission{Name: "contents", Level: "read"}) || diagnostic.AcceptedPermissions[1] != (m54NormalizedPermission{Name: "pull_requests", Level: "write"}) {
+			t.Fatalf("accepted permission normalization differs: %#v", diagnostic)
+		}
+		if diagnostic.RateLimitRemainingState != m54DiagnosticValid || diagnostic.RateLimitRemaining != 4999 || diagnostic.RateLimitResourceState != m54DiagnosticValid || diagnostic.RateLimitResource != "core" || diagnostic.RetryAfterState != m54RetryAfterSeconds || diagnostic.RetryAfterSeconds != 120 || diagnostic.RequestIDState != m54DiagnosticValid || !strings.HasPrefix(diagnostic.RequestIDDigest, "sha256:") || strings.Contains(diagnostic.RequestIDDigest, "ABCD") {
+			t.Fatalf("bounded diagnostic normalization differs: %#v", diagnostic)
+		}
+	})
+
+	t.Run("missing values remain explicit", func(t *testing.T) {
+		diagnostic := normalizeM54PostDiagnostic(&http.Response{StatusCode: http.StatusCreated, Header: make(http.Header)})
+		if diagnostic.AcceptedPermissionsState != m54DiagnosticMissing || diagnostic.RateLimitRemainingState != m54DiagnosticMissing || diagnostic.RateLimitResourceState != m54DiagnosticMissing || diagnostic.RetryAfterState != m54RetryAfterNone || diagnostic.RequestIDState != m54DiagnosticMissing {
+			t.Fatalf("missing diagnostic values were not explicit: %#v", diagnostic)
+		}
+	})
+
+	t.Run("valid HTTP date is classified without retention", func(t *testing.T) {
+		header := make(http.Header)
+		header.Set("Retry-After", "Wed, 21 Oct 2015 07:28:00 GMT")
+		diagnostic := normalizeM54PostDiagnostic(&http.Response{Header: header})
+		if diagnostic.RetryAfterState != m54RetryAfterHTTPDate || diagnostic.RetryAfterSeconds != 0 {
+			t.Fatalf("HTTP-date Retry-After differs: %#v", diagnostic)
+		}
+		if strings.Contains(diagnostic.evidence(t), "2015") {
+			t.Fatal("raw Retry-After HTTP date entered evidence")
+		}
+	})
+
+	t.Run("malformed provider values collapse to enums", func(t *testing.T) {
+		tests := []struct {
+			name   string
+			header http.Header
+			check  func(m54PostDiagnostic) bool
+		}{
+			{name: "oversized", header: http.Header{"X-Ratelimit-Resource": []string{strings.Repeat("x", m54DiagnosticValueLimit+1)}}, check: func(value m54PostDiagnostic) bool { return value.RateLimitResourceState == m54DiagnosticMalformed }},
+			{name: "permission grammar", header: http.Header{"X-Accepted-Github-Permissions": []string{"pull_requests:write"}}, check: func(value m54PostDiagnostic) bool { return value.AcceptedPermissionsState == m54DiagnosticMalformed }},
+			{name: "permission duplicate", header: http.Header{"X-Accepted-Github-Permissions": []string{"pull_requests=write; pull_requests=read"}}, check: func(value m54PostDiagnostic) bool { return value.AcceptedPermissionsState == m54DiagnosticMalformed }},
+			{name: "duplicate header", header: http.Header{"X-Accepted-Github-Permissions": []string{"pull_requests=write", "contents=read"}}, check: func(value m54PostDiagnostic) bool { return value.AcceptedPermissionsState == m54DiagnosticMalformed }},
+			{name: "integer", header: http.Header{"X-Ratelimit-Remaining": []string{"-1"}}, check: func(value m54PostDiagnostic) bool { return value.RateLimitRemainingState == m54DiagnosticMalformed }},
+			{name: "control", header: http.Header{"X-Ratelimit-Resource": []string{"core\r\nmalicious"}}, check: func(value m54PostDiagnostic) bool { return value.RateLimitResourceState == m54DiagnosticMalformed }},
+			{name: "retry bound", header: http.Header{"Retry-After": []string{strconv.FormatUint(m54RetryAfterMaxSeconds+1, 10)}}, check: func(value m54PostDiagnostic) bool { return value.RetryAfterState == m54DiagnosticMalformed }},
+		}
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				diagnostic := normalizeM54PostDiagnostic(&http.Response{Header: test.header})
+				if !test.check(diagnostic) {
+					t.Fatalf("provider value was not rejected: %#v", diagnostic)
+				}
+			})
+		}
+	})
+
+	t.Run("secret-shaped provider data never reaches evidence", func(t *testing.T) {
+		const secret = "SECRETVALUE123"
+		header := make(http.Header)
+		header.Set("X-Accepted-GitHub-Permissions", "pull_requests=write; "+secret+"=read")
+		header.Set("X-RateLimit-Resource", secret)
+		header.Set("Retry-After", secret)
+		header.Set("X-GitHub-Request-Id", secret)
+		evidence := normalizeM54PostDiagnostic(&http.Response{StatusCode: http.StatusForbidden, Header: header}).evidence(t)
+		if strings.Contains(evidence, secret) {
+			t.Fatal("provider-controlled secret-shaped value entered normalized evidence")
+		}
+	})
 }
 
 func validM54PullRequestQuery(requestURL *url.URL) bool {
@@ -494,6 +827,9 @@ func TestM54LiveTransportExactAllowlistAndOneWayPostFuse(t *testing.T) {
 	if recorder.calls.Load() != 3 || fuse.posts.Load() != 2 {
 		t.Fatalf("second POST was not blocked before transport: calls=%d posts=%d", recorder.calls.Load(), fuse.posts.Load())
 	}
+	if diagnostic, ok := fuse.postDiagnostic(); !ok || diagnostic.HTTPStatus != http.StatusOK {
+		t.Fatalf("first POST diagnostic was not retained across blocked second dispatch: ok=%t diagnostic=%#v", ok, diagnostic)
+	}
 
 	t.Run("failed first dispatch permanently consumes fuse", func(t *testing.T) {
 		failure := &m54RecordingDoer{err: errors.New("simulated connection reset")}
@@ -508,6 +844,9 @@ func TestM54LiveTransportExactAllowlistAndOneWayPostFuse(t *testing.T) {
 		}
 		if failure.calls.Load() != 1 || failedFuse.posts.Load() != 2 {
 			t.Fatalf("failed dispatch fuse accounting differs: calls=%d posts=%d", failure.calls.Load(), failedFuse.posts.Load())
+		}
+		if _, ok := failedFuse.postDiagnostic(); ok {
+			t.Fatal("transport failure fabricated a provider response diagnostic")
 		}
 	})
 }
@@ -719,6 +1058,20 @@ func (inventory m54RemoteInventory) hasPullRequestTuple(baseRef, targetRef strin
 	return false
 }
 
+func requireM54EvidenceBranches(t *testing.T, inventory m54RemoteInventory) {
+	t.Helper()
+	expected := map[string]string{
+		m54LiveBaseRef:           m54LiveBaseOID,
+		m53LiveEvidenceRef:       m53LiveEvidenceOID,
+		m54FailedLiveEvidenceRef: m54FailedLiveEvidenceOID,
+	}
+	for ref, oid := range expected {
+		if inventory.branches[ref] != oid {
+			t.Fatalf("required immutable evidence branch differs: ref=%s want=%s got=%s", ref, oid, inventory.branches[ref])
+		}
+	}
+}
+
 func assertM54RemoteDelta(t *testing.T, before, after m54RemoteInventory, plan *githubpullrequest.Plan, identity *githubpullrequest.PullRequestIdentity) {
 	t.Helper()
 	if before.repositoryID != m54LiveRepositoryID || after.repositoryID != m54LiveRepositoryID {
@@ -744,6 +1097,59 @@ func assertM54RemoteDelta(t *testing.T, before, after m54RemoteInventory, plan *
 	if !ok || created.StableID != identity.StableID() || created.State != "open" || created.Draft || created.URL != identity.URL() || created.BaseRef != plan.BaseRef() || created.BaseSHA != plan.BaseCommit() || created.BaseRepositoryID != m54LiveRepositoryID || created.BaseRepository != m54LiveRepository || created.HeadRef != plan.TargetRef() || created.HeadSHA != plan.CommitOID() || created.HeadRepositoryID != m54LiveRepositoryID || created.HeadRepository != m54LiveRepository || created.TitleDigest != plan.Metadata().TitleDigest() || created.BodyDigest != plan.Metadata().BodyDigest() {
 		t.Fatal("created remote PR inventory entry differs from exact MIRAGE authority")
 	}
+}
+
+func assertM54RejectedRemoteDelta(t *testing.T, before, after m54RemoteInventory, plan *githubpullrequest.Plan) {
+	t.Helper()
+	if before.repositoryID != m54LiveRepositoryID || after.repositoryID != m54LiveRepositoryID {
+		t.Fatal("repository stable identity changed")
+	}
+	if len(after.branches) != len(before.branches)+1 || after.branches[plan.TargetRef()] != plan.CommitOID() {
+		t.Fatalf("rejected proof branch delta is not exactly one bound create: before=%d after=%d", len(before.branches), len(after.branches))
+	}
+	for ref, oid := range before.branches {
+		if after.branches[ref] != oid {
+			t.Fatalf("preexisting remote branch changed during rejected proof: %s", ref)
+		}
+	}
+	if len(after.pullRequests) != len(before.pullRequests) {
+		t.Fatalf("rejected proof changed PR inventory: before=%d after=%d", len(before.pullRequests), len(after.pullRequests))
+	}
+	for number, pullRequest := range before.pullRequests {
+		if after.pullRequests[number] != pullRequest {
+			t.Fatalf("preexisting remote PR changed during rejected proof: #%d", number)
+		}
+	}
+}
+
+func requireM54LiveLocalTruth(t *testing.T, sourceRoot, real, disposablePath string, readmeBefore []byte, token string) {
+	t.Helper()
+	if !bytes.Equal(mustReadM54(t, filepath.Join(real, "README.md")), readmeBefore) {
+		t.Fatal("trusted worktree README changed during publication proof")
+	}
+	if containsM54Secret(t, sourceRoot, token) || containsM54Secret(t, real, token) || containsM54Secret(t, disposablePath, token) {
+		t.Fatal("host credential entered a repository or disposable workspace")
+	}
+}
+
+func finishM54LiveLocalProof(t *testing.T, lifecycle *Lifecycle, disposable *workspace.Disposable, disposablePath, real string, localBefore m54LocalState, destroyed, cleanedDisposable *bool) {
+	t.Helper()
+	if err := lifecycle.Destroy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	*destroyed = true
+	if err := disposable.Cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	*cleanedDisposable = true
+	if _, err := os.Lstat(disposablePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("disposable workspace leaked: %v", err)
+	}
+	localAfter := captureM54LocalState(t, real)
+	if localAfter != localBefore {
+		t.Fatalf("trusted checkout Git state changed:\nbefore=%+v\nafter=%+v", localBefore, localAfter)
+	}
+	requireM54CleanRepository(t, real)
 }
 
 type m54LocalState struct {
