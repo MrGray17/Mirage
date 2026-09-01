@@ -52,8 +52,9 @@ func TestM54LiveGitHubPullRequestProof(t *testing.T) {
 	if os.Getenv("MIRAGE_M54_TEST_REPO") != m54LiveRepositoryInput {
 		t.Fatalf("MIRAGE_M54_TEST_REPO must be exactly %q", m54LiveRepositoryInput)
 	}
-	if os.Getenv("MIRAGE_M54_EXPECTED_HEAD") != m54ReviewedHead {
-		t.Fatalf("MIRAGE_M54_EXPECTED_HEAD must bind reviewed production head %s", m54ReviewedHead)
+	expectedHead := os.Getenv("MIRAGE_M54_EXPECTED_HEAD")
+	if !validM54OID(expectedHead) {
+		t.Fatal("MIRAGE_M54_EXPECTED_HEAD must be the exact reviewed live-harness commit OID")
 	}
 	repositoryRoot := strings.TrimSpace(os.Getenv("MIRAGE_M54_TEST_REPO_ROOT"))
 	token := os.Getenv("MIRAGE_GITHUB_TOKEN")
@@ -66,7 +67,7 @@ func TestM54LiveGitHubPullRequestProof(t *testing.T) {
 	// temporary user-scoped credential after the separately authorized run.
 	t.Cleanup(func() { _ = os.Unsetenv("MIRAGE_GITHUB_TOKEN") })
 
-	sourceRoot, sourceHead := requireM54ReviewedSource(t)
+	sourceRoot, sourceHead := requireM54ReviewedSource(t, expectedHead)
 	real := requireM54CleanRepository(t, repositoryRoot)
 	if pathsOverlapForM54(sourceRoot, real) {
 		t.Fatal("the MIRAGE source checkout and disposable live-proof repository must be distinct")
@@ -353,20 +354,175 @@ func (e *m54CountingPullRequestEngine) Reconcile(ctx context.Context, plan *gith
 }
 
 type m54CountingDoer struct {
-	client *http.Client
-	posts  atomic.Int64
+	client interface {
+		Do(*http.Request) (*http.Response, error)
+	}
+	posts atomic.Int64
 }
 
 func (d *m54CountingDoer) Do(request *http.Request) (*http.Response, error) {
-	if d == nil || d.client == nil || request == nil || request.URL.Scheme != "https" || request.URL.Host != "api.github.com" || !strings.HasPrefix(request.URL.Path, "/repos/"+m54LiveRepository+"/") {
+	if d == nil || d.client == nil || request == nil || request.URL == nil || request.URL.Scheme != "https" || request.URL.Host != "api.github.com" || request.URL.User != nil || request.URL.Opaque != "" || request.URL.RawPath != "" || request.URL.Fragment != "" || request.URL.RawFragment != "" {
 		return nil, errors.New("live proof transport rejected non-bound GitHub request")
 	}
-	if request.Method == http.MethodPost {
-		d.posts.Add(1)
-	} else if request.Method != http.MethodGet {
+	switch {
+	case request.Method == http.MethodGet && request.URL.Path == "/repos/"+m54LiveRepository:
+		if request.URL.RawQuery != "" || request.URL.ForceQuery {
+			return nil, errors.New("live proof transport rejected repository query")
+		}
+	case request.Method == http.MethodGet && request.URL.Path == "/repos/"+m54LiveRepository+"/pulls":
+		if !validM54PullRequestQuery(request.URL) {
+			return nil, errors.New("live proof transport rejected pull-request query")
+		}
+	case request.Method == http.MethodPost && request.URL.Path == "/repos/"+m54LiveRepository+"/pulls":
+		if request.URL.RawQuery != "" || request.URL.ForceQuery {
+			return nil, errors.New("live proof transport rejected pull-request POST query")
+		}
+		if d.posts.Add(1) != 1 {
+			return nil, errors.New("second live pull-request POST is permanently forbidden")
+		}
+	default:
 		return nil, errors.New("live proof transport rejected unsupported method")
 	}
 	return d.client.Do(request)
+}
+
+func validM54PullRequestQuery(requestURL *url.URL) bool {
+	if requestURL == nil || requestURL.ForceQuery {
+		return false
+	}
+	values, err := url.ParseQuery(requestURL.RawQuery)
+	if err != nil || requestURL.RawQuery != values.Encode() || len(values) != 5 {
+		return false
+	}
+	target, ok := gitrefs.BranchName(gitrefs.RunTarget(m54LiveRunID))
+	if !ok {
+		return false
+	}
+	expected := map[string]string{
+		"base":     "main",
+		"head":     "mrgray17:" + target,
+		"page":     values.Get("page"),
+		"per_page": "50",
+		"state":    "all",
+	}
+	if expected["page"] != "1" && expected["page"] != "2" {
+		return false
+	}
+	for key, value := range expected {
+		observed, exists := values[key]
+		if !exists || len(observed) != 1 || observed[0] != value {
+			return false
+		}
+	}
+	return true
+}
+
+func TestM54LiveTransportExactAllowlistAndOneWayPostFuse(t *testing.T) {
+	target, ok := gitrefs.BranchName(gitrefs.RunTarget(m54LiveRunID))
+	if !ok {
+		t.Fatal("fixed live target is invalid")
+	}
+	query := url.Values{
+		"base":     []string{"main"},
+		"head":     []string{"mrgray17:" + target},
+		"page":     []string{"1"},
+		"per_page": []string{"50"},
+		"state":    []string{"all"},
+	}.Encode()
+	recorder := &m54RecordingDoer{}
+	fuse := &m54CountingDoer{client: recorder}
+
+	for _, rawURL := range []string{
+		"https://api.github.com/repos/" + m54LiveRepository,
+		"https://api.github.com/repos/" + m54LiveRepository + "/pulls?" + query,
+	} {
+		request, err := http.NewRequest(http.MethodGet, rawURL, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := fuse.Do(request)
+		if err != nil {
+			t.Fatalf("allowed GET rejected: %v", err)
+		}
+		_ = response.Body.Close()
+	}
+	if recorder.calls.Load() != 2 || fuse.posts.Load() != 0 {
+		t.Fatalf("allowed GET accounting differs: calls=%d posts=%d", recorder.calls.Load(), fuse.posts.Load())
+	}
+
+	for _, test := range []struct {
+		method string
+		url    string
+	}{
+		{method: http.MethodGet, url: "https://api.github.com/repos/" + m54LiveRepository + "/"},
+		{method: http.MethodGet, url: "https://api.github.com/repos/" + m54LiveRepository + "?extra=1"},
+		{method: http.MethodGet, url: "https://api.github.com/repos/" + m54LiveRepository + "/pulls"},
+		{method: http.MethodGet, url: "https://api.github.com/repos/" + m54LiveRepository + "/pulls?" + query + "&extra=1"},
+		{method: http.MethodGet, url: "https://api.github.com/repos/" + m54LiveRepository + "/pulls?" + strings.Replace(query, "page=1", "page=3", 1)},
+		{method: http.MethodPost, url: "https://api.github.com/repos/" + m54LiveRepository + "/pulls?extra=1"},
+		{method: http.MethodPatch, url: "https://api.github.com/repos/" + m54LiveRepository + "/pulls"},
+		{method: http.MethodGet, url: "https://example.invalid/repos/" + m54LiveRepository},
+	} {
+		request, err := http.NewRequest(test.method, test.url, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response, err := fuse.Do(request); err == nil || response != nil {
+			t.Fatalf("transport accepted forbidden request %s %s", test.method, test.url)
+		}
+	}
+	if recorder.calls.Load() != 2 || fuse.posts.Load() != 0 {
+		t.Fatalf("forbidden requests reached transport: calls=%d posts=%d", recorder.calls.Load(), fuse.posts.Load())
+	}
+
+	post, err := http.NewRequest(http.MethodPost, "https://api.github.com/repos/"+m54LiveRepository+"/pulls", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := fuse.Do(post)
+	if err != nil {
+		t.Fatalf("first POST rejected: %v", err)
+	}
+	_ = response.Body.Close()
+	second, err := http.NewRequest(http.MethodPost, post.URL.String(), strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response, err := fuse.Do(second); err == nil || response != nil {
+		t.Fatal("second POST passed the one-way transport fuse")
+	}
+	if recorder.calls.Load() != 3 || fuse.posts.Load() != 2 {
+		t.Fatalf("second POST was not blocked before transport: calls=%d posts=%d", recorder.calls.Load(), fuse.posts.Load())
+	}
+
+	t.Run("failed first dispatch permanently consumes fuse", func(t *testing.T) {
+		failure := &m54RecordingDoer{err: errors.New("simulated connection reset")}
+		failedFuse := &m54CountingDoer{client: failure}
+		first, _ := http.NewRequest(http.MethodPost, post.URL.String(), strings.NewReader("{}"))
+		if response, err := failedFuse.Do(first); err == nil || response != nil {
+			t.Fatal("simulated first transport failure was not observed")
+		}
+		second, _ := http.NewRequest(http.MethodPost, post.URL.String(), strings.NewReader("{}"))
+		if response, err := failedFuse.Do(second); err == nil || response != nil {
+			t.Fatal("POST fuse reset after transport failure")
+		}
+		if failure.calls.Load() != 1 || failedFuse.posts.Load() != 2 {
+			t.Fatalf("failed dispatch fuse accounting differs: calls=%d posts=%d", failure.calls.Load(), failedFuse.posts.Load())
+		}
+	})
+}
+
+type m54RecordingDoer struct {
+	calls atomic.Int64
+	err   error
+}
+
+func (d *m54RecordingDoer) Do(*http.Request) (*http.Response, error) {
+	d.calls.Add(1)
+	if d.err != nil {
+		return nil, d.err
+	}
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("{}")), Header: make(http.Header)}, nil
 }
 
 func newM54LiveHTTPClient() *http.Client {
@@ -601,27 +757,28 @@ type m54LocalState struct {
 	Objects    string
 }
 
-func requireM54ReviewedSource(t *testing.T) (string, string) {
+func requireM54ReviewedSource(t *testing.T, expectedHead string) (string, string) {
 	t.Helper()
+	if !validM54OID(expectedHead) {
+		t.Fatal("reviewed live-harness head is malformed")
+	}
 	root := strings.TrimSpace(runM54Git(t, "", "rev-parse", "--show-toplevel"))
 	root = requireM54PhysicalDirectory(t, root)
 	head := strings.TrimSpace(runM54Git(t, root, "rev-parse", "HEAD"))
-	if !validM54OID(head) {
-		t.Fatal("MIRAGE source HEAD is malformed")
+	if !validM54OID(head) || head != expectedHead {
+		t.Fatalf("MIRAGE source HEAD %s does not equal reviewed live-harness head %s", head, expectedHead)
 	}
 	if status := runM54Git(t, root, "status", "--porcelain=v2", "--untracked-files=all"); status != "" {
 		t.Fatal("MIRAGE source checkout must be clean for the live proof")
 	}
-	if head != m54ReviewedHead {
-		command := exec.Command(m54GitExecutable(), "-C", root, "merge-base", "--is-ancestor", m54ReviewedHead, head)
-		command.Env = m54GitEnvironment()
-		if err := command.Run(); err != nil {
-			t.Fatalf("reviewed production head %s is not an ancestor of source HEAD %s", m54ReviewedHead, head)
-		}
-		changed := strings.Fields(runM54Git(t, root, "diff", "--name-only", m54ReviewedHead+".."+head))
-		if len(changed) != 1 || filepath.ToSlash(changed[0]) != m54LiveHarnessPath {
-			t.Fatalf("source after reviewed production head contains non-harness changes: %v", changed)
-		}
+	command := exec.Command(m54GitExecutable(), "-C", root, "merge-base", "--is-ancestor", m54ReviewedHead, head)
+	command.Env = m54GitEnvironment()
+	if err := command.Run(); err != nil {
+		t.Fatalf("reviewed production head %s is not an ancestor of source HEAD %s", m54ReviewedHead, head)
+	}
+	changed := strings.Fields(runM54Git(t, root, "diff", "--name-only", m54ReviewedHead+".."+head))
+	if len(changed) != 1 || filepath.ToSlash(changed[0]) != m54LiveHarnessPath {
+		t.Fatalf("source after reviewed production head contains non-harness changes: %v", changed)
 	}
 	return root, head
 }
