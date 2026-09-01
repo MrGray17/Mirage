@@ -274,20 +274,27 @@ func TestM54LiveGitHubPullRequestProof(t *testing.T) {
 		t.Fatal(err)
 	}
 	prEngine := &m54CountingPullRequestEngine{inner: prEngineInner}
-	ledger, establishErr := lifecycle.EstablishGitHubPullRequest(ctx, prEngine)
-	if lifecycle.State() == StatePRCreationUncertain {
-		// Once attempted, the only permitted recovery is this read-only path.
-		ledger, establishErr = lifecycle.ReconcileGitHubPullRequest(prEngine)
-	}
+	effectEvidence := captureM54PullRequestEvidence(ctx, lifecycle, prEngine)
+	ledger := effectEvidence.terminalLedger()
 	if ledger == nil {
-		t.Fatalf("PR effect returned no immutable external-effect ledger: state=%s err=%v", lifecycle.State(), establishErr)
+		t.Fatalf("PR effect returned no immutable external-effect ledger: establish_state=%s establish_err=%v reconcile_state=%s reconcile_err=%v", effectEvidence.PostEstablishState, effectEvidence.EstablishErr, effectEvidence.PostReconcileState, effectEvidence.ReconcileErr)
 	}
-	if prEngine.establishes.Load() != 1 || prTransport.posts.Load() != 1 || prEngine.reconciles.Load() > 1 {
+	wantReconciles := int64(boolM54Count(effectEvidence.Reconciled))
+	if prEngine.establishes.Load() != 1 || prTransport.posts.Load() != 1 || prEngine.reconciles.Load() != wantReconciles {
 		t.Fatalf("mutation budget violated: establish=%d POST=%d reconcile=%d", prEngine.establishes.Load(), prTransport.posts.Load(), prEngine.reconciles.Load())
 	}
 	attempt := lifecycle.PullRequestAttempt()
-	if attempt == nil || attempt.Identity() != ledger.AttemptIdentity() || attempt.PlanIdentity() != prPlan.Identity() {
+	if attempt == nil || effectEvidence.InitialLedger != initialLedger || effectEvidence.PostEstablishLedger == nil || attempt.Identity() != effectEvidence.PostEstablishLedger.AttemptIdentity() || attempt.Identity() != ledger.AttemptIdentity() || attempt.PlanIdentity() != prPlan.Identity() || lifecycle.State() != effectEvidence.terminalState() {
 		t.Fatal("PR attempt latch is absent or differs from the immutable plan/ledger")
+	}
+	if effectEvidence.PostEstablishState == StatePRCreationUncertain {
+		if effectEvidence.PostEstablishLedger.PullRequestOutcome() != githubpullrequest.OutcomeUncertain || effectEvidence.PostEstablishLedger.ObservationStatus() != githubpullrequest.ObservationUnavailable || effectEvidence.PostEstablishLedger.Causality() != githubpullrequest.CausalityUnknown {
+			t.Fatal("initial unavailable result did not preserve UNCERTAIN evidence")
+		}
+		expectedUncertain, uncertainErr := reconstructM54PostAttemptLedger(initialLedger, prPlan, attempt, githubpullrequest.OutcomeUncertain, githubpullrequest.Observation{Status: githubpullrequest.ObservationUnavailable}, effectEvidence.PostEstablishLedger.TransportAcknowledged())
+		if uncertainErr != nil || expectedUncertain == nil || expectedUncertain.Identity() != effectEvidence.PostEstablishLedger.Identity() || effectEvidence.PostEstablishLedger.PreviousIdentity() != initialLedger.Identity() {
+			t.Fatalf("initial UNCERTAIN ledger failed canonical chain reconstruction: construction_error=%t", uncertainErr != nil)
+		}
 	}
 	diagnostic, diagnosticAvailable := prTransport.postDiagnostic()
 	if !diagnosticAvailable {
@@ -297,88 +304,43 @@ func TestM54LiveGitHubPullRequestProof(t *testing.T) {
 	if strings.Contains(diagnosticEvidence, token) {
 		t.Fatal("credential entered normalized POST diagnostics")
 	}
+	establishFailureClass := classifyM54CreationFailure(effectEvidence.EstablishErr)
+	reconcileFailureClass := classifyM54ReconcileError(effectEvidence.ReconcileErr)
+	if establishFailureClass == m54FailureProviderRejected && (!diagnosticAvailable || diagnostic.HTTPStatus < 100 || diagnostic.HTTPStatus > 599 || diagnostic.HTTPStatus == http.StatusCreated) {
+		t.Fatalf("PROVIDER_REJECTED lacks one normalized non-201 provider response: available=%t status=%d", diagnosticAvailable, diagnostic.HTTPStatus)
+	}
+	chainEvidence := fmt.Sprintf("initial_ledger=%s post_establish_ledger=%s post_establish_state=%s establish_failure_class=%s reconcile_performed=%t reconcile_result=%s post_reconcile_ledger=%s post_reconcile_state=%s reconcile_error_class=%s terminal_ledger=%s terminal_state=%s",
+		initialLedger.Identity(), effectEvidence.PostEstablishLedger.Identity(), effectEvidence.PostEstablishState, establishFailureClass, effectEvidence.Reconciled, effectEvidence.reconcileResult(), ledgerIdentityM54(effectEvidence.PostReconcileLedger), effectEvidence.PostReconcileState, reconcileFailureClass, ledger.Identity(), effectEvidence.terminalState())
+	if strings.Contains(chainEvidence, token) {
+		t.Fatal("credential entered immutable ledger-chain evidence")
+	}
 
-	if establishErr != nil {
-		failureClass := classifyM54CreationFailure(establishErr)
-		if lifecycle.State() != StateFailed || ledger.PullRequestOutcome() != githubpullrequest.OutcomeNotCreated || !ledger.Attempted() || ledger.TransportAcknowledged() || ledger.ObservationStatus() != githubpullrequest.ObservationAbsent || ledger.Causality() != githubpullrequest.CausalityNone {
-			t.Fatalf("PR creation failure did not preserve exact partial-effect truth: state=%s outcome=%s observation=%s err=%v", lifecycle.State(), ledger.PullRequestOutcome(), ledger.ObservationStatus(), establishErr)
+	if effectEvidence.terminalState() == StatePRCreationUncertain {
+		if !effectEvidence.Reconciled || ledger.PullRequestOutcome() != githubpullrequest.OutcomeUncertain || ledger.ObservationStatus() != githubpullrequest.ObservationUnavailable || ledger.Causality() != githubpullrequest.CausalityUnknown {
+			t.Fatal("terminal uncertain result does not preserve unavailable effect truth")
 		}
-		expectedLedger, expectedLedgerErr := githubpullrequest.NewExternalEffectLedger(githubpullrequest.LedgerSpec{
-			Previous:                  initialLedger,
-			Plan:                      prPlan,
-			Attempt:                   attempt,
-			Outcome:                   githubpullrequest.OutcomeNotCreated,
-			Observation:               githubpullrequest.Observation{Status: githubpullrequest.ObservationAbsent},
-			Postflight:                true,
-			CompatibleAcknowledgement: false,
-			Reconciled:                true,
-			Causality:                 githubpullrequest.CausalityNone,
-		})
-		ledgerIdentityVerified := expectedLedgerErr == nil && expectedLedger != nil && expectedLedger.Identity() == ledger.Identity()
-
-		// This fresh read is independent of the engine's mandatory postflight.
-		providerObservation, observeErr := prClient.ObserveExactPullRequest(ctx, prPlan)
-		if observeErr != nil || providerObservation.Status != githubpullrequest.ObservationAbsent || providerObservation.Exact != nil {
-			t.Fatalf("independent failed-creation postflight is not authoritative absence: status=%s err=%v", providerObservation.Status, observeErr)
+		expectedLedger, expectedErr := reconstructM54PostAttemptLedger(effectEvidence.PostEstablishLedger, prPlan, attempt, githubpullrequest.OutcomeUncertain, githubpullrequest.Observation{Status: githubpullrequest.ObservationUnavailable}, ledger.TransportAcknowledged())
+		if expectedErr != nil || expectedLedger == nil || expectedLedger.Identity() != ledger.Identity() || ledger.PreviousIdentity() != effectEvidence.PostEstablishLedger.Identity() {
+			t.Fatalf("second UNCERTAIN ledger failed linked canonical reconstruction: construction_error=%t", expectedErr != nil)
 		}
-		baseAfter, baseErr := readClient.ExactRef(ctx, m54LiveRepository, m54LiveRepositoryID, prPlan.BaseRef(), prPlan.BaseCommit())
-		if baseErr != nil || baseAfter.Status != githubbinding.RefPresentExact || baseAfter.OID != prPlan.BaseCommit() {
-			t.Fatalf("provider base moved during failed proof: observation=%#v err=%v", baseAfter, baseErr)
-		}
-		targetAfter, targetErr := readClient.ExactRef(ctx, m54LiveRepository, m54LiveRepositoryID, prPlan.TargetRef(), prPlan.CommitOID())
-		if targetErr != nil || targetAfter.Status != githubbinding.RefPresentExact || targetAfter.OID != prPlan.CommitOID() {
-			t.Fatalf("provider target differs after failed proof: observation=%#v err=%v", targetAfter, targetErr)
-		}
-		remoteAfter := audit.capture(t, ctx)
-		assertM54FailedRemoteDelta(t, remoteBefore, remoteAfter, prPlan)
-		requireM54EvidenceBranches(t, remoteAfter)
 		requireM54LiveLocalTruth(t, sourceRoot, real, disposablePath, readmeBefore, token)
 		finishM54LiveLocalProof(t, lifecycle, disposable, disposablePath, real, localBefore, &destroyed, &cleanedDisposable)
-		if !ledgerIdentityVerified {
-			t.Fatalf("terminal NOT_CREATED ledger failed canonical identity reconstruction: construction_error=%t", expectedLedgerErr != nil)
-		}
-		if failureClass == m54FailureProviderRejected && (!diagnosticAvailable || diagnostic.HTTPStatus < 100 || diagnostic.HTTPStatus > 599 || diagnostic.HTTPStatus == http.StatusCreated) {
-			t.Fatalf("PROVIDER_REJECTED lacks one normalized non-201 provider response: available=%t status=%d", diagnosticAvailable, diagnostic.HTTPStatus)
-		}
-		evidence := fmt.Sprintf("run=%s repository=%s repository_id=%d base_ref=%s base_commit=%s target_ref=%s commit_oid=%s publication_record=%s branch_outcome=PUBLISHED branch_transport_acknowledged=%t branch_reconciled=%t pr_plan=%s initial_ledger=%s metadata_policy=%s title_digest=%s body_digest=%s attempt=%s outcome=%s attempted=%t transport_acknowledged=%t observation=%s exact_postflight=false reconciled=true causality=%s ledger=%s ledger_identity_verified=true ledger_base_commit=%s lifecycle=%s source_head=%s branch_inventory_before=%s pr_inventory_before=%s branch_inventory_after=%s pr_inventory_after=%s failure_class=%s diagnostic_available=%t diagnostic=%s",
-			m54LiveRunID, m54LiveRepository, m54LiveRepositoryID, prPlan.BaseRef(), prPlan.BaseCommit(), prPlan.TargetRef(), prPlan.CommitOID(), record.Identity(), record.TransportAcknowledged(), record.ResolvedByReconciliation(), prPlan.Identity(), initialLedger.Identity(), prPlan.Metadata().Version(), prPlan.Metadata().TitleDigest(), prPlan.Metadata().BodyDigest(), attempt.Identity(), ledger.PullRequestOutcome(), ledger.Attempted(), ledger.TransportAcknowledged(), ledger.ObservationStatus(), ledger.Causality(), ledger.Identity(), ledger.PullRequestBaseCommit(), lifecycle.State(), sourceHead, remoteBefore.branchDigest, remoteBefore.pullRequestDigest, remoteAfter.branchDigest, remoteAfter.pullRequestDigest, failureClass, diagnosticAvailable, diagnosticEvidence)
-		if strings.Contains(evidence, token) {
-			t.Fatal("credential entered sanitized failure evidence")
-		}
-		t.Log(evidence)
-		t.Fatalf("PR establishment failed after complete partial-effect evidence: class=%s status=%d", failureClass, diagnostic.HTTPStatus)
-	}
-	if !diagnosticAvailable {
-		t.Fatal("acknowledged PR creation returned no normalized POST diagnostics")
-	}
-	if lifecycle.State() != StatePREstablished || ledger.PullRequestOutcome() != githubpullrequest.OutcomeCreated || !ledger.Attempted() || !ledger.TransportAcknowledged() || ledger.ObservationStatus() != githubpullrequest.ObservationExact || ledger.Causality() != githubpullrequest.CausalityMirageAcknowledged {
-		t.Fatalf("final PR ledger is not acknowledged exact creation: state=%s outcome=%s observation=%s", lifecycle.State(), ledger.PullRequestOutcome(), ledger.ObservationStatus())
+		t.Logf("%s diagnostic_available=%t diagnostic=%s", chainEvidence, diagnosticAvailable, diagnosticEvidence)
+		t.Fatal("PR result remains UNCERTAIN after the single authorized read-only reconciliation; no further remote read or retry was performed")
 	}
 
-	// This fresh provider read is independent of the engine's postflight and is
-	// the live proof that GitHub still reports the exact bound base and head.
-	providerObservation, err := prClient.ObserveExactPullRequest(ctx, prPlan)
-	if err != nil || providerObservation.Status != githubpullrequest.ObservationExact || providerObservation.Exact == nil {
-		t.Fatalf("independent PR postflight is not exact: status=%s err=%v", providerObservation.Status, err)
+	var providerObservation githubpullrequest.Observation
+	providerObservation, err = prClient.ObserveExactPullRequest(ctx, prPlan)
+	if err != nil {
+		t.Fatalf("independent terminal PR observation unavailable: %v", err)
 	}
-	pullRequest := providerObservation.Exact
-	if pullRequest.RepositoryID() != m54LiveRepositoryID || pullRequest.RepositoryFullName() != m54LiveRepository || pullRequest.BaseRef() != prPlan.BaseRef() || pullRequest.BaseCommit() != prPlan.BaseCommit() || pullRequest.TargetRef() != prPlan.TargetRef() || pullRequest.HeadOID() != prPlan.CommitOID() || pullRequest.MetadataPolicy() != contracts.PullRequestMetadataV1 || pullRequest.TitleDigest() != prPlan.Metadata().TitleDigest() || pullRequest.BodyDigest() != prPlan.Metadata().BodyDigest() || pullRequest.Number() != ledger.PullRequestNumber() || pullRequest.StableID() != ledger.PullRequestStableID() || pullRequest.URL() != ledger.PullRequestURL() || ledger.PullRequestBaseCommit() != prPlan.BaseCommit() {
-		t.Fatal("independent provider identity differs from the plan or external-effect ledger")
+	canonicalObservation := providerObservation
+	if effectEvidence.terminalState() == StateConflicted && ledger.TransportAcknowledged() && providerObservation.Status == githubpullrequest.ObservationAbsent {
+		canonicalObservation = githubpullrequest.Observation{Status: githubpullrequest.ObservationConflicting, Evidence: "acknowledged_but_absent"}
 	}
-	expectedLedger, err := githubpullrequest.NewExternalEffectLedger(githubpullrequest.LedgerSpec{
-		Previous:                  initialLedger,
-		Plan:                      prPlan,
-		Attempt:                   attempt,
-		Outcome:                   githubpullrequest.OutcomeCreated,
-		Observation:               githubpullrequest.Observation{Status: githubpullrequest.ObservationExact, Exact: pullRequest},
-		Postflight:                true,
-		CompatibleAcknowledgement: true,
-		Reconciled:                true,
-		Causality:                 githubpullrequest.CausalityMirageAcknowledged,
-	})
-	if err != nil || expectedLedger == nil || expectedLedger.Identity() != ledger.Identity() {
-		t.Fatalf("terminal CREATED ledger failed canonical identity reconstruction: construction_error=%t", err != nil)
-	}
+	expectedLedger, expectedErr := reconstructM54PostAttemptLedger(effectEvidence.terminalPrevious(), prPlan, attempt, ledger.PullRequestOutcome(), canonicalObservation, ledger.TransportAcknowledged())
+	ledgerIdentityVerified := expectedErr == nil && expectedLedger != nil && expectedLedger.Identity() == ledger.Identity() && ledger.PreviousIdentity() == effectEvidence.terminalPrevious().Identity()
+
 	baseAfter, err := readClient.ExactRef(ctx, m54LiveRepository, m54LiveRepositoryID, prPlan.BaseRef(), prPlan.BaseCommit())
 	if err != nil || baseAfter.Status != githubbinding.RefPresentExact || baseAfter.OID != prPlan.BaseCommit() {
 		t.Fatalf("provider base moved during proof: observation=%#v err=%v", baseAfter, err)
@@ -388,17 +350,54 @@ func TestM54LiveGitHubPullRequestProof(t *testing.T) {
 		t.Fatalf("provider target differs: observation=%#v err=%v", targetAfter, err)
 	}
 	remoteAfter := audit.capture(t, ctx)
-	assertM54RemoteDelta(t, remoteBefore, remoteAfter, prPlan, pullRequest)
+	var pullRequest *githubpullrequest.PullRequestIdentity
+	switch ledger.PullRequestOutcome() {
+	case githubpullrequest.OutcomeCreated, githubpullrequest.OutcomeAlreadyPresent:
+		if effectEvidence.terminalState() != StatePREstablished || providerObservation.Status != githubpullrequest.ObservationExact || providerObservation.Exact == nil {
+			t.Fatalf("established terminal result lacks exact independent identity: state=%s observation=%s", effectEvidence.terminalState(), providerObservation.Status)
+		}
+		pullRequest = providerObservation.Exact
+		if pullRequest.RepositoryID() != m54LiveRepositoryID || pullRequest.RepositoryFullName() != m54LiveRepository || pullRequest.BaseRef() != prPlan.BaseRef() || pullRequest.BaseCommit() != prPlan.BaseCommit() || pullRequest.TargetRef() != prPlan.TargetRef() || pullRequest.HeadOID() != prPlan.CommitOID() || pullRequest.MetadataPolicy() != contracts.PullRequestMetadataV1 || pullRequest.TitleDigest() != prPlan.Metadata().TitleDigest() || pullRequest.BodyDigest() != prPlan.Metadata().BodyDigest() || pullRequest.Number() != ledger.PullRequestNumber() || pullRequest.StableID() != ledger.PullRequestStableID() || pullRequest.URL() != ledger.PullRequestURL() || ledger.PullRequestBaseCommit() != prPlan.BaseCommit() {
+			t.Fatal("independent provider identity differs from the plan or external-effect ledger")
+		}
+		assertM54RemoteDelta(t, remoteBefore, remoteAfter, prPlan, pullRequest)
+	case githubpullrequest.OutcomeNotCreated:
+		if effectEvidence.terminalState() != StateFailed || providerObservation.Status != githubpullrequest.ObservationAbsent || ledger.TransportAcknowledged() || ledger.Causality() != githubpullrequest.CausalityNone {
+			t.Fatalf("NOT_CREATED terminal evidence differs: state=%s observation=%s", effectEvidence.terminalState(), providerObservation.Status)
+		}
+		assertM54FailedRemoteDelta(t, remoteBefore, remoteAfter, prPlan)
+	case githubpullrequest.OutcomeConflict:
+		if effectEvidence.terminalState() != StateConflicted || canonicalObservation.Status != githubpullrequest.ObservationConflicting || ledger.Causality() != githubpullrequest.CausalityNone {
+			t.Fatalf("CONFLICTED terminal evidence differs: state=%s observation=%s", effectEvidence.terminalState(), providerObservation.Status)
+		}
+		assertM54ConflictedRemoteDelta(t, remoteBefore, remoteAfter, prPlan)
+	default:
+		t.Fatalf("unsupported terminal PR outcome %s", ledger.PullRequestOutcome())
+	}
 	requireM54EvidenceBranches(t, remoteAfter)
-
 	requireM54LiveLocalTruth(t, sourceRoot, real, disposablePath, readmeBefore, token)
-	evidence := fmt.Sprintf("run=%s repository=%s repository_id=%d base_ref=%s base_commit=%s target_ref=%s commit_oid=%s publication_record=%s branch_outcome=PUBLISHED branch_transport_acknowledged=%t branch_reconciled=%t pr_plan=%s initial_ledger=%s metadata_policy=%s title_digest=%s body_digest=%s attempt=%s outcome=%s pr_number=%d pr_stable_id=%d pr_url=%s pr_identity=%s transport_acknowledged=%t exact_postflight=true reconciled=true causality=%s ledger=%s ledger_identity_verified=true ledger_base_commit=%s lifecycle=%s source_head=%s branch_inventory_before=%s pr_inventory_before=%s branch_inventory_after=%s pr_inventory_after=%s diagnostic=%s",
-		m54LiveRunID, m54LiveRepository, m54LiveRepositoryID, prPlan.BaseRef(), prPlan.BaseCommit(), prPlan.TargetRef(), prPlan.CommitOID(), record.Identity(), record.TransportAcknowledged(), record.ResolvedByReconciliation(), prPlan.Identity(), initialLedger.Identity(), prPlan.Metadata().Version(), prPlan.Metadata().TitleDigest(), prPlan.Metadata().BodyDigest(), attempt.Identity(), ledger.PullRequestOutcome(), pullRequest.Number(), pullRequest.StableID(), pullRequest.URL(), pullRequest.Identity(), ledger.TransportAcknowledged(), ledger.Causality(), ledger.Identity(), ledger.PullRequestBaseCommit(), lifecycle.State(), sourceHead, remoteBefore.branchDigest, remoteBefore.pullRequestDigest, remoteAfter.branchDigest, remoteAfter.pullRequestDigest, diagnosticEvidence)
+	finishM54LiveLocalProof(t, lifecycle, disposable, disposablePath, real, localBefore, &destroyed, &cleanedDisposable)
+	if !ledgerIdentityVerified {
+		t.Fatalf("terminal %s ledger failed canonical chain reconstruction: construction_error=%t", ledger.PullRequestOutcome(), expectedErr != nil)
+	}
+	evidence := fmt.Sprintf("run=%s repository=%s repository_id=%d base_ref=%s base_commit=%s target_ref=%s commit_oid=%s publication_record=%s branch_outcome=PUBLISHED branch_transport_acknowledged=%t branch_reconciled=%t pr_plan=%s metadata_policy=%s title_digest=%s body_digest=%s attempt=%s outcome=%s transport_acknowledged=%t observation=%s causality=%s ledger_base_commit=%s source_head=%s branch_inventory_before=%s pr_inventory_before=%s branch_inventory_after=%s pr_inventory_after=%s %s diagnostic_available=%t diagnostic=%s",
+		m54LiveRunID, m54LiveRepository, m54LiveRepositoryID, prPlan.BaseRef(), prPlan.BaseCommit(), prPlan.TargetRef(), prPlan.CommitOID(), record.Identity(), record.TransportAcknowledged(), record.ResolvedByReconciliation(), prPlan.Identity(), prPlan.Metadata().Version(), prPlan.Metadata().TitleDigest(), prPlan.Metadata().BodyDigest(), attempt.Identity(), ledger.PullRequestOutcome(), ledger.TransportAcknowledged(), ledger.ObservationStatus(), ledger.Causality(), ledger.PullRequestBaseCommit(), sourceHead, remoteBefore.branchDigest, remoteBefore.pullRequestDigest, remoteAfter.branchDigest, remoteAfter.pullRequestDigest, chainEvidence, diagnosticAvailable, diagnosticEvidence)
 	if strings.Contains(evidence, token) {
 		t.Fatal("credential entered sanitized live evidence")
 	}
-	finishM54LiveLocalProof(t, lifecycle, disposable, disposablePath, real, localBefore, &destroyed, &cleanedDisposable)
 	t.Log(evidence)
+	if ledger.PullRequestOutcome() == githubpullrequest.OutcomeAlreadyPresent {
+		t.Fatal("INCONCLUSIVE: exact PR exists after an unacknowledged attempt; no retry was performed and exclusive MIRAGE causality is not claimed")
+	}
+	if ledger.PullRequestOutcome() == githubpullrequest.OutcomeNotCreated {
+		t.Fatalf("PR was authoritatively NOT_CREATED: establish_failure_class=%s reconcile_error_class=%s", establishFailureClass, reconcileFailureClass)
+	}
+	if ledger.PullRequestOutcome() == githubpullrequest.OutcomeConflict {
+		t.Fatal("PR result is CONFLICTED; bounded remote evidence was preserved and no compensation or retry was performed")
+	}
+	if !diagnosticAvailable || ledger.PullRequestOutcome() != githubpullrequest.OutcomeCreated || !ledger.TransportAcknowledged() || ledger.Causality() != githubpullrequest.CausalityMirageAcknowledged {
+		t.Fatal("desired acknowledged CREATED live-proof result was not established")
+	}
 }
 
 type m54CountingPublicationEngine struct {
@@ -481,6 +480,19 @@ type m54DiagnosticState string
 
 type m54CreationFailureClass string
 
+type m54ReconcileErrorClass string
+
+type m54PullRequestEvidence struct {
+	InitialLedger       *githubpullrequest.ExternalEffectLedger
+	PostEstablishLedger *githubpullrequest.ExternalEffectLedger
+	PostEstablishState  State
+	EstablishErr        error
+	PostReconcileLedger *githubpullrequest.ExternalEffectLedger
+	PostReconcileState  State
+	ReconcileErr        error
+	Reconciled          bool
+}
+
 const (
 	m54DiagnosticMissing   m54DiagnosticState = "MISSING"
 	m54DiagnosticValid     m54DiagnosticState = "VALID"
@@ -492,6 +504,11 @@ const (
 	m54FailureProviderRejected  m54CreationFailureClass = "PROVIDER_REJECTED"
 	m54FailureCreateUnavailable m54CreationFailureClass = "CREATE_UNAVAILABLE"
 	m54FailureUnexpected        m54CreationFailureClass = "UNEXPECTED_ERROR"
+	m54FailureNone              m54CreationFailureClass = "NONE"
+
+	m54ReconcileUnavailable m54ReconcileErrorClass = "OBSERVATION_UNAVAILABLE"
+	m54ReconcileUnexpected  m54ReconcileErrorClass = "UNEXPECTED_ERROR"
+	m54ReconcileNone        m54ReconcileErrorClass = "NONE"
 )
 
 type m54NormalizedPermission struct {
@@ -543,6 +560,8 @@ func (d m54PostDiagnostic) evidence(t *testing.T) string {
 
 func classifyM54CreationFailure(err error) m54CreationFailureClass {
 	switch {
+	case err == nil:
+		return m54FailureNone
 	case errors.Is(err, githubpullrequest.ErrCreateRejected):
 		return m54FailureProviderRejected
 	case errors.Is(err, githubpullrequest.ErrCreateUnavailable):
@@ -550,6 +569,88 @@ func classifyM54CreationFailure(err error) m54CreationFailureClass {
 	default:
 		return m54FailureUnexpected
 	}
+}
+
+func classifyM54ReconcileError(err error) m54ReconcileErrorClass {
+	switch {
+	case err == nil:
+		return m54ReconcileNone
+	case errors.Is(err, githubpullrequest.ErrObservationUnavailable):
+		return m54ReconcileUnavailable
+	default:
+		return m54ReconcileUnexpected
+	}
+}
+
+func captureM54PullRequestEvidence(ctx context.Context, lifecycle *Lifecycle, engine GitHubPullRequestEngine) m54PullRequestEvidence {
+	evidence := m54PullRequestEvidence{InitialLedger: lifecycle.ExternalEffectLedger()}
+	evidence.PostEstablishLedger, evidence.EstablishErr = lifecycle.EstablishGitHubPullRequest(ctx, engine)
+	evidence.PostEstablishState = lifecycle.State()
+	if evidence.PostEstablishState == StatePRCreationUncertain {
+		evidence.Reconciled = true
+		evidence.PostReconcileLedger, evidence.ReconcileErr = lifecycle.ReconcileGitHubPullRequest(engine)
+		evidence.PostReconcileState = lifecycle.State()
+	}
+	return evidence
+}
+
+func (e m54PullRequestEvidence) terminalLedger() *githubpullrequest.ExternalEffectLedger {
+	if e.Reconciled {
+		return e.PostReconcileLedger
+	}
+	return e.PostEstablishLedger
+}
+
+func (e m54PullRequestEvidence) terminalState() State {
+	if e.Reconciled {
+		return e.PostReconcileState
+	}
+	return e.PostEstablishState
+}
+
+func (e m54PullRequestEvidence) terminalPrevious() *githubpullrequest.ExternalEffectLedger {
+	if e.Reconciled {
+		return e.PostEstablishLedger
+	}
+	return e.InitialLedger
+}
+
+func (e m54PullRequestEvidence) reconcileResult() string {
+	if !e.Reconciled {
+		return "NOT_ATTEMPTED"
+	}
+	if e.PostReconcileLedger == nil {
+		return "NO_LEDGER"
+	}
+	return string(e.PostReconcileLedger.PullRequestOutcome())
+}
+
+func ledgerIdentityM54(ledger *githubpullrequest.ExternalEffectLedger) string {
+	if ledger == nil {
+		return "NONE"
+	}
+	return ledger.Identity()
+}
+
+func reconstructM54PostAttemptLedger(previous *githubpullrequest.ExternalEffectLedger, plan *githubpullrequest.Plan, attempt *githubpullrequest.PullRequestAttempt, outcome githubpullrequest.PullRequestOutcome, observation githubpullrequest.Observation, acknowledged bool) (*githubpullrequest.ExternalEffectLedger, error) {
+	causality := githubpullrequest.CausalityNone
+	switch outcome {
+	case githubpullrequest.OutcomeCreated:
+		causality = githubpullrequest.CausalityMirageAcknowledged
+	case githubpullrequest.OutcomeAlreadyPresent, githubpullrequest.OutcomeUncertain:
+		causality = githubpullrequest.CausalityUnknown
+	}
+	return githubpullrequest.NewExternalEffectLedger(githubpullrequest.LedgerSpec{
+		Previous:                  previous,
+		Plan:                      plan,
+		Attempt:                   attempt,
+		Outcome:                   outcome,
+		Observation:               observation,
+		Postflight:                true,
+		CompatibleAcknowledgement: acknowledged,
+		Reconciled:                observation.Status != githubpullrequest.ObservationUnavailable,
+		Causality:                 causality,
+	})
 }
 
 func normalizeM54PostDiagnostic(response *http.Response) m54PostDiagnostic {
@@ -736,7 +837,7 @@ func TestM54CreationFailureClassification(t *testing.T) {
 		{name: "provider rejection precedence", err: errors.Join(githubpullrequest.ErrCreateUnavailable, githubpullrequest.ErrCreateRejected), want: m54FailureProviderRejected},
 		{name: "create unavailable", err: fmt.Errorf("wrapped: %w", githubpullrequest.ErrCreateUnavailable), want: m54FailureCreateUnavailable},
 		{name: "unexpected", err: errors.New("different failure"), want: m54FailureUnexpected},
-		{name: "nil", err: nil, want: m54FailureUnexpected},
+		{name: "nil", err: nil, want: m54FailureNone},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -747,17 +848,31 @@ func TestM54CreationFailureClassification(t *testing.T) {
 	}
 }
 
-func TestM54HarnessReconstructsCanonicalTerminalLedgers(t *testing.T) {
+func TestM54HarnessPreservesCompleteTerminalEffectMatrix(t *testing.T) {
 	tests := []struct {
-		name         string
-		outcome      githubpullrequest.PullRequestOutcome
-		postflight   githubpullrequest.ObservationStatus
-		acknowledged bool
-		establishErr error
-		causality    githubpullrequest.Causality
+		name                    string
+		postflight              githubpullrequest.ObservationStatus
+		acknowledged            bool
+		establishErr            error
+		reconcile               bool
+		reconcileObservation    githubpullrequest.ObservationStatus
+		reconcileErr            error
+		wantEstablishOutcome    githubpullrequest.PullRequestOutcome
+		wantEstablishState      State
+		wantTerminalOutcome     githubpullrequest.PullRequestOutcome
+		wantTerminalState       State
+		wantEstablishErrorClass m54CreationFailureClass
+		wantReconcileErrorClass m54ReconcileErrorClass
 	}{
-		{name: "not created", outcome: githubpullrequest.OutcomeNotCreated, postflight: githubpullrequest.ObservationAbsent, establishErr: githubpullrequest.ErrCreateRejected, causality: githubpullrequest.CausalityNone},
-		{name: "created", outcome: githubpullrequest.OutcomeCreated, postflight: githubpullrequest.ObservationExact, acknowledged: true, causality: githubpullrequest.CausalityMirageAcknowledged},
+		{name: "201 and exact", postflight: githubpullrequest.ObservationExact, acknowledged: true, wantEstablishOutcome: githubpullrequest.OutcomeCreated, wantEstablishState: StatePREstablished, wantTerminalOutcome: githubpullrequest.OutcomeCreated, wantTerminalState: StatePREstablished, wantEstablishErrorClass: m54FailureNone, wantReconcileErrorClass: m54ReconcileNone},
+		{name: "lost acknowledgement and exact", postflight: githubpullrequest.ObservationExact, establishErr: githubpullrequest.ErrCreateUnavailable, wantEstablishOutcome: githubpullrequest.OutcomeAlreadyPresent, wantEstablishState: StatePREstablished, wantTerminalOutcome: githubpullrequest.OutcomeAlreadyPresent, wantTerminalState: StatePREstablished, wantEstablishErrorClass: m54FailureCreateUnavailable, wantReconcileErrorClass: m54ReconcileNone},
+		{name: "provider rejection and absent", postflight: githubpullrequest.ObservationAbsent, establishErr: githubpullrequest.ErrCreateRejected, wantEstablishOutcome: githubpullrequest.OutcomeNotCreated, wantEstablishState: StateFailed, wantTerminalOutcome: githubpullrequest.OutcomeNotCreated, wantTerminalState: StateFailed, wantEstablishErrorClass: m54FailureProviderRejected, wantReconcileErrorClass: m54ReconcileNone},
+		{name: "transport unavailable and absent", postflight: githubpullrequest.ObservationAbsent, establishErr: githubpullrequest.ErrCreateUnavailable, wantEstablishOutcome: githubpullrequest.OutcomeNotCreated, wantEstablishState: StateFailed, wantTerminalOutcome: githubpullrequest.OutcomeNotCreated, wantTerminalState: StateFailed, wantEstablishErrorClass: m54FailureCreateUnavailable, wantReconcileErrorClass: m54ReconcileNone},
+		{name: "unavailable then absent", postflight: githubpullrequest.ObservationUnavailable, establishErr: githubpullrequest.ErrCreateUnavailable, reconcile: true, reconcileObservation: githubpullrequest.ObservationAbsent, wantEstablishOutcome: githubpullrequest.OutcomeUncertain, wantEstablishState: StatePRCreationUncertain, wantTerminalOutcome: githubpullrequest.OutcomeNotCreated, wantTerminalState: StateFailed, wantEstablishErrorClass: m54FailureCreateUnavailable, wantReconcileErrorClass: m54ReconcileNone},
+		{name: "unavailable then exact", postflight: githubpullrequest.ObservationUnavailable, establishErr: githubpullrequest.ErrCreateUnavailable, reconcile: true, reconcileObservation: githubpullrequest.ObservationExact, wantEstablishOutcome: githubpullrequest.OutcomeUncertain, wantEstablishState: StatePRCreationUncertain, wantTerminalOutcome: githubpullrequest.OutcomeAlreadyPresent, wantTerminalState: StatePREstablished, wantEstablishErrorClass: m54FailureCreateUnavailable, wantReconcileErrorClass: m54ReconcileNone},
+		{name: "unavailable remains unavailable", postflight: githubpullrequest.ObservationUnavailable, establishErr: githubpullrequest.ErrCreateUnavailable, reconcile: true, reconcileObservation: githubpullrequest.ObservationUnavailable, reconcileErr: githubpullrequest.ErrObservationUnavailable, wantEstablishOutcome: githubpullrequest.OutcomeUncertain, wantEstablishState: StatePRCreationUncertain, wantTerminalOutcome: githubpullrequest.OutcomeUncertain, wantTerminalState: StatePRCreationUncertain, wantEstablishErrorClass: m54FailureCreateUnavailable, wantReconcileErrorClass: m54ReconcileUnavailable},
+		{name: "conflicting postflight", postflight: githubpullrequest.ObservationConflicting, wantEstablishOutcome: githubpullrequest.OutcomeConflict, wantEstablishState: StateConflicted, wantTerminalOutcome: githubpullrequest.OutcomeConflict, wantTerminalState: StateConflicted, wantEstablishErrorClass: m54FailureNone, wantReconcileErrorClass: m54ReconcileNone},
+		{name: "acknowledged but absent", postflight: githubpullrequest.ObservationAbsent, acknowledged: true, wantEstablishOutcome: githubpullrequest.OutcomeConflict, wantEstablishState: StateConflicted, wantTerminalOutcome: githubpullrequest.OutcomeConflict, wantTerminalState: StateConflicted, wantEstablishErrorClass: m54FailureNone, wantReconcileErrorClass: m54ReconcileNone},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -765,32 +880,64 @@ func TestM54HarnessReconstructsCanonicalTerminalLedgers(t *testing.T) {
 			lifecycle, _, _ := preparedPullRequestLifecycle(t, func() time.Time { return current }, current.Add(time.Hour))
 			plan := lifecycle.GitHubPullRequestPlan()
 			initial := lifecycle.ExternalEffectLedger()
-			observation := lifecyclePRObservation(t, plan, test.postflight)
-			engine := &m54LifecycleEngine{lifecycle: lifecycle, preflight: githubpullrequest.Observation{Status: githubpullrequest.ObservationAbsent}, postflight: observation, acknowledged: test.acknowledged, establishErr: test.establishErr}
-			actual, establishErr := lifecycle.EstablishGitHubPullRequest(context.Background(), engine)
-			if test.establishErr == nil && establishErr != nil {
-				t.Fatal(establishErr)
-			}
-			if test.establishErr != nil && !errors.Is(establishErr, test.establishErr) {
-				t.Fatalf("establish error = %v, want %v", establishErr, test.establishErr)
-			}
+			postflight := lifecyclePRObservation(t, plan, test.postflight)
+			reconcileObservation := lifecyclePRObservation(t, plan, test.reconcileObservation)
+			engine := &m54LifecycleEngine{lifecycle: lifecycle, preflight: githubpullrequest.Observation{Status: githubpullrequest.ObservationAbsent}, postflight: postflight, acknowledged: test.acknowledged, establishErr: test.establishErr, reconcileObservation: reconcileObservation, reconcileErr: test.reconcileErr}
+			evidence := captureM54PullRequestEvidence(context.Background(), lifecycle, engine)
 			attempt := lifecycle.PullRequestAttempt()
-			expected, expectedErr := githubpullrequest.NewExternalEffectLedger(githubpullrequest.LedgerSpec{
-				Previous:                  initial,
-				Plan:                      plan,
-				Attempt:                   attempt,
-				Outcome:                   test.outcome,
-				Observation:               observation,
-				Postflight:                true,
-				CompatibleAcknowledgement: test.acknowledged,
-				Reconciled:                true,
-				Causality:                 test.causality,
-			})
-			if expectedErr != nil || expected == nil || actual == nil || expected.Identity() != actual.Identity() {
-				t.Fatalf("terminal ledger identity differs: expected=%#v actual=%#v error=%v", expected, actual, expectedErr)
+			if evidence.InitialLedger != initial || attempt == nil || engine.postCount() != 1 || engine.readCount() != boolM54Count(test.reconcile) {
+				t.Fatalf("attempt evidence differs: initial=%p/%p attempt=%#v posts=%d reads=%d", evidence.InitialLedger, initial, attempt, engine.postCount(), engine.readCount())
+			}
+			if evidence.Reconciled != test.reconcile || evidence.PostEstablishState != test.wantEstablishState || evidence.PostEstablishLedger == nil || evidence.PostEstablishLedger.PullRequestOutcome() != test.wantEstablishOutcome {
+				t.Fatalf("post-establish evidence differs: reconciled=%t state=%s outcome=%v", evidence.Reconciled, evidence.PostEstablishState, evidence.PostEstablishLedger)
+			}
+			wantReconcileResult := "NOT_ATTEMPTED"
+			if test.reconcile {
+				wantReconcileResult = string(test.wantTerminalOutcome)
+			}
+			if evidence.reconcileResult() != wantReconcileResult {
+				t.Fatalf("reconcile result = %s, want %s", evidence.reconcileResult(), wantReconcileResult)
+			}
+			if classifyM54CreationFailure(evidence.EstablishErr) != test.wantEstablishErrorClass || classifyM54ReconcileError(evidence.ReconcileErr) != test.wantReconcileErrorClass {
+				t.Fatalf("independent error evidence differs: establish=%s reconcile=%s", classifyM54CreationFailure(evidence.EstablishErr), classifyM54ReconcileError(evidence.ReconcileErr))
+			}
+			if test.establishErr != nil && !errors.Is(evidence.EstablishErr, test.establishErr) {
+				t.Fatalf("original establish error was not retained: got=%v want=%v", evidence.EstablishErr, test.establishErr)
+			}
+			initialObservation := postflight
+			if test.acknowledged && postflight.Status == githubpullrequest.ObservationAbsent {
+				initialObservation = githubpullrequest.Observation{Status: githubpullrequest.ObservationConflicting, Evidence: "acknowledged_but_absent"}
+			}
+			expectedEstablish, expectedErr := reconstructM54PostAttemptLedger(initial, plan, attempt, test.wantEstablishOutcome, initialObservation, test.acknowledged)
+			if expectedErr != nil || expectedEstablish == nil || expectedEstablish.Identity() != evidence.PostEstablishLedger.Identity() || evidence.PostEstablishLedger.PreviousIdentity() != initial.Identity() {
+				t.Fatalf("post-establish ledger chain differs: expected=%#v actual=%#v error=%v", expectedEstablish, evidence.PostEstablishLedger, expectedErr)
+			}
+			terminal := evidence.terminalLedger()
+			if terminal == nil || evidence.terminalState() != test.wantTerminalState || terminal.PullRequestOutcome() != test.wantTerminalOutcome || terminal.AttemptIdentity() != attempt.Identity() {
+				t.Fatalf("terminal evidence differs: ledger=%#v state=%s", terminal, evidence.terminalState())
+			}
+			if test.reconcile {
+				terminalObservation := reconcileObservation
+				if test.acknowledged && reconcileObservation.Status == githubpullrequest.ObservationAbsent {
+					terminalObservation = githubpullrequest.Observation{Status: githubpullrequest.ObservationConflicting, Evidence: "acknowledged_but_absent"}
+				}
+				expectedTerminal, terminalErr := reconstructM54PostAttemptLedger(evidence.PostEstablishLedger, plan, attempt, test.wantTerminalOutcome, terminalObservation, test.acknowledged)
+				if terminalErr != nil || expectedTerminal == nil || expectedTerminal.Identity() != terminal.Identity() || terminal.PreviousIdentity() != evidence.PostEstablishLedger.Identity() {
+					t.Fatalf("reconciled ledger chain differs: expected=%#v actual=%#v error=%v", expectedTerminal, terminal, terminalErr)
+				}
+			}
+			if engine.postCount() != 1 {
+				t.Fatalf("terminal processing retried POST: %d", engine.postCount())
 			}
 		})
 	}
+}
+
+func boolM54Count(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func TestM54PostDiagnosticNormalization(t *testing.T) {
@@ -1286,6 +1433,29 @@ func assertM54FailedRemoteDelta(t *testing.T, before, after m54RemoteInventory, 
 	for number, pullRequest := range before.pullRequests {
 		if after.pullRequests[number] != pullRequest {
 			t.Fatalf("preexisting remote PR changed during failed proof: #%d", number)
+		}
+	}
+}
+
+func assertM54ConflictedRemoteDelta(t *testing.T, before, after m54RemoteInventory, plan *githubpullrequest.Plan) {
+	t.Helper()
+	if before.repositoryID != m54LiveRepositoryID || after.repositoryID != m54LiveRepositoryID {
+		t.Fatal("repository stable identity changed")
+	}
+	if len(after.branches) != len(before.branches)+1 || after.branches[plan.TargetRef()] != plan.CommitOID() {
+		t.Fatalf("conflicted proof branch delta is not exactly one bound create: before=%d after=%d", len(before.branches), len(after.branches))
+	}
+	for ref, oid := range before.branches {
+		if after.branches[ref] != oid {
+			t.Fatalf("preexisting remote branch changed during conflicted proof: %s", ref)
+		}
+	}
+	if len(after.pullRequests) < len(before.pullRequests) || len(after.pullRequests) > len(before.pullRequests)+1 {
+		t.Fatalf("conflicted proof PR inventory is not a bounded zero-or-one delta: before=%d after=%d", len(before.pullRequests), len(after.pullRequests))
+	}
+	for number, pullRequest := range before.pullRequests {
+		if after.pullRequests[number] != pullRequest {
+			t.Fatalf("preexisting remote PR changed during conflicted proof: #%d", number)
 		}
 	}
 }
