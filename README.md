@@ -33,22 +33,29 @@ Prerequisites:
 
 - Linux with rootless Docker, cgroup v2, delegated CPU/memory/PID controllers, and built-in seccomp;
 - Go 1.24 or newer;
-- a locally available digest-pinned image containing `/bin/sh` and `wget`.
+- the official digest-pinned demo image (acquired by `mirage setup`).
 
-Build once:
-
-```bash
-go build -o ./bin/mirage ./cmd/mirage
-export MIRAGE_DEMO_IMAGE='busybox@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0'
-```
-
-Then the malicious proof is one command:
+Install from a checkout on Linux/WSL:
 
 ```bash
-./bin/mirage demo malicious
+./scripts/install.sh
+mirage setup
 ```
 
-The command prints the result and writes two local evidence artifacts outside the demo repository:
+On Windows PowerShell, the native frontend installs alongside a Linux backend in WSL2:
+
+```powershell
+.\scripts\install.ps1 -Distribution Ubuntu
+mirage setup
+```
+
+Then the malicious proof is one command from either shell:
+
+```text
+mirage run --open
+```
+
+The command writes two local evidence artifacts outside the demo repository:
 
 - a deterministic JSON receipt;
 - a self-contained, read-only MIRAGE Observatory HTML page.
@@ -56,14 +63,16 @@ The command prints the result and writes two local evidence artifacts outside th
 Verify a receipt independently:
 
 ```bash
-./bin/mirage receipt verify /path/from/demo/output.receipt.json
+mirage verify /path/from/demo/receipt.json
 ```
 
 Run the matching normal workflow:
 
 ```bash
-./bin/mirage demo benign
+mirage run benign
 ```
+
+`mirage doctor` observes the exact Linux runtime prerequisites without changing the machine. `mirage setup` may pull only the official pinned image; a run never pulls. The Windows executable is a frontend: it delegates exact arguments to the configured WSL2 Linux backend and does not claim native Windows sandboxing.
 
 ## What actually happens
 

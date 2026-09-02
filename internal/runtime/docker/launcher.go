@@ -357,69 +357,8 @@ func (l *Launcher) Destroy(ctx context.Context) error {
 }
 
 func (l *Launcher) verifyDaemon(ctx context.Context) error {
-	if l.hostOS != "linux" {
-		return fmt.Errorf("%w: rootless Docker sandboxing requires a Linux Mirage host", ErrIsolation)
-	}
-	if endpoint := strings.TrimSpace(os.Getenv("DOCKER_HOST")); endpoint != "" && !strings.HasPrefix(endpoint, "unix:///") {
-		return fmt.Errorf("%w: DOCKER_HOST %q is not a local Unix socket", ErrIsolation, endpoint)
-	}
-	contextOutput, err := l.run(ctx, "context", "show")
-	if err != nil {
-		return fmt.Errorf("%w: identify Docker context: %w", ErrIsolation, err)
-	}
-	contextName := strings.TrimSpace(string(contextOutput))
-	if contextName == "" || strings.ContainsAny(contextName, "\r\n\t ") {
-		return fmt.Errorf("%w: Docker context identity is invalid", ErrIsolation)
-	}
-	endpointOutput, err := l.run(ctx, "context", "inspect", "--format", "{{json .Endpoints.docker.Host}}", contextName)
-	if err != nil {
-		return fmt.Errorf("%w: inspect Docker endpoint: %w", ErrIsolation, err)
-	}
-	var endpoint string
-	if err := json.Unmarshal(endpointOutput, &endpoint); err != nil {
-		return fmt.Errorf("%w: decode Docker endpoint: %w", ErrIsolation, err)
-	}
-	if !strings.HasPrefix(endpoint, "unix:///") {
-		return fmt.Errorf("%w: Docker endpoint %q is not a local Unix socket", ErrIsolation, endpoint)
-	}
-
-	output, err := l.run(ctx, "info", "--format", "{{json .}}")
-	if err != nil {
-		return fmt.Errorf("%w: Docker daemon is unavailable: %w", ErrIsolation, err)
-	}
-	var info daemonInfo
-	if err := json.Unmarshal(output, &info); err != nil {
-		return fmt.Errorf("%w: decode Docker daemon security state: %w", ErrIsolation, err)
-	}
-	if !strings.EqualFold(info.OSType, "linux") {
-		return fmt.Errorf("%w: Docker daemon OS is %q, want linux", ErrIsolation, info.OSType)
-	}
-	if !containsSecurityOption(info.SecurityOptions, "rootless") {
-		return fmt.Errorf("%w: Docker daemon is not rootless", ErrIsolation)
-	}
-	if !containsSecurityOption(info.SecurityOptions, "seccomp") {
-		return fmt.Errorf("%w: Docker daemon does not report seccomp", ErrIsolation)
-	}
-	if info.CgroupVersion != "2" || !strings.EqualFold(info.CgroupDriver, "systemd") {
-		return fmt.Errorf(
-			"%w: rootless resource enforcement requires cgroup v2 with the systemd driver",
-			ErrIsolation,
-		)
-	}
-	controllers, err := l.delegatedControllers()
-	if err != nil {
-		return fmt.Errorf("%w: establish rootless cgroup controller delegation: %w", ErrIsolation, err)
-	}
-	for _, controller := range []string{"cpu", "memory", "pids"} {
-		if !containsFold(controllers, controller) {
-			return fmt.Errorf(
-				"%w: rootless cgroup controller %q is not delegated",
-				ErrIsolation,
-				controller,
-			)
-		}
-	}
-	return nil
+	_, err := checkEnvironment(ctx, l.hostOS, l.config.DockerBinary, l.runner, l.delegatedControllers)
+	return err
 }
 
 func (l *Launcher) createArguments() []string {
