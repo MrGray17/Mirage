@@ -58,19 +58,22 @@ func TestOfficialRunImageIgnoresAmbientOverrides(t *testing.T) {
 
 func TestRunSummaryJSONSchema(t *testing.T) {
 	summary := newRunSummary(demo.Result{
-		RunID: "run-1", Scenario: demo.ScenarioMalicious, Verification: "PASSED", Committed: true,
-		Attempts:  []demo.Attempt{{Disposition: "AUTHORIZED"}, {Disposition: "DENIED"}},
-		Mutations: []demo.Mutation{{Operation: "MODIFY"}}, DisposableCleaned: true, SandboxArtifactsClean: true,
-	}, "sha256:graph", "sha256:receipt", "/receipt", "/observatory")
+		RunID: "competition-malicious-0123456789abcdef", Scenario: demo.ScenarioMalicious, Verification: "PASSED", Committed: true,
+		Attempts: []demo.Attempt{
+			{Disposition: "AUTHORIZED"}, {Disposition: "DENIED"}, {Disposition: "DENIED"}, {Disposition: "DENIED"},
+		},
+		Mutations: []demo.Mutation{{Operation: "MODIFY"}}, RealWorkspace: "/real",
+		DisposableCleaned: true, SandboxArtifactsClean: true,
+	}, "sha256:"+strings.Repeat("a", 64), "sha256:"+strings.Repeat("b", 64), "/receipt", "/observatory")
 	encoded, err := json.Marshal(summary)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var decoded cliapi.RunSummary
-	if err := json.Unmarshal(encoded, &decoded); err != nil {
+	decoded, err := cliapi.ParseRunSummary(encoded)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Schema != cliapi.RunSchemaV1 || decoded.Attempted != 2 || decoded.Authorized != 1 || decoded.Denied != 1 || decoded.Committed != 1 || !decoded.ReceiptValid || !decoded.CleanupComplete {
+	if decoded.Schema != cliapi.RunSchemaV1 || decoded.Attempted != 4 || decoded.Authorized != 1 || decoded.Denied != 3 || decoded.Committed != 1 || !decoded.ReceiptValid || !decoded.CleanupComplete {
 		t.Fatalf("summary = %#v", decoded)
 	}
 }

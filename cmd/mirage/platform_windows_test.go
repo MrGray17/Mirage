@@ -15,15 +15,30 @@ import (
 )
 
 func TestWindowsBackendProtocolMismatchFailsClosed(t *testing.T) {
-	if err := validateBackendInfo(buildinfo.Info{Platform: "linux", BridgeProtocol: buildinfo.BridgeProtocol}); err != nil {
+	valid := buildinfo.Info{Platform: "linux", Version: buildinfo.Version, Commit: buildinfo.Commit, BridgeProtocol: buildinfo.BridgeProtocol}
+	if err := validateBackendInfo(valid); err != nil {
 		t.Fatalf("valid backend: %v", err)
 	}
 	for _, info := range []buildinfo.Info{
-		{Platform: "windows", BridgeProtocol: buildinfo.BridgeProtocol},
-		{Platform: "linux", BridgeProtocol: buildinfo.BridgeProtocol + 1},
+		{Platform: "windows", Version: buildinfo.Version, Commit: buildinfo.Commit, BridgeProtocol: buildinfo.BridgeProtocol},
+		{Platform: "linux", Version: buildinfo.Version, Commit: buildinfo.Commit, BridgeProtocol: buildinfo.BridgeProtocol + 1},
+		{Platform: "linux", Version: "stale", Commit: buildinfo.Commit, BridgeProtocol: buildinfo.BridgeProtocol},
+		{Platform: "linux", Version: buildinfo.Version, Commit: "stale", BridgeProtocol: buildinfo.BridgeProtocol},
 	} {
 		if err := validateBackendInfo(info); err == nil || !strings.Contains(err.Error(), "out of date") {
 			t.Fatalf("backend %#v error=%v", info, err)
+		}
+	}
+}
+
+func TestWindowsBackendHandshakeRejectsMalformedUnknownAndTrailingJSON(t *testing.T) {
+	for _, encoded := range [][]byte{
+		[]byte(`{"version":`),
+		[]byte(`{"version":"v","commit":"c","bridge_protocol":1,"platform":"linux","unknown":true}`),
+		[]byte(`{"version":"v","commit":"c","bridge_protocol":1,"platform":"linux"} {}`),
+	} {
+		if _, err := parseBackendInfo(encoded); err == nil {
+			t.Fatalf("invalid handshake accepted: %s", encoded)
 		}
 	}
 }

@@ -8,12 +8,16 @@ import (
 
 func TestInvocationPreservesArgumentsWithoutShell(t *testing.T) {
 	config := Config{Distribution: "Ubuntu-24.04", Backend: "/home/alice/.local/share/mirage/bin/mirage"}
-	input := []string{"run", "--output-dir", "/mnt/c/path with spaces", "--label", "$(touch /tmp/no)"}
+	input := []string{
+		"run", "--output-dir", "/mnt/c/path with spaces", "--label",
+		`single'quote`, `double"quote`, `semi;colon`, `amp&ersand`, `pi|pe`,
+		`$dollar`, "`backtick", `(parentheses)`, `unicodé-雪`, `--leading-dash`,
+	}
 	got, err := Invocation(config, input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"-d", "Ubuntu-24.04", "--exec", config.Backend, "run", "--output-dir", "/mnt/c/path with spaces", "--label", "$(touch /tmp/no)"}
+	want := append([]string{"-d", "Ubuntu-24.04", "--exec", config.Backend}, input...)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("argv = %#v, want %#v", got, want)
 	}

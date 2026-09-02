@@ -97,16 +97,38 @@ func checkBackendProtocol(config wsl.Config) error {
 	if err != nil {
 		return fmt.Errorf("MIRAGE WSL backend is unavailable; run 'mirage setup': %w", err)
 	}
-	var backend buildinfo.Info
-	if err := json.Unmarshal(output, &backend); err != nil {
+	backend, err := parseBackendInfo(output)
+	if err != nil {
 		return fmt.Errorf("MIRAGE WSL backend returned an invalid version handshake: %w", err)
 	}
 	return validateBackendInfo(backend)
 }
 
+func parseBackendInfo(encoded []byte) (buildinfo.Info, error) {
+	var backend buildinfo.Info
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&backend); err != nil {
+		return buildinfo.Info{}, err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			err = errors.New("multiple JSON values")
+		}
+		return buildinfo.Info{}, err
+	}
+	return backend, nil
+}
+
 func validateBackendInfo(backend buildinfo.Info) error {
-	if backend.Platform != "linux" || backend.BridgeProtocol != buildinfo.BridgeProtocol {
-		return fmt.Errorf("MIRAGE backend is out of date (platform=%s protocol=%d, want linux protocol=%d); reinstall MIRAGE", backend.Platform, backend.BridgeProtocol, buildinfo.BridgeProtocol)
+	if backend.Platform != "linux" || backend.BridgeProtocol != buildinfo.BridgeProtocol ||
+		backend.Version != buildinfo.Version || backend.Commit != buildinfo.Commit {
+		return fmt.Errorf(
+			"MIRAGE backend is out of date (platform=%q version=%q commit=%q protocol=%d; want linux version=%q commit=%q protocol=%d); reinstall MIRAGE",
+			backend.Platform, backend.Version, backend.Commit, backend.BridgeProtocol,
+			buildinfo.Version, buildinfo.Commit, buildinfo.BridgeProtocol,
+		)
 	}
 	return nil
 }
@@ -123,8 +145,8 @@ func runWindowsPublicDemo(config wsl.Config, args []string, stdout, stderr io.Wr
 		}
 		return fmt.Errorf("WSL MIRAGE run failed: %w", err)
 	}
-	var summary cliapi.RunSummary
-	if err := json.Unmarshal(output, &summary); err != nil || summary.Schema != cliapi.RunSchemaV1 {
+	summary, err := cliapi.ParseRunSummary(output)
+	if err != nil {
 		return fmt.Errorf("WSL MIRAGE returned an invalid run summary: %w", err)
 	}
 	for source, target := range map[*string]string{
@@ -254,6 +276,14 @@ func captureWSL(config wsl.Config, backendArgs []string) ([]byte, string, error)
 	var stdout, stderr boundedBridgeBuffer
 	command.Stdout, command.Stderr = &stdout, &stderr
 	err = command.Run()
+	if stdout.truncated {
+		overflow := errors.New("WSL MIRAGE stdout exceeded the 1 MiB bridge limit")
+		if err == nil {
+			err = overflow
+		} else {
+			err = errors.Join(err, overflow)
+		}
+	}
 	return stdout.Bytes(), strings.TrimSpace(stderr.String()), err
 }
 
