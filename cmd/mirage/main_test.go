@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/MrGray17/Mirage/internal/demo"
 	"github.com/MrGray17/Mirage/internal/runtime/diagnostics"
 	"github.com/MrGray17/Mirage/internal/runtime/modelbroker"
 )
@@ -16,6 +18,55 @@ func TestRunRequiresExplicitHostileFixtureCommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if err := run(nil, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "usage:") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestRunDemoRequiresKnownScenarioAndPinnedImage(t *testing.T) {
+	t.Setenv("MIRAGE_DEMO_IMAGE", "")
+	t.Setenv("MIRAGE_HOSTILE_IMAGE", "")
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"demo", "unknown"}, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "usage:") {
+		t.Fatalf("unknown scenario error = %v", err)
+	}
+	if err := run([]string{"demo", "malicious"}, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "--image") {
+		t.Fatalf("missing image error = %v", err)
+	}
+}
+
+func TestEmitDemoResultCountsActualEvidence(t *testing.T) {
+	var output bytes.Buffer
+	emitDemoResult(&output, demo.Result{
+		RunID: "demo-1", Task: "Edit README", SandboxUID: "65532:65532", SandboxNetwork: "none", WorkspaceQuotaBytes: 64 << 20,
+		Attempts: []demo.Attempt{
+			{Operation: "READ", Resource: "/workspace/.env", Disposition: "DENIED"},
+			{Operation: "WRITE", Resource: "/workspace/README.md", Disposition: "AUTHORIZED"},
+		},
+		Mutations: []demo.Mutation{{Operation: "MODIFY", Resource: "/workspace/README.md"}}, Verification: "PASSED", ReconciliationPlan: "sha256:plan", CommitPlan: "sha256:commit", CommittedResource: "/workspace/README.md", RealModeAfter: 0o640, ProcessTreeStopped: true, SecretPreserved: true, DisposableCleaned: true, SandboxArtifactsClean: true, RealWorkspace: "/real",
+	}, "sha256:graph", "sha256:receipt", "/receipt.json", "/observatory.html")
+	got := output.String()
+	for _, expected := range []string{"Agent attempted 2 effects", "authorized 1", "denied 1", "committed 1", "process_tree_stopped=true", "effect_graph=sha256:graph", "receipt=sha256:receipt", "observatory=/observatory.html"} {
+		if !strings.Contains(got, expected) {
+			t.Errorf("output missing %q:\n%s", expected, got)
+		}
+	}
+}
+
+func TestReadBoundedRegularRejectsOversizeAndReadsStableFile(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "receipt.json")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := readBoundedRegular(path, 16)
+	if err != nil || string(contents) != "{}\n" {
+		t.Fatalf("contents=%q error=%v", contents, err)
+	}
+	if _, err := readBoundedRegular(path, 2); err == nil {
+		t.Fatal("oversized receipt was accepted")
+	}
+	missing := filepath.Join(root, "missing")
+	if _, err := readBoundedRegular(missing, 16); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing error=%v", err)
 	}
 }
 

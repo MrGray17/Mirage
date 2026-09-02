@@ -8,12 +8,17 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/MrGray17/Mirage/internal/contracts"
+	"github.com/MrGray17/Mirage/internal/demo"
+	"github.com/MrGray17/Mirage/internal/effectgraph"
 	"github.com/MrGray17/Mirage/internal/gitrefs"
+	"github.com/MrGray17/Mirage/internal/observatory"
+	"github.com/MrGray17/Mirage/internal/receipt"
 	hostileruntime "github.com/MrGray17/Mirage/internal/runtime"
 	"github.com/MrGray17/Mirage/internal/runtime/diagnostics"
 	runtimedocker "github.com/MrGray17/Mirage/internal/runtime/docker"
@@ -37,21 +42,303 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer) error {
-	if len(args) < 2 || args[0] != "run" {
+	if len(args) < 2 {
 		return usageError()
 	}
-	switch args[1] {
-	case "hostile-fixture":
-		return runHostileFixture(args[2:], stdout, stderr)
-	case "agent":
-		return runAgent(args[2:], stdout, stderr)
+	switch args[0] {
+	case "run":
+		switch args[1] {
+		case "hostile-fixture":
+			return runHostileFixture(args[2:], stdout, stderr)
+		case "agent":
+			return runAgent(args[2:], stdout, stderr)
+		default:
+			return usageError()
+		}
+	case "demo":
+		return runDemo(args[1], args[2:], stdout, stderr)
+	case "receipt":
+		if args[1] != "verify" {
+			return usageError()
+		}
+		return runReceiptVerify(args[2:], stdout, stderr)
+	case "observatory":
+		return runObservatory(args[1:], stdout, stderr)
 	default:
 		return usageError()
 	}
 }
 
 func usageError() error {
-	return errors.New("usage: mirage run hostile-fixture ... | mirage run agent --image <agent@sha256:digest> --helper-image <helper@sha256:digest> --allow /workspace/FILE [options] -- /absolute/agent command...")
+	return errors.New("usage: mirage demo malicious|benign [options] | mirage receipt verify <file> | mirage observatory --out FILE <receipt> | mirage run hostile-fixture ... | mirage run agent --image <agent@sha256:digest> --helper-image <helper@sha256:digest> --allow /workspace/FILE [options] -- /absolute/agent command...")
+}
+
+func runDemo(scenario string, args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("demo "+scenario, flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	imageDefault := strings.TrimSpace(os.Getenv("MIRAGE_DEMO_IMAGE"))
+	if imageDefault == "" {
+		imageDefault = strings.TrimSpace(os.Getenv("MIRAGE_HOSTILE_IMAGE"))
+	}
+	image := flags.String("image", imageDefault, "preloaded digest-pinned image containing /bin/sh and wget")
+	helperImage := flags.String("helper-image", strings.TrimSpace(os.Getenv("MIRAGE_HELPER_IMAGE")), "preloaded digest-pinned helper image; defaults to --image")
+	realWorkspace := flags.String("workspace", "", "explicit trusted demo workspace; omitted creates a visible isolated demo workspace")
+	evidenceOut := flags.String("evidence-out", "", "new receipt path; defaults beside the generated demo workspace")
+	observatoryOut := flags.String("observatory-out", "", "new static Observatory path; defaults beside the receipt")
+	timeout := flags.Duration("timeout", 15*time.Second, "maximum fixture execution time")
+	quota := flags.Int64("workspace-quota-bytes", 64<<20, "hard writable disposable-workspace capacity")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
+	}
+	if scenario != demo.ScenarioMalicious && scenario != demo.ScenarioBenign {
+		return usageError()
+	}
+	if strings.TrimSpace(*image) == "" {
+		return errors.New("--image or MIRAGE_DEMO_IMAGE is required and must be digest-pinned")
+	}
+	if strings.TrimSpace(*helperImage) == "" {
+		*helperImage = *image
+	}
+	if strings.TrimSpace(*realWorkspace) == "" {
+		created, err := demo.CreateWorkspace()
+		if err != nil {
+			return err
+		}
+		*realWorkspace = created
+	}
+
+	commandCtx, cancelSignal := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancelSignal()
+	result, err := demo.Run(commandCtx, demo.Config{
+		Scenario:            scenario,
+		AgentImage:          *image,
+		HelperImage:         *helperImage,
+		RealWorkspace:       *realWorkspace,
+		WorkspaceQuotaBytes: *quota,
+		Timeout:             *timeout,
+	})
+	if err != nil {
+		return fmt.Errorf("competition demo failed (real workspace %s): %w", *realWorkspace, err)
+	}
+	graph, executionReceipt, err := buildDemoEvidence(result)
+	if err != nil {
+		return fmt.Errorf("build competition evidence: %w", err)
+	}
+	encoded, err := receipt.Marshal(executionReceipt)
+	if err != nil {
+		return err
+	}
+	outputPath := strings.TrimSpace(*evidenceOut)
+	if outputPath == "" {
+		outputPath = filepath.Join(filepath.Dir(result.RealWorkspace), result.RunID+".receipt.json")
+	}
+	outputPath, err = filepath.Abs(outputPath)
+	if err != nil {
+		return fmt.Errorf("resolve evidence output: %w", err)
+	}
+	if err := writeNewEvidence(outputPath, encoded); err != nil {
+		return err
+	}
+	page, err := observatory.Render(executionReceipt)
+	if err != nil {
+		return err
+	}
+	pagePath := strings.TrimSpace(*observatoryOut)
+	if pagePath == "" {
+		pagePath = strings.TrimSuffix(outputPath, filepath.Ext(outputPath)) + ".observatory.html"
+	}
+	pagePath, err = filepath.Abs(pagePath)
+	if err != nil {
+		return fmt.Errorf("resolve Observatory output: %w", err)
+	}
+	if err := writeNewEvidence(pagePath, page); err != nil {
+		return err
+	}
+	emitDemoResult(stdout, result, graph.Hash, executionReceipt.SHA256, outputPath, pagePath)
+	return nil
+}
+
+func emitDemoResult(writer io.Writer, result demo.Result, graphHash, receiptHash, receiptPath, observatoryPath string) {
+	fmt.Fprintf(writer, "MIRAGE // RUN %s\n\n", strings.ToUpper(result.RunID))
+	fmt.Fprintf(writer, "Task:\n%s\n\n", result.Task)
+	fmt.Fprintf(writer, "Sandbox:\nREADY  uid=%s  network=%s  quota=%d bytes\n\n", result.SandboxUID, result.SandboxNetwork, result.WorkspaceQuotaBytes)
+	fmt.Fprintln(writer, "Agent Effects:")
+	authorized, denied := 0, 0
+	for _, attempt := range result.Attempts {
+		marker := "+"
+		if attempt.Disposition == "DENIED" {
+			marker = "x"
+			denied++
+		} else if attempt.Disposition == "AUTHORIZED" {
+			authorized++
+		}
+		fmt.Fprintf(writer, "%s %-6s %-31s %s\n", marker, attempt.Operation, attempt.Resource, attempt.Disposition)
+	}
+	fmt.Fprintf(writer, "\nObserved:\n%d trusted final-state mutation\n\n", len(result.Mutations))
+	fmt.Fprintf(writer, "Verification:\n%s  plan=%s\n\n", result.Verification, result.ReconciliationPlan)
+	fmt.Fprintf(writer, "Commit:\n%s  resource=%s  mode=%04o\n\n", result.CommitPlan, result.CommittedResource, result.RealModeAfter)
+	fmt.Fprintf(writer, "Evidence:\nprocess_tree_stopped=%t  secret_preserved=%t  cleanup_complete=%t\n", result.ProcessTreeStopped, result.SecretPreserved, result.DisposableCleaned && result.SandboxArtifactsClean)
+	fmt.Fprintf(writer, "effect_graph=%s\nreceipt=%s\nreceipt_file=%s\n", graphHash, receiptHash, receiptPath)
+	fmt.Fprintf(writer, "observatory=%s\n", observatoryPath)
+	fmt.Fprintf(writer, "real_workspace=%s\n\n", result.RealWorkspace)
+	fmt.Fprintf(writer, "RESULT:\nAgent attempted %d effects. MIRAGE authorized %d, denied %d, and committed %d.\n", len(result.Attempts), authorized, denied, len(result.Mutations))
+}
+
+func buildDemoEvidence(result demo.Result) (*effectgraph.Graph, *receipt.Receipt, error) {
+	graphEffects := make([]effectgraph.Effect, 0, len(result.Attempts))
+	attempted := make([]receipt.Effect, 0, len(result.Attempts))
+	var authorized, denied []receipt.Effect
+	for _, attempt := range result.Attempts {
+		graphEffects = append(graphEffects, effectgraph.Effect{
+			Operation: attempt.Operation, Resource: attempt.Resource, Disposition: attempt.Disposition, EnforcedBy: attempt.EnforcedBy,
+		})
+		effect := receipt.Effect{Operation: attempt.Operation, Resource: attempt.Resource, EnforcedBy: attempt.EnforcedBy}
+		attempted = append(attempted, effect)
+		if attempt.Disposition == "AUTHORIZED" {
+			authorized = append(authorized, effect)
+		} else if attempt.Disposition == "DENIED" {
+			denied = append(denied, effect)
+		}
+	}
+	graphMutations := make([]effectgraph.Mutation, 0, len(result.Mutations))
+	mutations := make([]receipt.Mutation, 0, len(result.Mutations))
+	for _, mutation := range result.Mutations {
+		graphMutations = append(graphMutations, effectgraph.Mutation{Operation: mutation.Operation, Resource: mutation.Resource, AfterDigest: mutation.AfterDigest})
+		mutations = append(mutations, receipt.Mutation{
+			Operation: mutation.Operation, Resource: mutation.Resource, BeforeDigest: mutation.BeforeDigest, AfterDigest: mutation.AfterDigest,
+		})
+	}
+	agent := "deterministic-malicious-fixture"
+	if result.Scenario == demo.ScenarioBenign {
+		agent = "deterministic-benign-fixture"
+	}
+	graph, err := effectgraph.New(effectgraph.Spec{
+		RunID: result.RunID, Task: result.Task, Agent: agent, Effects: graphEffects, Mutations: graphMutations,
+		Verification: result.Verification, VerificationPlan: result.ReconciliationPlan, Committed: result.Committed,
+		CommitPlan: result.CommitPlan, CommittedResource: result.CommittedResource,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	committed := []receipt.Mutation(nil)
+	if result.Committed {
+		committed = append(committed, mutations...)
+	}
+	executionReceipt, err := receipt.New(receipt.Spec{
+		RunID: result.RunID, ContractHash: result.ContractHash, StartedAt: result.StartedAt, CompletedAt: result.CompletedAt,
+		AttemptedEffects: attempted, AuthorizedEffects: authorized, DeniedEffects: denied,
+		ObservedMutations: mutations, Verification: result.Verification, CommittedMutations: committed,
+		VerificationPlan: result.ReconciliationPlan, CommitPlan: result.CommitPlan, Graph: graph,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return graph, executionReceipt, nil
+}
+
+func writeNewEvidence(path string, contents []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create evidence directory: %w", err)
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create evidence file without overwrite: %w", err)
+	}
+	if _, err := file.Write(contents); err != nil {
+		return errors.Join(fmt.Errorf("write evidence: %w", err), file.Close())
+	}
+	return file.Close()
+}
+
+func runReceiptVerify(args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("receipt verify", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 1 {
+		return errors.New("usage: mirage receipt verify <file>")
+	}
+	path, err := filepath.Abs(flags.Arg(0))
+	if err != nil {
+		return err
+	}
+	encoded, err := readBoundedRegular(path, 4<<20)
+	if err != nil {
+		return fmt.Errorf("read receipt: %w", err)
+	}
+	verified, err := receipt.ParseAndVerify(encoded)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "VALID receipt=%s run=%s graph=%s committed=%d\n", verified.SHA256, verified.RunID, verified.EffectGraphHash, len(verified.CommittedMutations))
+	return nil
+}
+
+func runObservatory(args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("observatory", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	output := flags.String("out", "", "new static HTML output path")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 1 || strings.TrimSpace(*output) == "" {
+		return errors.New("usage: mirage observatory --out FILE <receipt>")
+	}
+	inputPath, err := filepath.Abs(flags.Arg(0))
+	if err != nil {
+		return err
+	}
+	encoded, err := readBoundedRegular(inputPath, 4<<20)
+	if err != nil {
+		return fmt.Errorf("read receipt: %w", err)
+	}
+	evidence, err := receipt.ParseAndVerify(encoded)
+	if err != nil {
+		return err
+	}
+	page, err := observatory.Render(evidence)
+	if err != nil {
+		return err
+	}
+	outputPath, err := filepath.Abs(*output)
+	if err != nil {
+		return err
+	}
+	if err := writeNewEvidence(outputPath, page); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "OBSERVATORY_READY run=%s graph=%s file=%s\n", evidence.RunID, evidence.EffectGraphHash, outputPath)
+	return nil
+}
+
+func readBoundedRegular(path string, limit int64) (contents []byte, returnErr error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { returnErr = errors.Join(returnErr, file.Close()) }()
+	opened, err := file.Stat()
+	current, currentErr := os.Lstat(path)
+	if err != nil || currentErr != nil {
+		return nil, errors.Join(err, currentErr)
+	}
+	if !opened.Mode().IsRegular() || !current.Mode().IsRegular() || !os.SameFile(opened, current) || opened.Size() < 1 || opened.Size() > limit {
+		return nil, errors.New("receipt must be one stable regular file no larger than 4 MiB")
+	}
+	contents, err = io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil || int64(len(contents)) > limit {
+		return nil, errors.Join(errors.New("receipt exceeds the read limit"), err)
+	}
+	after, afterErr := file.Stat()
+	current, currentErr = os.Lstat(path)
+	if afterErr != nil || currentErr != nil || !os.SameFile(opened, after) || !os.SameFile(after, current) || opened.Size() != after.Size() || opened.Mode() != after.Mode() || !opened.ModTime().Equal(after.ModTime()) || after.Size() != int64(len(contents)) {
+		return nil, errors.Join(errors.New("receipt changed during acquisition"), afterErr, currentErr)
+	}
+	return contents, nil
 }
 
 func runHostileFixture(args []string, stdout, stderr io.Writer) error {
