@@ -58,6 +58,8 @@ This uses the same quota, sandbox, freeze, scan, verification, and trusted commi
 
 The official fixture is trusted test input executed as an untrusted process. Its strict, bounded probe records establish that each probe ran and observed a denial. Those records are rejected if missing, reordered, truncated, malformed, or reporting a breach.
 
+The failed HTTP request is not, by itself, proof of network containment. The trusted launcher's mandatory and inspected Docker `network=none` configuration is the enforcement evidence; the probe is presentation evidence of what this run observed and does not require Internet availability.
+
 They remain non-authoritative. MIRAGE grants commit authority only after the independently frozen final-tree scan produces exactly one existing-file content modification authorized by the contract.
 
 ## Optional local model

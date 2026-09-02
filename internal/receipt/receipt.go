@@ -188,7 +188,7 @@ func validate(receipt *Receipt) error {
 		}
 	}
 	for _, mutation := range receipt.CommittedMutations {
-		if !containsMutation(receipt.ObservedMutations, mutation) || !authorizedResource(receipt.AuthorizedEffects, mutation.Resource) {
+		if !containsMutation(receipt.ObservedMutations, mutation) || !authorizedMutation(receipt.AuthorizedEffects, mutation) {
 			return fmt.Errorf("%w: committed mutation lacks observed authorized authority", ErrInvalidReceipt)
 		}
 	}
@@ -316,9 +316,9 @@ func nodeField(node effectgraph.Node, name string) string {
 	return ""
 }
 
-func authorizedResource(effects []Effect, resource string) bool {
+func authorizedMutation(effects []Effect, mutation Mutation) bool {
 	for _, effect := range effects {
-		if effect.Resource == resource {
+		if effectgraph.CompetitionV1AuthorizesMutation(effect.Operation, effect.Resource, mutation.Operation, mutation.Resource) {
 			return true
 		}
 	}

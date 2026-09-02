@@ -60,3 +60,42 @@ func TestReceiptRejectsCommittedUnauthorizedMutation(t *testing.T) {
 		t.Fatalf("error=%v, want ErrInvalidReceipt", err)
 	}
 }
+
+func TestReceiptRequiresCompetitionV1WriteAuthorityForCommittedModify(t *testing.T) {
+	tests := []struct {
+		name      string
+		operation string
+		resource  string
+		wantError bool
+	}{
+		{"write same resource", "WRITE", "/workspace/README.md", false},
+		{"read same resource", "READ", "/workspace/README.md", true},
+		{"post same resource", "POST", "/workspace/README.md", true},
+		{"write other resource", "WRITE", "/workspace/other.txt", true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			graph, err := effectgraph.New(effectgraph.Spec{
+				RunID: "run-1", Task: "task", Agent: "fixture", Verification: "PASSED", VerificationPlan: "sha256:plan", Committed: true, CommitPlan: "sha256:commit", CommittedResource: "/workspace/README.md",
+				Effects:   []effectgraph.Effect{{Operation: test.operation, Resource: test.resource, Disposition: "AUTHORIZED", EnforcedBy: "contract"}},
+				Mutations: []effectgraph.Mutation{{Operation: "MODIFY", Resource: "/workspace/README.md", AfterDigest: "sha256:after"}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			effect := Effect{Operation: test.operation, Resource: test.resource, EnforcedBy: "contract"}
+			mutation := Mutation{Operation: "MODIFY", Resource: "/workspace/README.md", BeforeDigest: "sha256:before", AfterDigest: "sha256:after"}
+			start := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+			_, err = New(Spec{
+				RunID: "run-1", ContractHash: "sha256:contract", StartedAt: start, CompletedAt: start.Add(time.Second),
+				AttemptedEffects: []Effect{effect}, AuthorizedEffects: []Effect{effect}, ObservedMutations: []Mutation{mutation}, Verification: "PASSED", VerificationPlan: "sha256:plan", CommittedMutations: []Mutation{mutation}, CommitPlan: "sha256:commit", Graph: graph,
+			})
+			if test.wantError && !errors.Is(err, ErrInvalidReceipt) {
+				t.Fatalf("error=%v, want ErrInvalidReceipt", err)
+			}
+			if !test.wantError && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}

@@ -25,6 +25,8 @@ Committed effects: 1
 
 Those results are produced by a real rootless sandbox run. They are not hardcoded UI data. The official malicious demo uses a fixed, reproducible probe workload; an optional model-driven variant can be added without giving the model any policy authority.
 
+The failed HTTP probe alone does not prove network isolation. Enforcement comes from the trusted launcher requiring and verifying Docker `network=none`; the probe only demonstrates the behavior observed by this run without depending on Internet availability.
+
 ## Run it
 
 Prerequisites:
@@ -96,7 +98,7 @@ Each receipt binds:
 - a deterministic causal Effect Graph;
 - the receipt's own SHA-256 identity.
 
-`mirage receipt verify` checks the receipt hash, graph hash, graph node identities, effect partition, observed/committed mutation binding, and the invariant:
+`mirage receipt verify` checks the receipt hash, graph hash, graph node identities, effect partition, observed/committed mutation binding, and the competition-v1 invariant that only an authorized `WRITE` may produce a committed `MODIFY` of the same resource:
 
 ```text
 CommittedEffects ⊆ AuthorizedEffects

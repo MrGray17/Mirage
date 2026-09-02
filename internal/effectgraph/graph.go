@@ -78,7 +78,11 @@ func New(spec Spec) (*Graph, error) {
 	graph.addEdge(run, task, "CONTAINS")
 	graph.addEdge(task, agent, "ASSIGNED_TO")
 
-	authorizedNodes := make(map[string]Node)
+	type authorizedEffect struct {
+		effect Effect
+		node   Node
+	}
+	var authorizedEffects []authorizedEffect
 	for _, effect := range spec.Effects {
 		if strings.TrimSpace(effect.Operation) == "" || strings.TrimSpace(effect.Resource) == "" || (effect.Disposition != "AUTHORIZED" && effect.Disposition != "DENIED") || strings.TrimSpace(effect.EnforcedBy) == "" {
 			return nil, fmt.Errorf("%w: effect is incomplete", ErrInvalidGraph)
@@ -96,7 +100,7 @@ func New(spec Spec) (*Graph, error) {
 		graph.addEdge(agent, attempt, "ATTEMPTED")
 		graph.addEdge(attempt, decision, edgeType)
 		if effect.Disposition == "AUTHORIZED" {
-			authorizedNodes[effect.Resource] = decision
+			authorizedEffects = append(authorizedEffects, authorizedEffect{effect: effect, node: decision})
 		}
 	}
 
@@ -108,8 +112,10 @@ func New(spec Spec) (*Graph, error) {
 		observed := graph.addNode("OBSERVED_MUTATION", mutation.Operation+" "+mutation.Resource, fields(
 			Field{"operation", mutation.Operation}, Field{"resource", mutation.Resource}, Field{"after_digest", mutation.AfterDigest},
 		))
-		if authority, ok := authorizedNodes[mutation.Resource]; ok {
-			graph.addEdge(authority, observed, "PRODUCED")
+		for _, authority := range authorizedEffects {
+			if CompetitionV1AuthorizesMutation(authority.effect.Operation, authority.effect.Resource, mutation.Operation, mutation.Resource) {
+				graph.addEdge(authority.node, observed, "PRODUCED")
+			}
 		}
 		mutationNodes = append(mutationNodes, observed)
 	}
@@ -125,6 +131,13 @@ func New(spec Spec) (*Graph, error) {
 	}
 	graph.Hash = graphHash(graph)
 	return graph, nil
+}
+
+// CompetitionV1AuthorizesMutation encodes the only effect-to-mutation
+// compatibility supported by the competition receipt: an authorized WRITE
+// may produce a MODIFY of the same existing file.
+func CompetitionV1AuthorizesMutation(effectOperation, effectResource, mutationOperation, mutationResource string) bool {
+	return effectOperation == "WRITE" && mutationOperation == "MODIFY" && effectResource == mutationResource
 }
 
 func Verify(graph *Graph) error {
@@ -173,10 +186,65 @@ func Verify(graph *Graph) error {
 			return fmt.Errorf("%w: edge target is absent", ErrInvalidGraph)
 		}
 	}
+	if err := verifyCompetitionV1Causality(graph, nodesByID(graph.Nodes), edges); err != nil {
+		return err
+	}
 	if graphHash(graph) != graph.Hash {
 		return fmt.Errorf("%w: hash mismatch", ErrInvalidGraph)
 	}
 	return nil
+}
+
+func verifyCompetitionV1Causality(graph *Graph, nodes map[string]Node, edges map[Edge]struct{}) error {
+	expected := make(map[Edge]struct{})
+	for _, authorityEdge := range graph.Edges {
+		if authorityEdge.Type != "AUTHORIZED_BY" {
+			continue
+		}
+		attempt := nodes[authorityEdge.From]
+		authority := nodes[authorityEdge.To]
+		if attempt.Type != "EFFECT_ATTEMPT" || authority.Type != "EFFECT_AUTHORIZED" {
+			continue
+		}
+		for _, mutation := range graph.Nodes {
+			if mutation.Type == "OBSERVED_MUTATION" && CompetitionV1AuthorizesMutation(
+				fieldValue(attempt, "operation"), fieldValue(attempt, "resource"),
+				fieldValue(mutation, "operation"), fieldValue(mutation, "resource"),
+			) {
+				expected[Edge{From: authority.ID, To: mutation.ID, Type: "PRODUCED"}] = struct{}{}
+			}
+		}
+	}
+	for _, edge := range graph.Edges {
+		if edge.Type == "PRODUCED" {
+			if _, ok := expected[edge]; !ok {
+				return fmt.Errorf("%w: produced edge lacks WRITE-to-MODIFY authority", ErrInvalidGraph)
+			}
+		}
+	}
+	for edge := range expected {
+		if _, ok := edges[edge]; !ok {
+			return fmt.Errorf("%w: authorized WRITE-to-MODIFY causality is absent", ErrInvalidGraph)
+		}
+	}
+	return nil
+}
+
+func nodesByID(nodes []Node) map[string]Node {
+	indexed := make(map[string]Node, len(nodes))
+	for _, node := range nodes {
+		indexed[node.ID] = node
+	}
+	return indexed
+}
+
+func fieldValue(node Node, name string) string {
+	for _, field := range node.Metadata {
+		if field.Name == name {
+			return field.Value
+		}
+	}
+	return ""
 }
 
 func validNodeType(kind string) bool {
