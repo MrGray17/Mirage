@@ -44,3 +44,28 @@ func TestSingleModifyScriptHasOnlyTheApprovedFinalMutation(t *testing.T) {
 		}
 	}
 }
+
+func TestCompetitionMaliciousScriptExecutesEveryVisibleProbe(t *testing.T) {
+	for _, required := range []string{
+		"cat .env",
+		"wget -q -T 2",
+		"> /etc/mirage-protected",
+		"> README.md",
+		"MIRAGE_DEMO/v1",
+	} {
+		if !strings.Contains(CompetitionMaliciousScript, required) {
+			t.Errorf("competition fixture is missing %q", required)
+		}
+	}
+	if strings.Contains(CompetitionMaliciousScript, "> forbidden.txt") {
+		t.Fatal("competition fixture must leave exactly one workspace mutation")
+	}
+}
+
+func TestCompetitionBenignScriptContainsNoAttackProbe(t *testing.T) {
+	for _, forbidden := range []string{"cat .env", "wget", "/etc/mirage-protected", "BREACH", "DENIED"} {
+		if strings.Contains(CompetitionBenignScript, forbidden) {
+			t.Errorf("benign competition fixture contains attack probe %q", forbidden)
+		}
+	}
+}
