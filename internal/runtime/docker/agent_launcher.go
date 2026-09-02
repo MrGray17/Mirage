@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/MrGray17/Mirage/internal/runtime/diagnostics"
 )
@@ -188,15 +189,43 @@ func (l *AgentLauncher) Prepare(ctx context.Context) error {
 	if _, err := l.run(ctx, "cp", l.config.Workspace+"/.", l.seedID+":"+containerWorkspacePath); err != nil {
 		return fail(fmt.Errorf("seed bounded workspace volume: %w", err))
 	}
-	marker, err := l.run(ctx, "exec", l.seedID, "/bin/sh", "-c", "cat /workspace/"+DisposableMarker)
-	if err != nil || string(marker) != l.config.WorkspaceToken {
-		return fail(errors.Join(fmt.Errorf("%w: seeded workspace marker mismatch", ErrQuota), err))
+	if err := l.verifySeedMarker(ctx); err != nil {
+		return fail(err)
 	}
 	if err := l.createAgent(ctx); err != nil {
 		return fail(err)
 	}
 	l.prepared = true
 	return nil
+}
+
+// verifySeedMarker tolerates only a short Docker exec-readiness race after the
+// already-verified keeper reaches RUNNING. Every attempt is the same bounded,
+// read-only marker acquisition; a successfully read mismatch fails
+// immediately and agent execution is never retried here.
+func (l *AgentLauncher) verifySeedMarker(ctx context.Context) error {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		marker, err := l.run(ctx, "exec", l.seedID, "/bin/sh", "-c", "cat /workspace/"+DisposableMarker)
+		if err == nil {
+			if string(marker) != l.config.WorkspaceToken {
+				return fmt.Errorf("%w: seeded workspace marker mismatch", ErrQuota)
+			}
+			return nil
+		}
+		lastErr = err
+		if attempt == 2 {
+			break
+		}
+		timer := time.NewTimer(time.Duration(attempt+1) * 25 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return errors.Join(fmt.Errorf("%w: seeded workspace marker unavailable", ErrQuota), ctx.Err(), lastErr)
+		case <-timer.C:
+		}
+	}
+	return errors.Join(fmt.Errorf("%w: seeded workspace marker unavailable", ErrQuota), lastErr)
 }
 
 func (l *AgentLauncher) Start(ctx context.Context) error {

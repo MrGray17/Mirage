@@ -142,6 +142,32 @@ func TestMountedQuotaCapacityMustMatchManifest(t *testing.T) {
 	}
 }
 
+func TestSeedMarkerReadinessRetriesOnlyTransportFailure(t *testing.T) {
+	launcher, err := NewAgent(agentTestConfig(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	launcher.seedID = "0123456789ab"
+	runner := &fakeRunner{responses: []fakeResponse{
+		{err: errors.New("container exec is not ready")},
+		{err: errors.New("container exec is not ready")},
+		{output: []byte(launcher.config.WorkspaceToken)},
+	}}
+	launcher.runner = runner
+	if err := launcher.verifySeedMarker(context.Background()); err != nil {
+		t.Fatalf("transient readiness error was not recovered: %v", err)
+	}
+	if len(runner.calls) != 3 {
+		t.Fatalf("marker reads=%d, want 3", len(runner.calls))
+	}
+
+	runner = &fakeRunner{responses: []fakeResponse{{output: []byte("wrong-marker")}}}
+	launcher.runner = runner
+	if err := launcher.verifySeedMarker(context.Background()); !errors.Is(err, ErrQuota) || len(runner.calls) != 1 {
+		t.Fatalf("mismatch error=%v calls=%d", err, len(runner.calls))
+	}
+}
+
 func TestAgentFreezePausesExportsThenProvesAllProcessesDead(t *testing.T) {
 	config := agentTestConfig(t)
 	if err := os.WriteFile(filepath.Join(config.Workspace, "README.md"), []byte("baseline\n"), 0o600); err != nil {
