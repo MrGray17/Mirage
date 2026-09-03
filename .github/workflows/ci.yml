@@ -41,3 +41,31 @@ jobs:
 
       - name: Test with race detector
         run: go test -race -count=1 -cover ./...
+
+  windows-cli:
+    name: Windows CLI frontend
+    runs-on: windows-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Set up Go 1.24
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: '1.24.x'
+          cache: false
+
+      - name: Test frontend packages
+        run: go test -count=1 ./cmd/mirage ./internal/platform/wsl
+
+      - name: Build Windows frontend
+        run: go build -o mirage.exe ./cmd/mirage
+
+      - name: Build Linux backend artifact
+        shell: pwsh
+        run: |
+          $env:GOOS = 'linux'
+          $env:GOARCH = 'amd64'
+          go build -o mirage-linux-amd64 ./cmd/mirage

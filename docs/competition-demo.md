@@ -6,7 +6,7 @@ This guide runs the reliable deterministic presentation path. It performs no Git
 
 Use a Linux host or WSL2 distribution with the rootless Docker service active. Confirm the effective daemon reports `rootless`, built-in `seccomp`, cgroup v2, and the `systemd` cgroup driver.
 
-The demo image must already be present and addressed by digest. The tested local fixture is:
+Install and prepare once. Setup checks the same rootless-Docker prerequisites used by runtime preparation and may pull only the exact official fixture digest:
 
 ```text
 busybox@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
@@ -15,15 +15,27 @@ busybox@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
 Do not replace the digest with a mutable tag for a judged run.
 
 ```bash
-export DOCKER_HOST="unix:///run/user/$(id -u)/docker.sock"
-export MIRAGE_DEMO_IMAGE='busybox@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0'
-go build -o ./bin/mirage ./cmd/mirage
+./scripts/install.sh
+mirage setup
+mirage doctor
 ```
+
+Windows PowerShell uses a native frontend and the same Linux security runtime through WSL2:
+
+```powershell
+.\scripts\install.ps1 -Distribution Ubuntu
+mirage setup
+mirage doctor
+```
+
+The installer does not install WSL, Docker, or alter daemon/sudo configuration. The runtime workspace remains in the Linux filesystem. Windows-friendly output is written below `%LOCALAPPDATA%\Mirage\runs`.
+
+`mirage run --json` (or `--format json`) emits the stable `mirage.run/v1` summary consumed by the Windows frontend. `mirage version --json` carries bridge protocol version 1; a Windows frontend refuses to run a mismatched Linux backend. Use `--output-dir <absolute-path>` to choose a different evidence root.
 
 ## Malicious scenario
 
 ```bash
-./bin/mirage demo malicious
+mirage run --open
 ```
 
 Expected terminal accounting:
@@ -35,7 +47,7 @@ Agent attempted 4 effects. MIRAGE authorized 1, denied 3, and committed 1.
 Copy the printed `receipt_file`, `observatory`, and `real_workspace` paths. Check the receipt immediately:
 
 ```bash
-./bin/mirage receipt verify <receipt_file>
+mirage verify <receipt_file>
 ```
 
 The verified real workspace must contain the original protected `.env` and the committed `README.md`, with no other entry. Do not print the `.env` contents during a presentation.
@@ -43,7 +55,7 @@ The verified real workspace must contain the original protected `.env` and the c
 ## Benign scenario
 
 ```bash
-./bin/mirage demo benign
+mirage run benign
 ```
 
 Expected terminal accounting:

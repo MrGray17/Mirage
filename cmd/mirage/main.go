@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/MrGray17/Mirage/internal/cliapi"
 	"github.com/MrGray17/Mirage/internal/contracts"
 	"github.com/MrGray17/Mirage/internal/demo"
 	"github.com/MrGray17/Mirage/internal/effectgraph"
@@ -35,19 +37,25 @@ const (
 )
 
 func main() {
-	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
+	if err := runEntrypoint(os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintf(os.Stderr, "mirage: %v\n", err)
 		os.Exit(1)
 	}
 }
 
 func run(args []string, stdout, stderr io.Writer) error {
-	if len(args) < 2 {
-		return usageError()
+	if len(args) == 0 {
+		printHelp(stdout)
+		return nil
 	}
 	switch args[0] {
 	case "run":
+		if len(args) == 1 || strings.HasPrefix(args[1], "-") {
+			return runPublicDemo(demo.ScenarioMalicious, args[1:], stdout, stderr)
+		}
 		switch args[1] {
+		case demo.ScenarioMalicious, demo.ScenarioBenign:
+			return runPublicDemo(args[1], args[2:], stdout, stderr)
 		case "hostile-fixture":
 			return runHostileFixture(args[2:], stdout, stderr)
 		case "agent":
@@ -56,38 +64,82 @@ func run(args []string, stdout, stderr io.Writer) error {
 			return usageError()
 		}
 	case "demo":
+		if len(args) < 2 {
+			return usageError()
+		}
 		return runDemo(args[1], args[2:], stdout, stderr)
+	case "verify":
+		return runReceiptVerify(args[1:], stdout, stderr)
 	case "receipt":
+		if len(args) < 2 {
+			return usageError()
+		}
 		if args[1] != "verify" {
 			return usageError()
 		}
 		return runReceiptVerify(args[2:], stdout, stderr)
 	case "observatory":
 		return runObservatory(args[1:], stdout, stderr)
+	case "doctor":
+		return runDoctor(args[1:], stdout, stderr)
+	case "setup":
+		return runSetup(args[1:], stdout, stderr)
+	case "version":
+		return runVersion(args[1:], stdout, stderr)
+	case "help", "--help", "-h":
+		printHelp(stdout)
+		return nil
 	default:
 		return usageError()
 	}
 }
 
 func usageError() error {
-	return errors.New("usage: mirage demo malicious|benign [options] | mirage receipt verify <file> | mirage observatory --out FILE <receipt> | mirage run hostile-fixture ... | mirage run agent --image <agent@sha256:digest> --helper-image <helper@sha256:digest> --allow /workspace/FILE [options] -- /absolute/agent command...")
+	return errors.New("usage: mirage run [malicious|benign] [options]; try 'mirage help'")
 }
 
 func runDemo(scenario string, args []string, stdout, stderr io.Writer) error {
+	return runDemoMode(scenario, args, stdout, stderr, false)
+}
+
+func runPublicDemo(scenario string, args []string, stdout, stderr io.Writer) error {
+	return runDemoMode(scenario, args, stdout, stderr, true)
+}
+
+func officialDemoImages() (string, string) {
+	return demo.OfficialImage, demo.OfficialImage
+}
+
+func runDemoMode(scenario string, args []string, stdout, stderr io.Writer, official bool) error {
 	flags := flag.NewFlagSet("demo "+scenario, flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	imageDefault := strings.TrimSpace(os.Getenv("MIRAGE_DEMO_IMAGE"))
-	if imageDefault == "" {
-		imageDefault = strings.TrimSpace(os.Getenv("MIRAGE_HOSTILE_IMAGE"))
+	imageDefault, helperDefault := "", strings.TrimSpace(os.Getenv("MIRAGE_HELPER_IMAGE"))
+	if official {
+		imageDefault, helperDefault = officialDemoImages()
+	} else {
+		imageDefault = strings.TrimSpace(os.Getenv("MIRAGE_DEMO_IMAGE"))
+		if imageDefault == "" {
+			imageDefault = strings.TrimSpace(os.Getenv("MIRAGE_HOSTILE_IMAGE"))
+		}
+		if imageDefault == "" {
+			imageDefault = demo.OfficialImage
+		}
 	}
 	image := flags.String("image", imageDefault, "preloaded digest-pinned image containing /bin/sh and wget")
-	helperImage := flags.String("helper-image", strings.TrimSpace(os.Getenv("MIRAGE_HELPER_IMAGE")), "preloaded digest-pinned helper image; defaults to --image")
+	helperImage := flags.String("helper-image", helperDefault, "preloaded digest-pinned helper image; defaults to --image")
 	realWorkspace := flags.String("workspace", "", "explicit trusted demo workspace; omitted creates a visible isolated demo workspace")
 	evidenceOut := flags.String("evidence-out", "", "new receipt path; defaults beside the generated demo workspace")
 	observatoryOut := flags.String("observatory-out", "", "new static Observatory path; defaults beside the receipt")
+	outputDir := flags.String("output-dir", "", "directory for a new per-run evidence directory")
+	format := flags.String("format", "text", "output format: text or json")
+	jsonOutput := flags.Bool("json", false, "emit the versioned run summary as JSON")
+	open := flags.Bool("open", false, "open the verified Observatory after the run")
 	timeout := flags.Duration("timeout", 15*time.Second, "maximum fixture execution time")
 	quota := flags.Int64("workspace-quota-bytes", 64<<20, "hard writable disposable-workspace capacity")
 	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 	if flags.NArg() != 0 {
@@ -96,8 +148,28 @@ func runDemo(scenario string, args []string, stdout, stderr io.Writer) error {
 	if scenario != demo.ScenarioMalicious && scenario != demo.ScenarioBenign {
 		return usageError()
 	}
-	if strings.TrimSpace(*image) == "" {
-		return errors.New("--image or MIRAGE_DEMO_IMAGE is required and must be digest-pinned")
+	if official {
+		var forbidden string
+		flags.Visit(func(value *flag.Flag) {
+			if value.Name == "image" || value.Name == "helper-image" {
+				forbidden = value.Name
+			}
+		})
+		if forbidden != "" {
+			return fmt.Errorf("--%s cannot override the official image; use 'mirage demo' for advanced image selection", forbidden)
+		}
+	}
+	if *jsonOutput {
+		if *format != "text" && *format != "json" {
+			return errors.New("--json cannot be combined with an invalid --format")
+		}
+		*format = "json"
+	}
+	if *format != "text" && *format != "json" {
+		return errors.New("--format must be text or json")
+	}
+	if strings.TrimSpace(*outputDir) != "" && (strings.TrimSpace(*evidenceOut) != "" || strings.TrimSpace(*observatoryOut) != "") {
+		return errors.New("--output-dir cannot be combined with --evidence-out or --observatory-out")
 	}
 	if strings.TrimSpace(*helperImage) == "" {
 		*helperImage = *image
@@ -132,8 +204,18 @@ func runDemo(scenario string, args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	outputPath := strings.TrimSpace(*evidenceOut)
-	if outputPath == "" {
-		outputPath = filepath.Join(filepath.Dir(result.RealWorkspace), result.RunID+".receipt.json")
+	if strings.TrimSpace(*outputDir) != "" {
+		outputPath = filepath.Join(*outputDir, result.RunID, "receipt.json")
+	} else if outputPath == "" {
+		if official {
+			cache, cacheErr := os.UserCacheDir()
+			if cacheErr != nil {
+				return fmt.Errorf("locate evidence output root: %w", cacheErr)
+			}
+			outputPath = filepath.Join(cache, "mirage", "runs", result.RunID, "receipt.json")
+		} else {
+			outputPath = filepath.Join(filepath.Dir(result.RealWorkspace), result.RunID+".receipt.json")
+		}
 	}
 	outputPath, err = filepath.Abs(outputPath)
 	if err != nil {
@@ -142,7 +224,15 @@ func runDemo(scenario string, args []string, stdout, stderr io.Writer) error {
 	if err := writeNewEvidence(outputPath, encoded); err != nil {
 		return err
 	}
-	page, err := observatory.Render(executionReceipt)
+	persisted, err := readBoundedRegular(outputPath, 4<<20)
+	if err != nil {
+		return fmt.Errorf("read persisted receipt: %w", err)
+	}
+	verifiedReceipt, err := receipt.ParseAndVerify(persisted)
+	if err != nil {
+		return fmt.Errorf("verify persisted receipt: %w", err)
+	}
+	page, err := observatory.Render(verifiedReceipt)
 	if err != nil {
 		return err
 	}
@@ -157,8 +247,44 @@ func runDemo(scenario string, args []string, stdout, stderr io.Writer) error {
 	if err := writeNewEvidence(pagePath, page); err != nil {
 		return err
 	}
-	emitDemoResult(stdout, result, graph.Hash, executionReceipt.SHA256, outputPath, pagePath)
+	summary := newRunSummary(result, graph.Hash, verifiedReceipt.SHA256, outputPath, pagePath)
+	if *format == "json" {
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(summary); err != nil {
+			return fmt.Errorf("write run summary: %w", err)
+		}
+	} else {
+		emitDemoResult(stdout, result, graph.Hash, verifiedReceipt.SHA256, outputPath, pagePath)
+		fmt.Fprintln(stdout, "receipt_status=VALID")
+	}
+	if *open {
+		openObservatory(pagePath, stderr)
+	}
 	return nil
+}
+
+func newRunSummary(result demo.Result, graphHash, receiptHash, receiptPath, observatoryPath string) cliapi.RunSummary {
+	authorized, denied := 0, 0
+	for _, attempt := range result.Attempts {
+		switch attempt.Disposition {
+		case "AUTHORIZED":
+			authorized++
+		case "DENIED":
+			denied++
+		}
+	}
+	committed := 0
+	if result.Committed {
+		committed = len(result.Mutations)
+	}
+	return cliapi.RunSummary{
+		Schema: cliapi.RunSchemaV1, RunID: result.RunID, Scenario: result.Scenario,
+		Attempted: len(result.Attempts), Authorized: authorized, Denied: denied, Committed: committed,
+		Verification: result.Verification, ReceiptValid: true, GraphHash: graphHash, ReceiptHash: receiptHash,
+		ReceiptPath: receiptPath, ObservatoryPath: observatoryPath, WorkspacePath: result.RealWorkspace,
+		CleanupComplete: result.DisposableCleaned && result.SandboxArtifactsClean,
+	}
 }
 
 func emitDemoResult(writer io.Writer, result demo.Result, graphHash, receiptHash, receiptPath, observatoryPath string) {

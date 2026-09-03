@@ -80,6 +80,26 @@ func TestPrepareRequiresRootlessLinuxSeccompDaemon(t *testing.T) {
 	}
 }
 
+func TestSharedEnvironmentCheckReturnsRuntimeFacts(t *testing.T) {
+	runner := &fakeRunner{responses: []fakeResponse{
+		{output: []byte("rootless\n")},
+		{output: []byte(`"unix:///run/user/1000/docker.sock"`)},
+		{output: mustJSON(t, secureDaemonInfo())},
+	}}
+	report, err := checkEnvironment(context.Background(), "linux", "docker", runner, func() ([]string, error) {
+		return []string{"cpu", "memory", "pids"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Rootless || !report.Seccomp || report.CgroupVersion != "2" || report.CgroupDriver != "systemd" || report.DockerEndpoint != "unix:///run/user/1000/docker.sock" {
+		t.Fatalf("report=%#v", report)
+	}
+	if len(runner.calls) != 3 {
+		t.Fatalf("calls=%v", runner.calls)
+	}
+}
+
 func TestPrepareRequiresEnforcedRootlessCgroupControllers(t *testing.T) {
 	tests := []struct {
 		name       string
