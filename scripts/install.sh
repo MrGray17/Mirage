@@ -10,9 +10,20 @@ if ! command -v go >/dev/null 2>&1; then
   echo "MIRAGE requires Go 1.24 or newer to install from source." >&2
   exit 1
 fi
+if ! command -v git >/dev/null 2>&1; then
+  echo "MIRAGE requires Git to establish its source commit identity; nothing was installed." >&2
+  exit 1
+fi
+if ! commit="$(git -C "$repo_root" rev-parse --verify HEAD 2>/dev/null)"; then
+  echo "MIRAGE could not establish its source commit identity; nothing was installed." >&2
+  exit 1
+fi
+if [[ ! "$commit" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "MIRAGE source commit identity is not a canonical SHA-1; nothing was installed." >&2
+  exit 1
+fi
 
 version="${MIRAGE_VERSION:-0.1.0}"
-commit="$(git -C "$repo_root" rev-parse --verify HEAD 2>/dev/null || printf unknown)"
 mkdir -p -- "$install_root"
 go -C "$repo_root" build \
   -ldflags "-X github.com/MrGray17/Mirage/internal/buildinfo.Version=$version -X github.com/MrGray17/Mirage/internal/buildinfo.Commit=$commit" \

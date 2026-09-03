@@ -25,6 +25,17 @@ try {
     if (-not (Get-Command go.exe -ErrorAction SilentlyContinue)) {
         throw "Go 1.24 or newer is required to install MIRAGE from source."
     }
+    if (-not (Get-Command git.exe -ErrorAction SilentlyContinue)) {
+        throw "Git is required to establish MIRAGE's source commit identity. No installed files were changed."
+    }
+    $observedCommit = @(& git.exe -C $repoRoot rev-parse --verify HEAD 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $observedCommit.Count -ne 1) {
+        throw "Could not establish MIRAGE's source commit identity. No installed files were changed."
+    }
+    $commit = $observedCommit[0].Trim()
+    if ($commit -cnotmatch '^[0-9a-f]{40}$') {
+        throw "MIRAGE source commit identity is not a canonical SHA-1. No installed files were changed."
+    }
     if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
         throw "WSL2 is required. Install it explicitly, then rerun this installer."
     }
@@ -34,11 +45,6 @@ try {
     }
 
     New-Item -ItemType Directory -Force -Path $temporaryRoot, $windowsBin | Out-Null
-    $commit = "unknown"
-    if (Get-Command git.exe -ErrorAction SilentlyContinue) {
-        $observedCommit = (& git.exe -C $repoRoot rev-parse --verify HEAD 2>$null)
-        if ($observedCommit) { $commit = $observedCommit.Trim() }
-    }
     $ldflags = "-X github.com/MrGray17/Mirage/internal/buildinfo.Version=$Version -X github.com/MrGray17/Mirage/internal/buildinfo.Commit=$commit"
 
     & go.exe -C $repoRoot build -ldflags $ldflags -o $temporaryWindows ./cmd/mirage

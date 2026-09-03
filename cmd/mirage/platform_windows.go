@@ -122,6 +122,12 @@ func parseBackendInfo(encoded []byte) (buildinfo.Info, error) {
 }
 
 func validateBackendInfo(backend buildinfo.Info) error {
+	if !buildinfo.IsCanonicalCommit(buildinfo.Commit) {
+		return errors.New("MIRAGE frontend build identity is invalid; reinstall MIRAGE from a Git checkout")
+	}
+	if !buildinfo.IsCanonicalCommit(backend.Commit) {
+		return errors.New("MIRAGE backend build identity is invalid or out of date; reinstall MIRAGE")
+	}
 	if backend.Platform != "linux" || backend.BridgeProtocol != buildinfo.BridgeProtocol ||
 		backend.Version != buildinfo.Version || backend.Commit != buildinfo.Commit {
 		return fmt.Errorf(

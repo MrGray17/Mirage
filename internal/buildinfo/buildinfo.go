@@ -1,7 +1,10 @@
 // Package buildinfo exposes the small, stable frontend/backend handshake.
 package buildinfo
 
-import "runtime"
+import (
+	"regexp"
+	"runtime"
+)
 
 const BridgeProtocol = 1
 
@@ -10,6 +13,8 @@ var (
 	Version = "0.1.0-dev"
 	Commit  = "unknown"
 )
+
+var canonicalCommitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 type Info struct {
 	Version        string `json:"version"`
@@ -25,4 +30,10 @@ func Current() Info {
 		BridgeProtocol: BridgeProtocol,
 		Platform:       runtime.GOOS,
 	}
+}
+
+// IsCanonicalCommit reports whether value is the concrete full SHA-1 commit
+// identity required by the current source installers and WSL bridge.
+func IsCanonicalCommit(value string) bool {
+	return canonicalCommitPattern.MatchString(value)
 }

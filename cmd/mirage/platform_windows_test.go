@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -15,6 +16,11 @@ import (
 )
 
 func TestWindowsBackendProtocolMismatchFailsClosed(t *testing.T) {
+	const currentCommit = "0123456789abcdef0123456789abcdef01234567"
+	originalCommit := buildinfo.Commit
+	buildinfo.Commit = currentCommit
+	t.Cleanup(func() { buildinfo.Commit = originalCommit })
+
 	valid := buildinfo.Info{Platform: "linux", Version: buildinfo.Version, Commit: buildinfo.Commit, BridgeProtocol: buildinfo.BridgeProtocol}
 	if err := validateBackendInfo(valid); err != nil {
 		t.Fatalf("valid backend: %v", err)
@@ -28,6 +34,42 @@ func TestWindowsBackendProtocolMismatchFailsClosed(t *testing.T) {
 		if err := validateBackendInfo(info); err == nil || !strings.Contains(err.Error(), "out of date") {
 			t.Fatalf("backend %#v error=%v", info, err)
 		}
+	}
+}
+
+func TestWindowsBackendRequiresConcreteMatchingCommitIdentity(t *testing.T) {
+	const currentCommit = "0123456789abcdef0123456789abcdef01234567"
+	const otherCommit = "1123456789abcdef0123456789abcdef01234567"
+	originalCommit := buildinfo.Commit
+	t.Cleanup(func() { buildinfo.Commit = originalCommit })
+
+	tests := []struct {
+		name     string
+		frontend string
+		backend  string
+	}{
+		{"matching unknown", "unknown", "unknown"},
+		{"matching empty", "", ""},
+		{"unknown frontend", "unknown", currentCommit},
+		{"unknown backend", currentCommit, "unknown"},
+		{"different canonical commit", currentCommit, otherCommit},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			buildinfo.Commit = test.frontend
+			backend := buildinfo.Info{
+				Platform: "linux", Version: buildinfo.Version, Commit: test.backend, BridgeProtocol: buildinfo.BridgeProtocol,
+			}
+			if err := validateBackendInfo(backend); err == nil {
+				t.Fatal("invalid bridge identity accepted")
+			}
+		})
+	}
+
+	buildinfo.Commit = currentCommit
+	backend := buildinfo.Info{Platform: "linux", Version: buildinfo.Version, Commit: currentCommit, BridgeProtocol: buildinfo.BridgeProtocol}
+	if err := validateBackendInfo(backend); err != nil {
+		t.Fatalf("matching canonical identity rejected: %v", err)
 	}
 }
 
@@ -117,4 +159,86 @@ func TestWindowsPublicRunAddsTranslatedOutputAndJSONWithoutShellParsing(t *testi
 	if !reflect.DeepEqual(got, want) || !jsonOutput || !open || windowsPath != `C:\Evidence Folder` {
 		t.Fatalf("args=%#v json=%t open=%t path=%q", got, jsonOutput, open, windowsPath)
 	}
+}
+
+func TestPowerShellInstallerMissingGitChangesNothing(t *testing.T) {
+	powerShell, err := exec.LookPath("powershell.exe")
+	if err != nil {
+		t.Skip("PowerShell is unavailable")
+	}
+	goBinary, err := exec.LookPath("go.exe")
+	if err != nil {
+		t.Skip("Go is unavailable")
+	}
+	repository, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(repository, "scripts", "install.ps1")
+	root := t.TempDir()
+	localAppData := filepath.Join(root, "localapp")
+	installRoot := filepath.Join(localAppData, "Mirage")
+	bin := filepath.Join(installRoot, "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	frontendPath := filepath.Join(bin, "mirage.exe")
+	configPath := filepath.Join(installRoot, "config.json")
+	frontendBefore := []byte("existing frontend bytes")
+	configBefore := []byte(`{"existing":true}`)
+	if err := os.WriteFile(frontendPath, frontendBefore, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, configBefore, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	userPathBefore := windowsUserPath(t, powerShell)
+
+	command := exec.Command(powerShell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script)
+	command.Env = installerTestEnvironment(os.Environ(), localAppData, filepath.Dir(goBinary), root)
+	output, runErr := command.CombinedOutput()
+	if runErr == nil || !strings.Contains(string(output), "Git is required") {
+		t.Fatalf("installer error=%v output=%q", runErr, output)
+	}
+	frontendAfter, err := os.ReadFile(frontendPath)
+	if err != nil || !reflect.DeepEqual(frontendAfter, frontendBefore) {
+		t.Fatalf("frontend changed: contents=%q error=%v", frontendAfter, err)
+	}
+	configAfter, err := os.ReadFile(configPath)
+	if err != nil || !reflect.DeepEqual(configAfter, configBefore) {
+		t.Fatalf("config changed: contents=%q error=%v", configAfter, err)
+	}
+	if got := windowsUserPath(t, powerShell); got != userPathBefore {
+		t.Fatal("installer changed user PATH before establishing Git identity")
+	}
+}
+
+func installerTestEnvironment(environment []string, localAppData, goDirectory, temporary string) []string {
+	result := make([]string, 0, len(environment)+4)
+	for _, entry := range environment {
+		name, _, _ := strings.Cut(entry, "=")
+		switch strings.ToUpper(name) {
+		case "PATH", "LOCALAPPDATA", "TEMP", "TMP":
+			continue
+		}
+		result = append(result, entry)
+	}
+	return append(result,
+		"PATH="+goDirectory,
+		"LOCALAPPDATA="+localAppData,
+		"TEMP="+temporary,
+		"TMP="+temporary,
+	)
+}
+
+func windowsUserPath(t *testing.T, powerShell string) string {
+	t.Helper()
+	output, err := exec.Command(
+		powerShell, "-NoProfile", "-NonInteractive", "-Command",
+		`[Environment]::GetEnvironmentVariable("Path", "User")`,
+	).Output()
+	if err != nil {
+		t.Fatalf("read user PATH: %v", err)
+	}
+	return strings.TrimSpace(string(output))
 }
