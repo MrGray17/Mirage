@@ -31,6 +31,8 @@ type committedEffectView struct {
 	Observed       receipt.Mutation
 	Committed      receipt.Mutation
 	RealityDisplay string
+	BeforeShort    string
+	AfterShort     string
 }
 
 type proofView struct {
@@ -44,6 +46,8 @@ type proofView struct {
 	VerificationPlan string
 	CommitPlan       string
 	CommitOID        string
+	BeforeDigest     string
+	AfterDigest      string
 }
 
 type pageData struct {
@@ -127,7 +131,7 @@ func buildPageData(evidence *receipt.Receipt) (pageData, error) {
 			if effectgraph.CompetitionV1AuthorizesMutation(
 				attempted.Operation, attempted.Resource, committed.Operation, committed.Resource,
 			) {
-				state, class = "COMMITTED", "committed"
+				state, class = "AUTHORIZED", "selected"
 				committedIndex = index
 				authority = attempted
 			}
@@ -135,7 +139,7 @@ func buildPageData(evidence *receipt.Receipt) (pageData, error) {
 		data.Effects = append(data.Effects, effectRow{
 			Index: index + 1, Number: fmt.Sprintf("%02d", index+1), Operation: attempted.Operation,
 			Resource: attempted.Resource, EnforcedBy: attempted.EnforcedBy, State: state,
-			StateClass: class, IsCommitted: state == "COMMITTED",
+			StateClass: class, IsCommitted: class == "selected",
 		})
 	}
 	if committedIndex < 0 {
@@ -145,7 +149,11 @@ func buildPageData(evidence *receipt.Receipt) (pageData, error) {
 		Index: committedIndex + 1, Number: fmt.Sprintf("%02d", committedIndex+1),
 		Authorized: authority, Observed: observed, Committed: committed,
 		RealityDisplay: displayResource(committed.Resource),
+		BeforeShort:    shortDigest(committed.BeforeDigest),
+		AfterShort:     shortDigest(committed.AfterDigest),
 	}
+	data.Proof.BeforeDigest = committed.BeforeDigest
+	data.Proof.AfterDigest = committed.AfterDigest
 	return data, nil
 }
 
@@ -174,6 +182,20 @@ func shortIdentity(value string) string {
 	return trimmed[:visible] + "..." + trimmed[len(trimmed)-visible:]
 }
 
+func shortDigest(value string) string {
+	const visible = 8
+	prefix := ""
+	digest := value
+	if strings.HasPrefix(value, "sha256:") {
+		prefix = "sha256:"
+		digest = strings.TrimPrefix(value, prefix)
+	}
+	if len(digest) <= visible*2+1 {
+		return value
+	}
+	return prefix + digest[:visible] + "…" + digest[len(digest)-visible:]
+}
+
 func formatDuration(value time.Duration) string {
 	if value < time.Millisecond {
 		return value.String()
@@ -195,11 +217,11 @@ const pageTemplate = `<!doctype html>
       --surface: #ffffff;
       --ink: #171716;
       --muted: #6b6964;
-      --quiet: #89857d;
+      --quiet: #827f78;
       --border: #e5e1d8;
-      --border-strong: #d4cec2;
-      --orange: #f56522;
-      --orange-soft: #fff5ee;
+      --border-strong: #dedad2;
+      --orange: #f45b20;
+      --orange-soft: #fff3ec;
       --green: #18794e;
       --green-soft: #edf7f1;
       --red: #c83a2e;
@@ -219,20 +241,20 @@ const pageTemplate = `<!doctype html>
     }
     code { font-family: var(--mono); }
     .shell {
-      width: min(1240px, 100%);
+      width: min(1360px, 100%);
       min-height: 100vh;
       margin: 0 auto;
       padding: 0 32px 24px;
     }
     .topbar {
-      min-height: 62px;
+      min-height: 54px;
       border-bottom: 1px solid var(--border);
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 24px;
+      gap: 20px;
     }
-    .brand { display: flex; align-items: baseline; gap: 12px; min-width: 0; }
+    .brand { display: flex; align-items: baseline; gap: 9px; min-width: 0; }
     .brand h1 { margin: 0; color: var(--orange); font-size: 16px; line-height: 1; font-weight: 760; letter-spacing: .18em; }
     .brand span { color: var(--muted); font-size: 13px; }
     .run-state { display: flex; align-items: center; gap: 18px; min-width: 0; }
@@ -250,85 +272,120 @@ const pageTemplate = `<!doctype html>
 	  background: var(--green-soft);
 	  vertical-align: 0;
 	}
-    .task-strip { padding: 22px 0 20px; border-bottom: 1px solid var(--border); }
-    .eyebrow { margin: 0 0 6px; color: var(--muted); font-size: 11px; font-weight: 720; letter-spacing: .11em; text-transform: uppercase; }
-    .task-strip h2 { max-width: 900px; margin: 0; font-size: clamp(17px, 2vw, 23px); line-height: 1.3; font-weight: 610; letter-spacing: -.018em; }
-    .summary { margin: 11px 0 0; color: var(--muted); font-size: 13px; }
+    .task-strip { padding: 14px 0 16px; border-bottom: 1px solid var(--border); }
+    .eyebrow { margin: 0 0 4px; color: var(--muted); font-size: 11px; font-weight: 720; letter-spacing: .11em; text-transform: uppercase; }
+    .task-strip h2 { max-width: 980px; margin: 0; font-size: clamp(21px, 2.1vw, 27px); line-height: 1.24; font-weight: 620; letter-spacing: -.02em; }
+    .summary { margin: 7px 0 0; color: var(--muted); font-size: 13px; }
     .summary strong { color: var(--ink); font-weight: 680; }
     .summary .blocked { color: var(--red); }
     .summary .committed { color: var(--green); }
-    .workbench { display: grid; grid-template-columns: minmax(0, 3fr) minmax(340px, 2fr); gap: 32px; padding: 26px 0 28px; }
-    .section-heading { margin-bottom: 13px; display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+    .workbench { display: grid; grid-template-columns: minmax(0, 3fr) minmax(360px, 2fr); gap: 28px; padding: 20px 0 22px; }
+    .section-heading { margin-bottom: 9px; }
     .section-heading h2 { margin: 0; font-size: 13px; font-weight: 760; letter-spacing: .09em; text-transform: uppercase; }
-    .section-heading span { color: var(--muted); font-size: 12px; }
     .effect-list { margin: 0; padding: 0; border-top: 1px solid var(--border); list-style: none; }
     .effect-row {
 	  position: relative;
 	  min-width: 0;
-	  padding: 13px 12px 12px;
-	  border-bottom: 1px solid var(--border);
+	  min-height: 48px;
+	  padding: 8px 10px 7px 0;
 	  display: grid;
-	  grid-template-columns: 38px 72px minmax(0, 1fr) auto;
-	  column-gap: 10px;
+	  grid-template-columns: 32px 34px 74px minmax(0, 1fr) 104px;
+	  column-gap: 8px;
 	  align-items: baseline;
 	}
-    .effect-row.committed { background: var(--orange-soft); }
-    .effect-row.committed::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--orange); }
-    .effect-index { color: var(--quiet); font: 11px/1.4 var(--mono); }
-    .effect-operation { color: var(--ink); font: 700 12px/1.4 var(--mono); letter-spacing: .04em; }
-    .effect-resource { min-width: 0; color: var(--ink); font: 12px/1.45 var(--mono); overflow-wrap: anywhere; }
-    .effect-state { font-size: 11px; font-weight: 760; letter-spacing: .06em; }
+    .effect-row.selected { background: var(--orange-soft); }
+    .effect-row.selected::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 2px; background: var(--orange); }
+    .history-rail { grid-column: 1; grid-row: 1 / 3; position: relative; align-self: stretch; min-height: 34px; }
+    .history-rail::before { content: ""; position: absolute; top: -8px; bottom: -7px; left: 11px; border-left: 2px solid #c9c5bc; }
+    .effect-row.blocked .history-rail::after { content: ""; position: absolute; top: 10px; left: 11px; width: 14px; border-top: 1px solid var(--red); }
+    .history-node { position: absolute; z-index: 1; }
+    .effect-row.blocked .history-node { top: 2px; left: 23px; color: var(--red); font: 700 14px/1 var(--sans); }
+    .effect-row.blocked .history-node::before { content: "×"; }
+    .effect-row.selected .history-node { top: 6px; left: 7px; width: 10px; height: 10px; border: 2px solid var(--orange); border-radius: 50%; background: var(--surface); }
+    .effect-index { grid-column: 2; color: var(--quiet); font: 11px/1.4 var(--mono); }
+    .effect-operation { grid-column: 3; color: var(--ink); font: 700 13px/1.4 var(--mono); letter-spacing: .035em; }
+    .effect-resource { grid-column: 4; min-width: 0; color: var(--ink); font: 13px/1.4 var(--mono); overflow-wrap: anywhere; word-break: break-word; }
+    .effect-state { grid-column: 5; font-size: 12px; font-weight: 760; letter-spacing: .05em; text-align: right; }
     .effect-row.blocked .effect-state { color: var(--red); }
     .effect-row.authorized .effect-state { color: var(--orange); }
-    .effect-row.committed .effect-state { color: var(--green); }
-    .effect-enforcement { grid-column: 3 / 5; min-width: 0; margin-top: 4px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+    .effect-row.selected .effect-state { color: var(--orange); }
+    .effect-enforcement { grid-column: 4 / 6; min-width: 0; margin-top: 2px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
     .effect-enforcement code { font-size: 11px; }
+    .history-continuation { border-bottom: 1px solid var(--border); }
+    .history-stage {
+      min-height: 31px;
+      padding-right: 10px;
+      display: grid;
+      grid-template-columns: 32px 34px 74px minmax(0, 1fr) 104px;
+      column-gap: 8px;
+      align-items: center;
+    }
+    .history-stage .history-rail { grid-row: 1; min-height: 31px; }
+    .history-stage .history-rail::before { top: 0; bottom: 0; }
+    .history-stage .history-node { top: 10px; left: 8px; width: 8px; height: 8px; border: 1.5px solid #8c8880; border-radius: 50%; background: var(--canvas); }
+    .history-stage.verified .history-node,
+    .history-stage.committed .history-node { border-color: var(--green); background: var(--green-soft); }
+    .history-stage.reality-stage .history-node { top: 10px; left: 8px; width: 8px; height: 8px; border: 1.5px solid var(--green); background: var(--green-soft); transform: rotate(45deg); }
+    .history-stage.reality-stage .history-rail::before { bottom: 16px; }
+    .history-stage-label { grid-column: 3; color: var(--muted); font-size: 11px; font-weight: 720; letter-spacing: .07em; text-transform: uppercase; }
+    .history-stage-value { grid-column: 4 / 6; min-width: 0; color: var(--ink); font-size: 12px; font-weight: 650; }
+    .history-stage-value code { margin-left: 7px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+    .history-stage.verified .history-stage-value,
+    .history-stage.committed .history-stage-value,
+    .history-stage.reality-stage .history-stage-value { color: var(--green); }
+    .history-boundary { min-height: 29px; display: grid; grid-template-columns: 32px minmax(0, 1fr); align-items: center; }
+    .history-boundary .history-rail { grid-row: 1; min-height: 29px; }
+    .history-boundary .history-rail::before { top: 0; bottom: 0; }
+    .history-boundary-line { grid-column: 2; position: relative; border-top: 1px solid var(--border-strong); text-align: center; }
+    .history-boundary-line span { position: relative; top: -8px; padding: 0 9px; background: var(--canvas); color: var(--muted); font-size: 10px; font-weight: 720; letter-spacing: .1em; text-transform: uppercase; }
     .inspector {
 	  min-width: 0;
-	  padding: 20px 22px 21px;
+	  padding: 18px 20px;
 	  border: 1px solid var(--border-strong);
-	  border-radius: 10px;
+	  border-radius: 8px;
 	  background: var(--surface);
 	}
-    .inspector-heading { margin-bottom: 18px; padding-bottom: 17px; border-bottom: 1px solid var(--border); }
-    .inspector-heading .eyebrow { color: var(--orange); }
-    .inspector-heading h2 { margin: 0; font-size: 20px; line-height: 1.25; font-weight: 700; }
-    .inspector-heading code { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
-    .causal-step { display: grid; grid-template-columns: 94px minmax(0, 1fr); gap: 12px; align-items: start; }
-    .step-label { color: var(--muted); font-size: 10px; font-weight: 740; letter-spacing: .09em; text-transform: uppercase; }
+    .inspector-heading { margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+    .inspector-heading .eyebrow { color: #b9562d; font-size: 10px; }
+    .inspector-heading h2 { margin: 0; font-size: 22px; line-height: 1.2; font-weight: 720; }
+    .inspector-heading code { display: block; margin-top: 2px; color: var(--ink); font-size: 13px; overflow-wrap: anywhere; }
+    .causal-step { display: grid; grid-template-columns: 104px minmax(0, 1fr); gap: 10px; align-items: start; }
+    .causal-step + .causal-step { margin-top: 10px; }
+    .step-label { color: var(--muted); font-size: 11px; font-weight: 720; letter-spacing: .075em; text-transform: uppercase; }
     .step-value { min-width: 0; }
-    .step-value strong { display: block; font-size: 13px; font-weight: 680; }
-    .step-value code { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+    .step-value strong { display: block; font-size: 13px; font-weight: 690; }
+    .step-value code { display: block; margin-top: 1px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
     .step-value .verified, .step-value .committed-label { color: var(--green); }
-    .causal-arrow { height: 17px; margin-left: 101px; color: var(--quiet); font-size: 13px; line-height: 17px; }
-    .trust-boundary { position: relative; margin: 15px 0 16px; border-top: 1px solid var(--border-strong); text-align: center; }
-    .trust-boundary span { position: relative; top: -9px; padding: 0 9px; background: var(--surface); color: var(--muted); font-size: 10px; font-weight: 740; letter-spacing: .11em; text-transform: uppercase; }
-    .reality { margin-top: 17px; padding-top: 15px; border-top: 1px solid var(--border); }
-    .reality h3 { margin: 0 0 3px; color: var(--green); font-size: 10px; font-weight: 760; letter-spacing: .1em; text-transform: uppercase; }
-    .reality p { margin: 0; font-size: 15px; font-weight: 650; }
-    .reality p code { font-size: 13px; }
-    .digests { margin: 11px 0 0; display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 5px 10px; }
+    .reality { margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--border); }
+    .reality h3 { margin: 0 0 2px; color: var(--green); font-size: 11px; font-weight: 760; letter-spacing: .09em; text-transform: uppercase; }
+    .reality p { margin: 0; font-size: 17px; font-weight: 680; }
+    .reality p code { color: var(--ink); font-size: 16px; }
+    .digests { margin: 8px 0 0; display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 3px 10px; }
     .digests dt { color: var(--muted); font-size: 11px; }
     .digests dd { min-width: 0; margin: 0; }
-    .digests code { color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
+    .digests code { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
     .proof-footer { border-top: 1px solid var(--border-strong); }
-    .proof-status { min-height: 56px; display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+    .proof-status { min-height: 50px; display: flex; align-items: center; justify-content: space-between; gap: 24px; }
     .invariant { margin: 0; color: var(--ink); font-size: 13px; }
     .invariant::before { content: "✓"; margin-right: 8px; color: var(--green); font-weight: 800; }
     .receipt-status { color: var(--muted); font-size: 12px; }
     .receipt-status strong { margin-left: 7px; color: var(--green); font-size: 11px; letter-spacing: .08em; }
     details { border-top: 1px solid var(--border); }
-    summary { width: fit-content; padding: 13px 0; color: var(--ink); cursor: pointer; font-size: 12px; font-weight: 650; }
+    summary { width: fit-content; padding: 12px 0; color: var(--ink); cursor: pointer; font-size: 14px; font-weight: 650; }
     summary::marker { color: var(--orange); }
     summary:focus-visible { outline: 2px solid var(--orange); outline-offset: 4px; border-radius: 2px; }
-    .proof-grid { margin: 0; padding: 4px 0 18px; display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 7px 18px; }
+    .proof-groups { padding: 6px 0 19px; display: grid; grid-template-columns: 1.2fr .9fr 1.1fr; gap: 34px; }
+    .proof-group { min-width: 0; }
+    .proof-group h3 { margin: 0 0 10px; color: var(--ink); font-size: 12px; font-weight: 680; }
+    .proof-grid { margin: 0; display: grid; grid-template-columns: 116px minmax(0, 1fr); gap: 9px 14px; }
     .proof-grid dt { color: var(--muted); font-size: 11px; }
     .proof-grid dd { min-width: 0; margin: 0; }
-    .proof-grid code, .proof-grid time { color: var(--ink); font: 11px/1.5 var(--mono); overflow-wrap: anywhere; }
+    .proof-grid code, .proof-grid time { color: var(--muted); font: 11px/1.5 var(--mono); overflow-wrap: anywhere; }
     @media (max-width: 850px) {
 	  .shell { padding-inline: 22px; }
 	  .workbench { grid-template-columns: 1fr; gap: 28px; }
-	  .inspector { padding: 19px 20px; }
+	  .inspector { padding: 18px 20px; }
+	  .proof-groups { grid-template-columns: 1fr; gap: 22px; }
 	}
     @media (max-width: 540px) {
 	  .shell { padding: 0 16px 20px; }
@@ -336,14 +393,21 @@ const pageTemplate = `<!doctype html>
 	  .brand { display: grid; gap: 4px; }
 	  .run-state { display: grid; gap: 4px; justify-items: end; }
 	  .run-id { max-width: 180px; overflow-wrap: anywhere; white-space: normal; text-align: right; }
-	  .task-strip { padding: 18px 0; }
-	  .workbench { padding-top: 22px; }
-	  .effect-row { grid-template-columns: 30px 62px minmax(0, 1fr); row-gap: 5px; padding-inline: 9px; }
-	  .effect-state { grid-column: 2 / 4; }
-	  .effect-enforcement { grid-column: 2 / 4; margin-top: 0; }
+	  .task-strip { padding: 14px 0 16px; }
+	  .workbench { padding-top: 18px; }
+	  .effect-row { grid-template-columns: 28px 30px 62px minmax(0, 1fr); row-gap: 5px; padding-right: 0; }
+	  .history-rail { grid-column: 1; }
+	  .effect-index { grid-column: 2; }
+	  .effect-operation { grid-column: 3; }
+	  .effect-resource { grid-column: 4; }
+	  .effect-state { grid-column: 3; grid-row: 2; text-align: left; }
+	  .effect-enforcement { grid-column: 4; grid-row: 2; margin-top: 0; }
+	  .history-stage { grid-template-columns: 28px 30px 76px minmax(0, 1fr); padding-right: 0; }
+	  .history-stage-label { grid-column: 3; }
+	  .history-stage-value { grid-column: 4; }
+	  .history-boundary { grid-template-columns: 28px minmax(0, 1fr); }
 	  .inspector { padding: 17px 15px; border-radius: 8px; }
-	  .causal-step { grid-template-columns: 80px minmax(0, 1fr); gap: 8px; }
-	  .causal-arrow { margin-left: 84px; }
+	  .causal-step { grid-template-columns: 88px minmax(0, 1fr); gap: 8px; }
 	  .proof-status { padding: 13px 0; align-items: flex-start; flex-direction: column; gap: 7px; }
 	  .proof-grid { grid-template-columns: 1fr; gap: 2px; }
 	  .proof-grid dd { margin-bottom: 7px; }
@@ -369,18 +433,45 @@ const pageTemplate = `<!doctype html>
 
       <div class="workbench">
         <section class="effect-trace" aria-labelledby="effects-heading">
-          <div class="section-heading"><h2 id="effects-heading">Effects</h2><span>Receipt order</span></div>
+          <div class="section-heading"><h2 id="effects-heading">Execution history</h2></div>
           <ol class="effect-list">
             {{range .Effects}}
             <li class="effect-row {{.StateClass}}">
+              <span class="history-rail" aria-hidden="true"><span class="history-node"></span></span>
               <span class="effect-index">{{.Number}}</span>
               <span class="effect-operation">{{.Operation}}</span>
               <code class="effect-resource">{{.Resource}}</code>
               <span class="effect-state">{{.State}}</span>
-              <span class="effect-enforcement">Enforced by <code>{{.EnforcedBy}}</code></span>
+              <span class="effect-enforcement">via <code>{{.EnforcedBy}}</code></span>
             </li>
             {{end}}
           </ol>
+          <div class="history-continuation" aria-label="Verified path into reality">
+            <div class="history-stage observed">
+              <span class="history-rail" aria-hidden="true"><span class="history-node"></span></span>
+              <span class="history-stage-label">Observed</span>
+              <span class="history-stage-value"><strong>{{.Inspector.Observed.Operation}}</strong><code>{{.Inspector.Observed.Resource}}</code></span>
+            </div>
+            <div class="history-stage verified">
+              <span class="history-rail" aria-hidden="true"><span class="history-node"></span></span>
+              <span class="history-stage-label">Verified</span>
+              <span class="history-stage-value">{{.Verification}}</span>
+            </div>
+            <div class="history-boundary">
+              <span class="history-rail" aria-hidden="true"></span>
+              <div class="history-boundary-line"><span>Trust boundary</span></div>
+            </div>
+            <div class="history-stage committed">
+              <span class="history-rail" aria-hidden="true"><span class="history-node"></span></span>
+              <span class="history-stage-label">Committed</span>
+              <span class="history-stage-value"><strong>{{.Inspector.Committed.Operation}}</strong><code>{{.Inspector.Committed.Resource}}</code></span>
+            </div>
+            <div class="history-stage reality-stage">
+              <span class="history-rail" aria-hidden="true"><span class="history-node"></span></span>
+              <span class="history-stage-label">Reality</span>
+              <span class="history-stage-value"><code>{{.Inspector.RealityDisplay}}</code> changed</span>
+            </div>
+          </div>
         </section>
 
         <aside class="inspector" aria-labelledby="inspector-heading">
@@ -391,29 +482,19 @@ const pageTemplate = `<!doctype html>
           </header>
 
           <div class="causal-step">
-            <span class="step-label">Requested</span>
-            <span class="step-value"><strong>{{.Inspector.Authorized.Operation}}</strong><code>{{.Inspector.Authorized.Resource}}</code></span>
+            <span class="step-label">Authority</span>
+            <span class="step-value"><strong>Contract authority</strong><code>{{.Inspector.Authorized.EnforcedBy}}</code></span>
           </div>
-          <div class="causal-arrow" aria-hidden="true">&darr;</div>
           <div class="causal-step">
-            <span class="step-label">Authorized</span>
-            <span class="step-value"><strong>Contract authority</strong><code>enforced by {{.Inspector.Authorized.EnforcedBy}}</code></span>
-          </div>
-          <div class="causal-arrow" aria-hidden="true">&darr;</div>
-          <div class="causal-step">
-            <span class="step-label">Observed mutation</span>
+            <span class="step-label">Observed</span>
             <span class="step-value"><strong>{{.Inspector.Observed.Operation}}</strong><code>{{.Inspector.Observed.Resource}}</code></span>
           </div>
-          <div class="causal-arrow" aria-hidden="true">&darr;</div>
           <div class="causal-step">
             <span class="step-label">Verification</span>
             <span class="step-value"><strong class="verified">{{.Verification}}</strong></span>
           </div>
-
-          <div class="trust-boundary"><span>Trust boundary</span></div>
-
           <div class="causal-step">
-            <span class="step-label">Committed</span>
+            <span class="step-label">Commit</span>
             <span class="step-value"><strong class="committed-label">{{.Inspector.Committed.Operation}}</strong><code>{{.Inspector.Committed.Resource}}</code></span>
           </div>
 
@@ -421,8 +502,8 @@ const pageTemplate = `<!doctype html>
             <h3 id="reality-heading">Reality</h3>
             <p><code>{{.Inspector.RealityDisplay}}</code> changed</p>
             <dl class="digests">
-              <dt>Before</dt><dd><code>{{.Inspector.Committed.BeforeDigest}}</code></dd>
-              <dt>After</dt><dd><code>{{.Inspector.Committed.AfterDigest}}</code></dd>
+              <dt>Before</dt><dd><code>{{.Inspector.BeforeShort}}</code></dd>
+              <dt>After</dt><dd><code>{{.Inspector.AfterShort}}</code></dd>
             </dl>
           </section>
         </aside>
@@ -436,18 +517,35 @@ const pageTemplate = `<!doctype html>
       </div>
       <details>
         <summary>Cryptographic proof</summary>
-        <dl class="proof-grid">
-          <dt>Receipt SHA-256</dt><dd><code>{{.Proof.ReceiptHash}}</code></dd>
-          <dt>Effect Graph SHA-256</dt><dd><code>{{.Proof.GraphHash}}</code></dd>
-          <dt>Contract SHA-256</dt><dd><code>{{.Proof.ContractHash}}</code></dd>
-          <dt>Run ID</dt><dd><code>{{.Proof.RunID}}</code></dd>
-          <dt>Started</dt><dd><time>{{.Proof.StartedAt}}</time></dd>
-          <dt>Completed</dt><dd><time>{{.Proof.CompletedAt}}</time></dd>
-          <dt>Duration</dt><dd><code>{{.Proof.Duration}}</code></dd>
-          <dt>Verification plan</dt><dd><code>{{.Proof.VerificationPlan}}</code></dd>
-          <dt>Commit plan</dt><dd><code>{{.Proof.CommitPlan}}</code></dd>
-          {{if .Proof.CommitOID}}<dt>Commit OID</dt><dd><code>{{.Proof.CommitOID}}</code></dd>{{end}}
-        </dl>
+        <div class="proof-groups">
+          <section class="proof-group" aria-labelledby="integrity-proof-heading">
+            <h3 id="integrity-proof-heading">Integrity</h3>
+            <dl class="proof-grid">
+              <dt>Receipt SHA-256</dt><dd><code>{{.Proof.ReceiptHash}}</code></dd>
+              <dt>Effect Graph SHA-256</dt><dd><code>{{.Proof.GraphHash}}</code></dd>
+              <dt>Contract SHA-256</dt><dd><code>{{.Proof.ContractHash}}</code></dd>
+              <dt>Before SHA-256</dt><dd><code>{{.Proof.BeforeDigest}}</code></dd>
+              <dt>After SHA-256</dt><dd><code>{{.Proof.AfterDigest}}</code></dd>
+            </dl>
+          </section>
+          <section class="proof-group" aria-labelledby="run-proof-heading">
+            <h3 id="run-proof-heading">Run</h3>
+            <dl class="proof-grid">
+              <dt>Run ID</dt><dd><code>{{.Proof.RunID}}</code></dd>
+              <dt>Started</dt><dd><time>{{.Proof.StartedAt}}</time></dd>
+              <dt>Completed</dt><dd><time>{{.Proof.CompletedAt}}</time></dd>
+              <dt>Duration</dt><dd><code>{{.Proof.Duration}}</code></dd>
+            </dl>
+          </section>
+          <section class="proof-group" aria-labelledby="plans-proof-heading">
+            <h3 id="plans-proof-heading">Plans</h3>
+            <dl class="proof-grid">
+              <dt>Verification</dt><dd><code>{{.Proof.VerificationPlan}}</code></dd>
+              <dt>Commit</dt><dd><code>{{.Proof.CommitPlan}}</code></dd>
+              {{if .Proof.CommitOID}}<dt>Commit OID</dt><dd><code>{{.Proof.CommitOID}}</code></dd>{{end}}
+            </dl>
+          </section>
+        </div>
       </details>
     </footer>
   </div>
