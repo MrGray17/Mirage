@@ -1,6 +1,7 @@
 package observatory
 
 import (
+	"bytes"
 	"errors"
 	"regexp"
 	"strings"
@@ -11,49 +12,117 @@ import (
 	"github.com/MrGray17/Mirage/internal/receipt"
 )
 
-func TestRenderVerifiedReceiptAsSingleCausalCanvas(t *testing.T) {
-	evidence := testEvidence(t, "Update README.md", "deterministic-malicious-fixture", "/workspace/README.md", true)
+func TestRenderVerifiedMaliciousExecutionInspector(t *testing.T) {
+	evidence := testEvidence(t, "Update README.md with a short verified MIRAGE demo message.", "/workspace/README.md", true)
 	page, err := Render(evidence)
 	if err != nil {
 		t.Fatal(err)
 	}
 	rendered := string(page)
 	for _, required := range []string{
-		"MIRAGE", "transactional security runtime", "Speculative / untrusted", "Untrusted agent",
+		"MIRAGE", "Observatory", "Update README.md with a short verified MIRAGE demo message.",
+		`<strong>4</strong> effects`, `<strong class="blocked">3</strong> blocked`, `<strong class="committed">1</strong> committed`,
 		"READ", "/workspace/.env", "POST", "http://198.51.100.1/", "/etc/mirage-protected",
-		"DENIED", "AUTHORIZED", "Observed mutation", "MODIFY /workspace/README.md", "Verified",
-		"Trust boundary", "Trusted reality", "Trusted commit", "Reality",
-		"<b>4</b>attempted", "<b>3</b>denied", "<b>1</b>authorized", "<b>1</b>committed",
-		"CommittedEffects &sube; AuthorizedEffects", "PASSED",
-		evidence.SHA256, evidence.EffectGraphHash, evidence.ContractHash, evidence.CommitPlan,
+		"Effect 03", "WRITE", "/workspace/README.md", "COMMITTED", "Observed mutation", "MODIFY", "PASSED",
+		"Trust boundary", "Reality", "README.md", "sha256:before", "sha256:after",
+		"CommittedEffects &sube; AuthorizedEffects", `Receipt <strong>VALID</strong>`, "Cryptographic proof",
+		evidence.SHA256, evidence.EffectGraphHash, evidence.ContractHash, evidence.VerificationPlan, evidence.CommitPlan,
+		evidence.StartedAt, evidence.CompletedAt, "1s",
 	} {
 		if !strings.Contains(rendered, required) {
 			t.Errorf("rendered page missing %q", required)
 		}
 	}
-	if strings.Contains(rendered, "grid-template-columns:minmax(250px") || strings.Contains(rendered, "Execution timeline") || strings.Contains(rendered, "Run summary") {
-		t.Fatal("legacy three-column dashboard chrome remains")
+	if got := strings.Count(rendered, `class="effect-row blocked"`); got != 3 {
+		t.Errorf("blocked rows=%d, want 3", got)
+	}
+	if got := strings.Count(rendered, `class="effect-row committed"`); got != 1 {
+		t.Errorf("committed rows=%d, want 1", got)
 	}
 }
 
 func TestRenderRejectsInvalidReceipt(t *testing.T) {
-	evidence := testEvidence(t, "Update README.md", "fixture", "/workspace/README.md", false)
+	evidence := testEvidence(t, "Update README.md", "/workspace/README.md", false)
 	evidence.SHA256 = "sha256:forged"
 	if _, err := Render(evidence); !errors.Is(err, receipt.ErrInvalidReceipt) {
 		t.Fatalf("error=%v, want ErrInvalidReceipt", err)
 	}
 }
 
-func TestRenderEscapesHostileEvidenceAndHasNoExecutableContent(t *testing.T) {
-	task := `</div><style>body{display:none}</style><script>alert(1)</script>`
-	resource := `/workspace/README.md"><img src="https://evil.example/x" onerror="alert(1)">`
-	evidence := testEvidence(t, task, `fixture"><iframe src="https://evil.example">`, resource, false)
+func TestRenderVerifiedBenignReceipt(t *testing.T) {
+	evidence := testEvidence(t, "Update README.md", "/workspace/README.md", false)
 	page, err := Render(evidence)
 	if err != nil {
 		t.Fatal(err)
 	}
 	rendered := string(page)
-	for _, forbidden := range []string{"<script", "<iframe", "<img", "</style><style>body{display:none}"} {
+	for _, required := range []string{
+		`<strong>1</strong> effects`, `<strong class="blocked">0</strong> blocked`, `<strong class="committed">1</strong> committed`,
+		"Effect 01", "WRITE", "/workspace/README.md", "COMMITTED", "Receipt <strong>VALID</strong>",
+	} {
+		if !strings.Contains(rendered, required) {
+			t.Errorf("rendered page missing %q", required)
+		}
+	}
+	if strings.Contains(rendered, `class="effect-row blocked"`) {
+		t.Fatal("benign receipt rendered a blocked effect")
+	}
+}
+
+func TestRenderPreservesAttemptedEffectOrder(t *testing.T) {
+	evidence := testEvidence(t, "Update README.md", "/workspace/README.md", true)
+	page, err := Render(evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered := string(page)
+	resources := []string{
+		"/workspace/.env",
+		"http://198.51.100.1/",
+		"/workspace/README.md",
+		"/etc/mirage-protected",
+	}
+	previous := -1
+	for _, resource := range resources {
+		position := strings.Index(rendered, resource)
+		if position < 0 || position <= previous {
+			t.Fatalf("resource %q rendered out of receipt order", resource)
+		}
+		previous = position
+	}
+}
+
+func TestCommittedEffectUsesCompetitionV1WriteToModifyMatch(t *testing.T) {
+	read := receipt.Effect{Operation: "READ", Resource: "/workspace/README.md", EnforcedBy: "read-contract"}
+	write := receipt.Effect{Operation: "WRITE", Resource: "/workspace/README.md", EnforcedBy: "write-contract"}
+	mutation := receipt.Mutation{Operation: "MODIFY", Resource: write.Resource, BeforeDigest: "sha256:before", AfterDigest: "sha256:after"}
+	evidence := newEvidence(t, "Inspect then update README.md", []receipt.Effect{read, write}, []receipt.Effect{read, write}, nil, mutation)
+
+	view, err := buildPageData(evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Effects[0].State != "AUTHORIZED" || view.Effects[0].IsCommitted {
+		t.Fatalf("READ row=%+v, want authorized but not committed", view.Effects[0])
+	}
+	if view.Effects[1].State != "COMMITTED" || !view.Effects[1].IsCommitted || view.Inspector.Index != 2 {
+		t.Fatalf("WRITE row=%+v inspector=%+v, want second effect committed", view.Effects[1], view.Inspector)
+	}
+}
+
+func TestRenderEscapesHostileEvidence(t *testing.T) {
+	task := `"><script>alert(1)</script><style>body{display:none}</style>`
+	resource := `/workspace/README.md"><img src=x onerror=alert(1)>`
+	authority := `contract"><iframe src=https://evil.example>`
+	write := receipt.Effect{Operation: "WRITE", Resource: resource, EnforcedBy: authority}
+	mutation := receipt.Mutation{Operation: "MODIFY", Resource: resource, BeforeDigest: "sha256:before", AfterDigest: "sha256:after"}
+	evidence := newEvidence(t, task, []receipt.Effect{write}, []receipt.Effect{write}, nil, mutation)
+	page, err := Render(evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered := string(page)
+	for _, forbidden := range []string{"<script", "<iframe", "<img", "</style><style>"} {
 		if strings.Contains(strings.ToLower(rendered), forbidden) {
 			t.Fatalf("hostile evidence became active markup: %q", forbidden)
 		}
@@ -63,84 +132,79 @@ func TestRenderEscapesHostileEvidenceAndHasNoExecutableContent(t *testing.T) {
 			t.Errorf("rendered page missing escaped value %q", escaped)
 		}
 	}
-	if regexp.MustCompile(`(?i)(?:src|href)\s*=\s*["']https?://`).MatchString(rendered) {
-		t.Fatal("rendered page contains an external resource reference")
+}
+
+func TestTemplateIsSelfContainedAndStrict(t *testing.T) {
+	wantCSP := `default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'`
+	if !strings.Contains(pageTemplate, wantCSP) {
+		t.Fatalf("strict CSP missing: %s", wantCSP)
+	}
+	for _, pattern := range []string{
+		`(?i)<script(?:\s|>)`,
+		`(?i)<(?:link|iframe|object|embed)(?:\s|>)`,
+		`(?i)(?:src|href)\s*=\s*["'](?:https?:)?//`,
+		`(?i)@import\s|url\s*\(`,
+	} {
+		if regexp.MustCompile(pattern).MatchString(pageTemplate) {
+			t.Fatalf("template contains prohibited external/executable content matching %q", pattern)
+		}
 	}
 }
 
-func TestRenderUsesStrictSelfContainedPolicy(t *testing.T) {
-	evidence := testEvidence(t, "Update README.md", "fixture", "/workspace/README.md", false)
-	page, err := Render(evidence)
+func TestRenderIsDeterministicAndRetainsFullEvidence(t *testing.T) {
+	resource := "/workspace/" + strings.Repeat("nested-directory/", 20) + "README.md"
+	evidence := testEvidence(t, "Update one deeply nested README", resource, false)
+	first, err := Render(evidence)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rendered := string(page)
-	wantCSP := `default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'`
-	if !strings.Contains(rendered, wantCSP) {
-		t.Fatalf("strict CSP missing: %s", wantCSP)
+	second, err := Render(evidence)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if regexp.MustCompile(`(?i)<script(?:\s|>)`).MatchString(rendered) {
-		t.Fatal("Observatory contains a script tag")
+	if !bytes.Equal(first, second) {
+		t.Fatal("same verified receipt produced different HTML bytes")
 	}
-	if regexp.MustCompile(`(?i)<(?:link|iframe|object|embed)(?:\s|>)`).MatchString(rendered) {
-		t.Fatal("Observatory contains an external-capable element")
-	}
-}
-
-func TestRenderSummaryCountsAreReceiptDerived(t *testing.T) {
-	for _, test := range []struct {
-		name      string
-		malicious bool
-		want      []string
-	}{
-		{"malicious", true, []string{"<b>4</b>attempted", "<b>3</b>denied", "<b>1</b>authorized", "<b>1</b>committed"}},
-		{"benign", false, []string{"<b>1</b>attempted", "<b>0</b>denied", "<b>1</b>authorized", "<b>1</b>committed"}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			evidence := testEvidence(t, "Update README.md", "fixture", "/workspace/README.md", test.malicious)
-			page, err := Render(evidence)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, want := range test.want {
-				if !strings.Contains(string(page), want) {
-					t.Errorf("rendered page missing receipt-derived count %q", want)
-				}
-			}
-		})
+	for _, full := range []string{resource, evidence.SHA256, evidence.EffectGraphHash, evidence.ContractHash, evidence.RunID} {
+		if !bytes.Contains(first, []byte(full)) {
+			t.Errorf("full evidence value was omitted: %q", full)
+		}
 	}
 }
 
-func testEvidence(t *testing.T, task, agent, resource string, malicious bool) *receipt.Receipt {
+func testEvidence(t *testing.T, task, resource string, malicious bool) *receipt.Receipt {
 	t.Helper()
-	authorized := receipt.Effect{Operation: "WRITE", Resource: resource, EnforcedBy: "effect-contract"}
-	attempted := []receipt.Effect{authorized}
-	graphEffects := []effectgraph.Effect{{Operation: authorized.Operation, Resource: authorized.Resource, Disposition: "AUTHORIZED", EnforcedBy: authorized.EnforcedBy}}
+	write := receipt.Effect{Operation: "WRITE", Resource: resource, EnforcedBy: "effect-contract"}
+	attempted := []receipt.Effect{write}
 	var denied []receipt.Effect
 	if malicious {
-		denied = []receipt.Effect{
-			{Operation: "READ", Resource: "/workspace/.env", EnforcedBy: "snapshot-secret-exclusion"},
-			{Operation: "POST", Resource: "http://198.51.100.1/", EnforcedBy: "sandbox-network-none"},
-			{Operation: "WRITE", Resource: "/etc/mirage-protected", EnforcedBy: "read-only-root"},
-		}
-		attempted = append(append([]receipt.Effect(nil), denied...), authorized)
-		graphEffects = nil
-		for _, effect := range attempted {
-			disposition := "DENIED"
-			if effect == authorized {
-				disposition = "AUTHORIZED"
-			}
-			graphEffects = append(graphEffects, effectgraph.Effect{
-				Operation: effect.Operation, Resource: effect.Resource, Disposition: disposition, EnforcedBy: effect.EnforcedBy,
-			})
-		}
+		read := receipt.Effect{Operation: "READ", Resource: "/workspace/.env", EnforcedBy: "snapshot-secret-exclusion"}
+		post := receipt.Effect{Operation: "POST", Resource: "http://198.51.100.1/", EnforcedBy: "sandbox-network-none"}
+		protected := receipt.Effect{Operation: "WRITE", Resource: "/etc/mirage-protected", EnforcedBy: "read-only-root"}
+		attempted = []receipt.Effect{read, post, write, protected}
+		denied = []receipt.Effect{read, post, protected}
 	}
 	mutation := receipt.Mutation{Operation: "MODIFY", Resource: resource, BeforeDigest: "sha256:before", AfterDigest: "sha256:after"}
+	return newEvidence(t, task, attempted, []receipt.Effect{write}, denied, mutation)
+}
+
+func newEvidence(t *testing.T, task string, attempted, authorized, denied []receipt.Effect, mutation receipt.Mutation) *receipt.Receipt {
+	t.Helper()
+	graphEffects := make([]effectgraph.Effect, 0, len(attempted))
+	for _, effect := range attempted {
+		disposition := "DENIED"
+		if containsEffect(authorized, effect) {
+			disposition = "AUTHORIZED"
+		}
+		graphEffects = append(graphEffects, effectgraph.Effect{
+			Operation: effect.Operation, Resource: effect.Resource, Disposition: disposition, EnforcedBy: effect.EnforcedBy,
+		})
+	}
 	graph, err := effectgraph.New(effectgraph.Spec{
-		RunID: "competition-malicious-1234567890abcdef", Task: task, Agent: agent,
+		RunID: "competition-malicious-1234567890abcdef", Task: task, Agent: "deterministic-fixture",
 		Effects: graphEffects, Mutations: []effectgraph.Mutation{{Operation: mutation.Operation, Resource: mutation.Resource, AfterDigest: mutation.AfterDigest}},
 		Verification: "PASSED", VerificationPlan: "sha256:verification-plan", Committed: true,
-		CommitPlan: "sha256:commit-plan", CommittedResource: resource,
+		CommitPlan: "sha256:commit-plan", CommittedResource: mutation.Resource,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -148,9 +212,10 @@ func testEvidence(t *testing.T, task, agent, resource string, malicious bool) *r
 	start := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
 	evidence, err := receipt.New(receipt.Spec{
 		RunID: graph.RunID, ContractHash: "sha256:contract", StartedAt: start, CompletedAt: start.Add(time.Second),
-		AttemptedEffects: attempted, AuthorizedEffects: []receipt.Effect{authorized}, DeniedEffects: denied,
+		AttemptedEffects: attempted, AuthorizedEffects: authorized, DeniedEffects: denied,
 		ObservedMutations: []receipt.Mutation{mutation}, Verification: "PASSED", VerificationPlan: "sha256:verification-plan",
-		CommittedMutations: []receipt.Mutation{mutation}, CommitPlan: "sha256:commit-plan", Graph: graph,
+		CommittedMutations: []receipt.Mutation{mutation}, CommitOID: "0123456789abcdef0123456789abcdef01234567",
+		CommitPlan: "sha256:commit-plan", Graph: graph,
 	})
 	if err != nil {
 		t.Fatal(err)
