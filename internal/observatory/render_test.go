@@ -2,6 +2,8 @@ package observatory
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"regexp"
 	"strings"
@@ -41,13 +43,13 @@ func TestRenderVerifiedMaliciousExecutionInspector(t *testing.T) {
 			t.Errorf("rendered page missing %q", required)
 		}
 	}
-	if got := strings.Count(rendered, `class="effect-row blocked"`); got != 3 {
+	if got := strings.Count(rendered, `class="effect-row history-event blocked"`); got != 3 {
 		t.Errorf("blocked rows=%d, want 3", got)
 	}
-	if got := strings.Count(rendered, `class="effect-row selected"`); got != 1 {
+	if got := strings.Count(rendered, `class="effect-row history-event selected is-selected is-path"`); got != 1 {
 		t.Errorf("selected authorized rows=%d, want 1", got)
 	}
-	if got := strings.Count(rendered, `<div class="history-stage`); got != 4 {
+	if got := strings.Count(rendered, `class="history-stage history-event`); got != 4 {
 		t.Errorf("history continuation stages=%d, want 4", got)
 	}
 	for _, digest := range []string{testBeforeDigest, testAfterDigest} {
@@ -85,7 +87,7 @@ func TestRenderVerifiedBenignReceipt(t *testing.T) {
 			t.Errorf("rendered page missing %q", required)
 		}
 	}
-	if strings.Contains(rendered, `class="effect-row blocked"`) {
+	if strings.Contains(rendered, `class="effect-row history-event blocked"`) {
 		t.Fatal("benign receipt rendered a blocked effect")
 	}
 }
@@ -152,7 +154,7 @@ func TestRenderEscapesHostileEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	rendered := string(page)
-	for _, forbidden := range []string{"<script", "<iframe", "<img", "</style><style>"} {
+	for _, forbidden := range []string{"<script>alert", "<iframe", "<img", "</style><style>"} {
 		if strings.Contains(strings.ToLower(rendered), forbidden) {
 			t.Fatalf("hostile evidence became active markup: %q", forbidden)
 		}
@@ -165,18 +167,117 @@ func TestRenderEscapesHostileEvidence(t *testing.T) {
 }
 
 func TestTemplateIsSelfContainedAndStrict(t *testing.T) {
-	wantCSP := `default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'`
+	digest := sha256.Sum256([]byte(interactionScript))
+	wantScriptHash := "sha256-" + base64.StdEncoding.EncodeToString(digest[:])
+	wantCSP := `default-src 'none'; script-src '` + wantScriptHash + `'; connect-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'`
 	if !strings.Contains(pageTemplate, wantCSP) {
 		t.Fatalf("strict CSP missing: %s", wantCSP)
 	}
+	if strings.Count(pageTemplate, "<script>") != 1 || strings.Count(pageTemplate, "</script>") != 1 {
+		t.Fatal("template must contain exactly one fixed inline script")
+	}
+	if strings.Contains(pageTemplate, "script-src 'unsafe-inline'") {
+		t.Fatal("script policy permits unsafe inline execution")
+	}
+	evidence := testEvidence(t, "Update README.md", "/workspace/README.md", true)
+	rendered, err := Render(evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scriptMatch := regexp.MustCompile(`(?s)<script>(.*?)</script>`).FindSubmatch(rendered)
+	if len(scriptMatch) != 2 {
+		t.Fatal("rendered artifact does not contain exactly one extractable fixed script")
+	}
+	renderedDigest := sha256.Sum256(scriptMatch[1])
+	renderedHash := "sha256-" + base64.StdEncoding.EncodeToString(renderedDigest[:])
+	if renderedHash != wantScriptHash {
+		t.Fatalf("rendered script hash=%q, CSP hash=%q", renderedHash, wantScriptHash)
+	}
 	for _, pattern := range []string{
-		`(?i)<script(?:\s|>)`,
 		`(?i)<(?:link|iframe|object|embed)(?:\s|>)`,
+		`(?i)<script[^>]+src\s*=`,
 		`(?i)(?:src|href)\s*=\s*["'](?:https?:)?//`,
 		`(?i)@import\s|url\s*\(`,
 	} {
 		if regexp.MustCompile(pattern).MatchString(pageTemplate) {
 			t.Fatalf("template contains prohibited external/executable content matching %q", pattern)
+		}
+	}
+}
+
+func TestInteractionScriptOnlySelectsPreRenderedEvidence(t *testing.T) {
+	for _, required := range []string{
+		`querySelectorAll("[data-history-event]")`, `querySelectorAll("[data-inspector-panel]")`,
+		`aria-selected`, `panel.hidden`, `window.history.replaceState`, `hashchange`,
+		`ArrowLeft`, `ArrowRight`, `data-select-panel`,
+	} {
+		if !strings.Contains(interactionScript, required) {
+			t.Errorf("interaction script missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"innerHTML", "outerHTML", "insertAdjacentHTML", "fetch(", "XMLHttpRequest", "WebSocket", "eval("} {
+		if strings.Contains(interactionScript, forbidden) {
+			t.Errorf("interaction script contains prohibited capability %q", forbidden)
+		}
+	}
+}
+
+func TestEveryHistoryTargetHasPreRenderedInspectorPanel(t *testing.T) {
+	evidence := testEvidence(t, "Update README.md", "/workspace/README.md", true)
+	view, err := buildPageData(evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantIDs := []string{"effect-01", "effect-02", "effect-03", "effect-04", "observed", "verified", "trust-boundary", "committed", "reality"}
+	if len(view.Panels) != len(wantIDs) {
+		t.Fatalf("panels=%d, want %d", len(view.Panels), len(wantIDs))
+	}
+	selected := 0
+	for index, panel := range view.Panels {
+		if panel.ID != wantIDs[index] {
+			t.Errorf("panel[%d]=%q, want %q", index, panel.ID, wantIDs[index])
+		}
+		if panel.Selected {
+			selected++
+			if panel.ID != "effect-03" {
+				t.Errorf("default panel=%q, want committed-authority effect-03", panel.ID)
+			}
+		}
+		if index > 0 && (panel.Previous == nil || panel.Previous.PanelID != wantIDs[index-1]) {
+			t.Errorf("panel[%d] previous link is not receipt-order predecessor", index)
+		}
+		if index+1 < len(wantIDs) && (panel.Next == nil || panel.Next.PanelID != wantIDs[index+1]) {
+			t.Errorf("panel[%d] next link is not receipt-order successor", index)
+		}
+	}
+	if selected != 1 {
+		t.Fatalf("default selected panels=%d, want 1", selected)
+	}
+
+	page, err := Render(evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered := string(page)
+	if got := strings.Count(rendered, `aria-selected="true"`); got != 1 {
+		t.Errorf("default selected history controls=%d, want 1", got)
+	}
+	if got := strings.Count(rendered, `data-inspector-panel role="tabpanel"`); got != len(wantIDs) {
+		t.Errorf("pre-rendered inspector panels=%d, want %d", got, len(wantIDs))
+	}
+	for _, id := range wantIDs {
+		for _, marker := range []string{`data-panel="` + id + `"`, `id="panel-` + id + `"`} {
+			if !strings.Contains(rendered, marker) {
+				t.Errorf("rendered page missing %q", marker)
+			}
+		}
+	}
+	for _, evidenceText := range []string{
+		"snapshot-secret-exclusion", "sandbox-network-none", "read-only-root",
+		"Did not cross the trust boundary. No committed mutation was attributed to this effect.",
+	} {
+		if !strings.Contains(rendered, evidenceText) {
+			t.Errorf("rendered inspectors missing %q", evidenceText)
 		}
 	}
 }

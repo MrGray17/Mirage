@@ -4,6 +4,9 @@ package observatory
 
 import (
 	"bytes"
+	"crypto/sha256"
+	_ "embed"
+	"encoding/base64"
 	"fmt"
 	"html/template"
 	"strings"
@@ -22,6 +25,42 @@ type effectRow struct {
 	State       string
 	StateClass  string
 	IsCommitted bool
+	PanelID     string
+	PathID      string
+}
+
+type inspectorFact struct {
+	Label     string
+	Value     string
+	Detail    string
+	ValueCode bool
+	Positive  bool
+}
+
+type inspectorLink struct {
+	PanelID string
+	Label   string
+	Detail  string
+}
+
+type inspectorPanel struct {
+	ID          string
+	HistoryID   string
+	Eyebrow     string
+	Title       string
+	Resource    string
+	Status      string
+	StatusClass string
+	Facts       []inspectorFact
+	Result      string
+	ShowReality bool
+	BeforeShort string
+	AfterShort  string
+	Selected    bool
+	NavLabel    string
+	NavDetail   string
+	Previous    *inspectorLink
+	Next        *inspectorLink
 }
 
 type committedEffectView struct {
@@ -59,9 +98,18 @@ type pageData struct {
 	Committed    int
 	Effects      []effectRow
 	Inspector    committedEffectView
+	Panels       []inspectorPanel
 	Verification string
 	Proof        proofView
 }
+
+//go:embed interaction.js
+var embeddedInteractionScript string
+
+var (
+	interactionScript = strings.ReplaceAll(embeddedInteractionScript, "\r\n", "\n")
+	pageTemplate      = buildPageTemplate()
+)
 
 // Render verifies evidence before mapping it into a presentation-only view.
 // Neither the mapping nor the template participates in authorization.
@@ -126,12 +174,14 @@ func buildPageData(evidence *receipt.Receipt) (pageData, error) {
 	var authority receipt.Effect
 	for index, attempted := range evidence.AttemptedEffects {
 		state, class := "BLOCKED", "blocked"
+		pathID := fmt.Sprintf("effect-%02d", index+1)
 		if containsEffect(evidence.AuthorizedEffects, attempted) {
 			state, class = "AUTHORIZED", "authorized"
 			if effectgraph.CompetitionV1AuthorizesMutation(
 				attempted.Operation, attempted.Resource, committed.Operation, committed.Resource,
 			) {
 				state, class = "AUTHORIZED", "selected"
+				pathID = "surviving"
 				committedIndex = index
 				authority = attempted
 			}
@@ -140,6 +190,7 @@ func buildPageData(evidence *receipt.Receipt) (pageData, error) {
 			Index: index + 1, Number: fmt.Sprintf("%02d", index+1), Operation: attempted.Operation,
 			Resource: attempted.Resource, EnforcedBy: attempted.EnforcedBy, State: state,
 			StateClass: class, IsCommitted: class == "selected",
+			PanelID: fmt.Sprintf("effect-%02d", index+1), PathID: pathID,
 		})
 	}
 	if committedIndex < 0 {
@@ -154,7 +205,98 @@ func buildPageData(evidence *receipt.Receipt) (pageData, error) {
 	}
 	data.Proof.BeforeDigest = committed.BeforeDigest
 	data.Proof.AfterDigest = committed.AfterDigest
+	data.Panels = buildInspectorPanels(data.Effects, data.Inspector, data.Verification, data.Proof)
 	return data, nil
+}
+
+func buildInspectorPanels(effects []effectRow, committed committedEffectView, verification string, proof proofView) []inspectorPanel {
+	panels := make([]inspectorPanel, 0, len(effects)+5)
+	for _, effect := range effects {
+		panel := inspectorPanel{
+			ID: effect.PanelID, HistoryID: "history-" + effect.PanelID,
+			Eyebrow: "Effect " + effect.Number, Title: effect.Operation, Resource: effect.Resource,
+			Status: effect.State, StatusClass: effect.StateClass,
+			NavLabel: effect.Number + " " + effect.Operation, NavDetail: displayResource(effect.Resource),
+			Facts: []inspectorFact{{Label: "Enforcement", Value: effect.EnforcedBy, ValueCode: true}},
+		}
+		switch {
+		case effect.IsCommitted:
+			panel.Selected = true
+			panel.Facts = []inspectorFact{
+				{Label: "Authorized by", Value: "Effect Contract", Detail: effect.EnforcedBy},
+				{Label: "Observed", Value: committed.Observed.Operation, Detail: committed.Observed.Resource},
+				{Label: "Verification", Value: verification, Positive: true},
+				{Label: "Committed", Value: committed.Committed.Operation, Detail: committed.Committed.Resource, Positive: true},
+			}
+			panel.ShowReality = true
+			panel.BeforeShort = committed.BeforeShort
+			panel.AfterShort = committed.AfterShort
+		case effect.State == "BLOCKED":
+			panel.Result = "Did not cross the trust boundary. No committed mutation was attributed to this effect."
+		default:
+			panel.Result = "Authorized, with no committed mutation attributed to this effect."
+		}
+		panels = append(panels, panel)
+	}
+
+	panels = append(panels,
+		inspectorPanel{
+			ID: "observed", HistoryID: "history-observed", Eyebrow: "Observed mutation",
+			Title: committed.Observed.Operation, Resource: committed.Observed.Resource,
+			NavLabel: "OBSERVED", NavDetail: displayResource(committed.Observed.Resource),
+			Facts: []inspectorFact{
+				{Label: "Before", Value: committed.BeforeShort, ValueCode: true},
+				{Label: "After", Value: committed.AfterShort, ValueCode: true},
+			},
+		},
+		inspectorPanel{
+			ID: "verified", HistoryID: "history-verified", Eyebrow: "Verification",
+			Title: verification, Status: verification, StatusClass: "verified",
+			NavLabel: "VERIFIED", NavDetail: verification,
+			Facts: []inspectorFact{
+				{Label: "Verification plan", Value: proof.VerificationPlan, ValueCode: true},
+				{Label: "Observed mutation", Value: committed.Observed.Operation, Detail: committed.Observed.Resource},
+			},
+		},
+		inspectorPanel{
+			ID: "trust-boundary", HistoryID: "history-trust-boundary", Eyebrow: "Trust boundary",
+			Title: verification, NavLabel: "TRUST BOUNDARY", NavDetail: "verified authority",
+			Facts: []inspectorFact{
+				{Label: "Authorized effect", Value: committed.Authorized.Operation, Detail: committed.Authorized.Resource},
+				{Label: "Committed mutation", Value: committed.Committed.Operation, Detail: committed.Committed.Resource, Positive: true},
+			},
+		},
+		inspectorPanel{
+			ID: "committed", HistoryID: "history-committed", Eyebrow: "Trusted commit",
+			Title: committed.Committed.Operation, Resource: committed.Committed.Resource,
+			Status: "COMMITTED", StatusClass: "committed", NavLabel: "COMMITTED", NavDetail: displayResource(committed.Committed.Resource),
+			Facts: []inspectorFact{
+				{Label: "Commit plan", Value: proof.CommitPlan, ValueCode: true},
+				{Label: "Authority", Value: committed.Authorized.Operation, Detail: committed.Authorized.Resource},
+			},
+		},
+		inspectorPanel{
+			ID: "reality", HistoryID: "history-reality", Eyebrow: "Reality",
+			Title: committed.RealityDisplay + " changed", Status: "RECEIPT VALID", StatusClass: "committed",
+			NavLabel: "REALITY", NavDetail: committed.RealityDisplay + " changed",
+			Facts: []inspectorFact{
+				{Label: "Before", Value: committed.BeforeShort, ValueCode: true},
+				{Label: "After", Value: committed.AfterShort, ValueCode: true},
+			},
+		},
+	)
+
+	for index := range panels {
+		if index > 0 {
+			previous := panels[index-1]
+			panels[index].Previous = &inspectorLink{PanelID: previous.ID, Label: previous.NavLabel, Detail: previous.NavDetail}
+		}
+		if index+1 < len(panels) {
+			next := panels[index+1]
+			panels[index].Next = &inspectorLink{PanelID: next.ID, Label: next.NavLabel, Detail: next.NavDetail}
+		}
+	}
+	return panels
 }
 
 func containsEffect(effects []receipt.Effect, wanted receipt.Effect) bool {
@@ -201,12 +343,19 @@ func formatDuration(value time.Duration) string {
 	return value.Round(time.Millisecond).String()
 }
 
-const pageTemplate = `<!doctype html>
+func buildPageTemplate() string {
+	digest := sha256.Sum256([]byte(interactionScript))
+	scriptHash := "sha256-" + base64.StdEncoding.EncodeToString(digest[:])
+	withPolicy := strings.Replace(pageTemplateSource, "__MIRAGE_SCRIPT_HASH__", scriptHash, 1)
+	return strings.Replace(withPolicy, "__MIRAGE_INTERACTION_SCRIPT__", interactionScript, 1)
+}
+
+const pageTemplateSource = `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src '__MIRAGE_SCRIPT_HASH__'; connect-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
   <title>MIRAGE Observatory &mdash; {{.Proof.RunID}}</title>
   <style>
     :root {
@@ -239,6 +388,7 @@ const pageTemplate = `<!doctype html>
       font: 14px/1.45 var(--sans);
       text-rendering: optimizeLegibility;
     }
+    button { font: inherit; }
     code { font-family: var(--mono); }
     .shell {
       width: min(1360px, 100%);
@@ -282,7 +432,21 @@ const pageTemplate = `<!doctype html>
     .workbench { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(340px, 1fr); gap: 24px; padding: 18px 0 20px; }
     .section-heading { margin-bottom: 9px; }
     .section-heading h2 { margin: 0; font-size: 12px; font-weight: 750; letter-spacing: .09em; text-transform: uppercase; }
+    .history-controls { min-width: 0; }
     .effect-list { margin: 0; padding: 0; border-top: 1px solid var(--border); list-style: none; }
+    .effect-list li { margin: 0; padding: 0; }
+    .history-event {
+      width: 100%;
+      margin: 0;
+      border: 0;
+      color: inherit;
+      cursor: pointer;
+      text-align: left;
+      transition: background-color 120ms ease, opacity 120ms ease;
+    }
+    .history-event:focus-visible { outline: 2px solid var(--orange); outline-offset: -2px; }
+    .interaction-ready .history-event:not(.is-path) { opacity: .42; }
+    .history-event.is-selected { background: #efede7; }
     .effect-row {
       position: relative;
       min-width: 0;
@@ -292,11 +456,13 @@ const pageTemplate = `<!doctype html>
       grid-template-columns: 32px 34px 74px minmax(0, 1fr) 104px;
       column-gap: 8px;
       align-items: baseline;
+      background: transparent;
     }
-    .effect-row.selected { background: var(--orange-soft); }
+    .effect-row.selected.is-selected { background: var(--orange-soft); }
     .history-rail { grid-column: 1; grid-row: 1 / 3; position: relative; align-self: stretch; min-height: 34px; }
     .history-rail::before { content: ""; position: absolute; top: -8px; bottom: -7px; left: 11px; width: 2px; background: var(--rail); }
     .effect-row.blocked .history-rail::after { content: ""; position: absolute; top: 10px; left: 11px; width: 16px; border-top: 1.5px solid var(--red); }
+    .effect-row.blocked.is-selected .history-rail::after { border-top-width: 2px; }
     .effect-row.selected .history-rail::after { content: ""; position: absolute; top: -2px; left: 11px; width: 2px; height: 27px; background: var(--orange); }
     .history-node { position: absolute; z-index: 1; }
     .effect-row.blocked .history-node { top: 1px; left: 23px; color: var(--red); font: 750 15px/1 var(--sans); }
@@ -319,6 +485,7 @@ const pageTemplate = `<!doctype html>
       grid-template-columns: 32px 34px 76px 105px minmax(0, 1fr);
       column-gap: 8px;
       align-items: center;
+      background: transparent;
     }
     .history-stage .history-rail { grid-row: 1; min-height: 31px; }
     .history-stage .history-rail::before { top: 0; bottom: 0; }
@@ -337,7 +504,7 @@ const pageTemplate = `<!doctype html>
     .history-stage.committed .history-stage-action,
     .history-stage.reality-stage .history-stage-resource { color: var(--green); }
     .history-stage.reality-stage .history-stage-resource { font-size: 12px; font-weight: 720; }
-    .history-boundary { min-height: 29px; display: grid; grid-template-columns: 32px minmax(0, 1fr); align-items: center; }
+    .history-boundary { min-height: 29px; padding: 0; display: grid; grid-template-columns: 32px minmax(0, 1fr); align-items: center; background: transparent; }
     .history-boundary .history-rail { grid-row: 1; min-height: 29px; }
     .history-boundary .history-rail::before { top: 0; bottom: 0; background: linear-gradient(to bottom, var(--rail) 0 50%, var(--green) 50% 100%); }
     .history-boundary-line { grid-column: 1 / -1; position: relative; margin-left: 11px; border-top: 1px solid var(--border-strong); text-align: center; }
@@ -349,17 +516,26 @@ const pageTemplate = `<!doctype html>
       border-radius: 0;
       background: var(--surface);
     }
+    .inspector-panel { min-height: 342px; display: flex; flex-direction: column; }
+    .inspector-panel[hidden] { display: none; }
     .inspector-heading { margin-bottom: 15px; }
     .inspector-heading .eyebrow { color: var(--orange-muted); font-size: 10px; }
     .inspector-heading h2 { margin: 0; font-size: 25px; line-height: 1.2; font-weight: 720; }
     .inspector-heading code { display: block; margin-top: 2px; color: var(--ink); font-size: 13px; overflow-wrap: anywhere; }
-    .causal-step { display: grid; grid-template-columns: 104px minmax(0, 1fr); gap: 10px; align-items: start; }
-    .causal-step + .causal-step { margin-top: 10px; }
+    .panel-state { margin: -7px 0 15px; color: var(--orange-muted); font-size: 11px; font-weight: 720; letter-spacing: .075em; }
+    .panel-state.blocked { color: var(--red); }
+    .panel-state.verified, .panel-state.committed { color: var(--green); }
+    .panel-fact { display: grid; grid-template-columns: 104px minmax(0, 1fr); gap: 10px; align-items: start; }
+    .panel-fact + .panel-fact { margin-top: 10px; }
     .step-label { color: var(--muted); font-size: 11px; font-weight: 720; letter-spacing: .075em; text-transform: uppercase; }
     .step-value { min-width: 0; }
     .step-value strong { display: block; font-size: 14px; font-weight: 690; }
+    .step-value strong.positive { color: var(--green); }
+    .step-value > code:first-child { display: block; color: var(--ink); font-size: 12px; overflow-wrap: anywhere; }
     .step-value code { display: block; margin-top: 1px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
-    .step-value .verified, .step-value .committed-label { color: var(--green); }
+    .panel-result { margin-top: 18px; padding-top: 13px; border-top: 1px solid var(--border); }
+    .panel-result h3 { margin: 0 0 4px; color: var(--muted); font-size: 11px; font-weight: 720; letter-spacing: .075em; text-transform: uppercase; }
+    .panel-result p { margin: 0; color: var(--ink); font-size: 14px; }
     .reality { margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--border); }
     .reality h3 { margin: 0 0 3px; color: var(--green); font-size: 11px; font-weight: 760; letter-spacing: .09em; text-transform: uppercase; }
     .reality p { margin: 0; font-size: 18px; font-weight: 720; letter-spacing: -.01em; }
@@ -368,6 +544,15 @@ const pageTemplate = `<!doctype html>
     .digests dt { color: var(--muted); font-size: 11px; }
     .digests dd { min-width: 0; margin: 0; }
     .digests code { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+    .panel-navigation { margin-top: auto; padding-top: 18px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .panel-nav { min-width: 0; padding: 8px 9px; border: 1px solid var(--border); border-radius: 3px; background: transparent; color: var(--ink); cursor: pointer; text-align: left; }
+    .panel-nav.next { text-align: right; }
+    .panel-nav:hover { background: var(--canvas); }
+    .panel-nav:focus-visible { outline: 2px solid var(--orange); outline-offset: 2px; }
+    .panel-nav-direction { display: block; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+    .panel-nav-label { display: block; margin-top: 2px; font: 11px/1.35 var(--mono); overflow-wrap: anywhere; }
+    .panel-nav-detail { display: block; color: var(--muted); font: 10px/1.35 var(--mono); overflow-wrap: anywhere; }
+    .panel-nav-spacer { min-height: 1px; }
     .proof-footer { border-top: 1px solid var(--border-strong); }
     .proof-status { min-height: 50px; display: flex; align-items: center; justify-content: space-between; gap: 24px; }
     .invariant { margin: 0; color: var(--ink); font-size: 13px; }
@@ -389,6 +574,7 @@ const pageTemplate = `<!doctype html>
       .shell { padding-inline: 22px; }
       .workbench { grid-template-columns: 1fr; gap: 28px; }
       .inspector { padding: 18px 20px; border-top: 1px solid var(--border-strong); border-left: 0; }
+      .inspector-panel { min-height: 0; }
       .proof-groups { grid-template-columns: 1fr; gap: 22px; }
     }
     @media (max-width: 540px) {
@@ -415,7 +601,7 @@ const pageTemplate = `<!doctype html>
       .history-stage.reality-stage .history-stage-resource { grid-row: 1; margin-top: 0; }
       .history-boundary { grid-template-columns: 28px minmax(0, 1fr); }
       .inspector { padding: 17px 15px; }
-      .causal-step { grid-template-columns: 88px minmax(0, 1fr); gap: 8px; }
+      .panel-fact { grid-template-columns: 88px minmax(0, 1fr); gap: 8px; }
       .proof-status { padding: 13px 0; align-items: flex-start; flex-direction: column; gap: 7px; }
       .proof-grid { grid-template-columns: 1fr; gap: 2px; }
       .proof-grid dd { margin-bottom: 7px; }
@@ -442,78 +628,108 @@ const pageTemplate = `<!doctype html>
       <div class="workbench">
         <section class="effect-trace" aria-labelledby="effects-heading">
           <div class="section-heading"><h2 id="effects-heading">Execution history</h2></div>
-          <ol class="effect-list">
-            {{range .Effects}}
-            <li class="effect-row {{.StateClass}}">
-              <span class="history-rail" aria-hidden="true"><span class="history-node"></span></span>
-              <span class="effect-index">{{.Number}}</span>
-              <span class="effect-operation">{{.Operation}}</span>
-              <code class="effect-resource">{{.Resource}}</code>
-              <span class="effect-state">{{.State}}</span>
-              <span class="effect-enforcement">via <code>{{.EnforcedBy}}</code></span>
-            </li>
-            {{end}}
-          </ol>
-          <div class="history-continuation" aria-label="Verified path into reality">
-            <div class="history-stage observed">
+          <div class="history-controls" role="tablist" aria-label="Execution evidence" aria-orientation="vertical">
+            <ol class="effect-list" role="presentation">
+              {{range .Effects}}
+              <li role="presentation">
+                <button type="button" role="tab" id="history-{{.PanelID}}" class="effect-row history-event {{.StateClass}}{{if .IsCommitted}} is-selected is-path{{end}}" data-history-event data-panel="{{.PanelID}}" data-path="{{.PathID}}" aria-controls="panel-{{.PanelID}}" aria-selected="{{if .IsCommitted}}true{{else}}false{{end}}" tabindex="{{if .IsCommitted}}0{{else}}-1{{end}}">
+                  <span class="history-rail" aria-hidden="true"><span class="history-node"></span></span>
+                  <span class="effect-index">{{.Number}}</span>
+                  <span class="effect-operation">{{.Operation}}</span>
+                  <code class="effect-resource">{{.Resource}}</code>
+                  <span class="effect-state">{{.State}}</span>
+                  <span class="effect-enforcement">via <code>{{.EnforcedBy}}</code></span>
+                </button>
+              </li>
+              {{end}}
+            </ol>
+            <div class="history-continuation" aria-label="Verified path into reality">
+            <button type="button" role="tab" id="history-observed" class="history-stage history-event observed is-path" data-history-event data-panel="observed" data-path="surviving" aria-controls="panel-observed" aria-selected="false" tabindex="-1">
               <span class="history-rail" aria-hidden="true"><span class="history-node"></span></span>
               <span class="history-stage-label">Observed</span>
               <strong class="history-stage-action">{{.Inspector.Observed.Operation}}</strong><code class="history-stage-resource">{{.Inspector.Observed.Resource}}</code>
-            </div>
-            <div class="history-stage verified">
+            </button>
+            <button type="button" role="tab" id="history-verified" class="history-stage history-event verified is-path" data-history-event data-panel="verified" data-path="surviving" aria-controls="panel-verified" aria-selected="false" tabindex="-1">
               <span class="history-rail" aria-hidden="true"><span class="history-node"></span></span>
               <span class="history-stage-label">Verified</span>
               <strong class="history-stage-action">{{.Verification}}</strong>
-            </div>
-            <div class="history-boundary">
+            </button>
+            <button type="button" role="tab" id="history-trust-boundary" class="history-boundary history-event is-path" data-history-event data-panel="trust-boundary" data-path="surviving" aria-controls="panel-trust-boundary" aria-selected="false" tabindex="-1">
               <span class="history-rail" aria-hidden="true"></span>
-              <div class="history-boundary-line"><span>Trust boundary</span></div>
-            </div>
-            <div class="history-stage committed">
+              <span class="history-boundary-line"><span>Trust boundary</span></span>
+            </button>
+            <button type="button" role="tab" id="history-committed" class="history-stage history-event committed is-path" data-history-event data-panel="committed" data-path="surviving" aria-controls="panel-committed" aria-selected="false" tabindex="-1">
               <span class="history-rail" aria-hidden="true"><span class="history-node"></span></span>
               <span class="history-stage-label">Committed</span>
               <strong class="history-stage-action">{{.Inspector.Committed.Operation}}</strong><code class="history-stage-resource">{{.Inspector.Committed.Resource}}</code>
-            </div>
-            <div class="history-stage reality-stage">
+            </button>
+            <button type="button" role="tab" id="history-reality" class="history-stage history-event reality-stage is-path" data-history-event data-panel="reality" data-path="surviving" aria-controls="panel-reality" aria-selected="false" tabindex="-1">
               <span class="history-rail" aria-hidden="true"><span class="history-node"></span></span>
               <span class="history-stage-label">Reality</span>
               <span class="history-stage-resource"><code>{{.Inspector.RealityDisplay}}</code> changed</span>
+            </button>
             </div>
           </div>
         </section>
 
-        <aside class="inspector" aria-labelledby="inspector-heading">
-          <header class="inspector-heading">
-            <p class="eyebrow">Effect {{.Inspector.Number}}</p>
-            <h2 id="inspector-heading">{{.Inspector.Authorized.Operation}}</h2>
-            <code>{{.Inspector.Authorized.Resource}}</code>
-          </header>
+        <aside class="inspector" aria-label="Evidence inspector" aria-live="polite">
+          {{range .Panels}}
+          <section id="panel-{{.ID}}" class="inspector-panel" data-inspector-panel role="tabpanel" aria-labelledby="{{.HistoryID}}"{{if not .Selected}} hidden{{end}}>
+            <header class="inspector-heading">
+              <p class="eyebrow">{{.Eyebrow}}</p>
+              <h2>{{.Title}}</h2>
+              {{if .Resource}}<code>{{.Resource}}</code>{{end}}
+            </header>
 
-          <div class="causal-step">
-            <span class="step-label">Authorized</span>
-            <span class="step-value"><strong>Effect Contract</strong><code>{{.Inspector.Authorized.EnforcedBy}}</code></span>
-          </div>
-          <div class="causal-step">
-            <span class="step-label">Observed</span>
-            <span class="step-value"><strong>{{.Inspector.Observed.Operation}}</strong><code>{{.Inspector.Observed.Resource}}</code></span>
-          </div>
-          <div class="causal-step">
-            <span class="step-label">Verification</span>
-            <span class="step-value"><strong class="verified">{{.Verification}}</strong></span>
-          </div>
-          <div class="causal-step">
-            <span class="step-label">Committed</span>
-            <span class="step-value"><strong class="committed-label">{{.Inspector.Committed.Operation}}</strong><code>{{.Inspector.Committed.Resource}}</code></span>
-          </div>
+            {{if .Status}}<p class="panel-state {{.StatusClass}}">{{.Status}}</p>{{end}}
+            <div class="panel-facts">
+              {{range .Facts}}
+              <div class="panel-fact">
+                <span class="step-label">{{.Label}}</span>
+                <span class="step-value">
+                  {{if .ValueCode}}<code>{{.Value}}</code>{{else}}<strong{{if .Positive}} class="positive"{{end}}>{{.Value}}</strong>{{end}}
+                  {{if .Detail}}<code>{{.Detail}}</code>{{end}}
+                </span>
+              </div>
+              {{end}}
+            </div>
 
-          <section class="reality" aria-labelledby="reality-heading">
-            <h3 id="reality-heading">Reality</h3>
-            <p><code>{{.Inspector.RealityDisplay}}</code> changed</p>
-            <dl class="digests">
-              <dt>Before</dt><dd><code>{{.Inspector.BeforeShort}}</code></dd>
-              <dt>After</dt><dd><code>{{.Inspector.AfterShort}}</code></dd>
-            </dl>
+            {{if .Result}}
+            <section class="panel-result">
+              <h3>Result</h3>
+              <p>{{.Result}}</p>
+            </section>
+            {{end}}
+
+            {{if .ShowReality}}
+            <section class="reality">
+              <h3>Reality</h3>
+              <p><code>{{$.Inspector.RealityDisplay}}</code> changed</p>
+              <dl class="digests">
+                <dt>Before</dt><dd><code>{{.BeforeShort}}</code></dd>
+                <dt>After</dt><dd><code>{{.AfterShort}}</code></dd>
+              </dl>
+            </section>
+            {{end}}
+
+            <nav class="panel-navigation" aria-label="Execution history navigation">
+              {{if .Previous}}
+              <button type="button" class="panel-nav previous" data-select-panel="{{.Previous.PanelID}}">
+                <span class="panel-nav-direction">&larr; Previous</span>
+                <span class="panel-nav-label">{{.Previous.Label}}</span>
+                <span class="panel-nav-detail">{{.Previous.Detail}}</span>
+              </button>
+              {{else}}<span class="panel-nav-spacer"></span>{{end}}
+              {{if .Next}}
+              <button type="button" class="panel-nav next" data-select-panel="{{.Next.PanelID}}">
+                <span class="panel-nav-direction">Next &rarr;</span>
+                <span class="panel-nav-label">{{.Next.Label}}</span>
+                <span class="panel-nav-detail">{{.Next.Detail}}</span>
+              </button>
+              {{else}}<span class="panel-nav-spacer"></span>{{end}}
+            </nav>
           </section>
+          {{end}}
         </aside>
       </div>
     </main>
@@ -557,6 +773,7 @@ const pageTemplate = `<!doctype html>
       </details>
     </footer>
   </div>
+  <script>__MIRAGE_INTERACTION_SCRIPT__</script>
 </body>
 </html>
 `
