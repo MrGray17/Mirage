@@ -7,51 +7,75 @@ import (
 	"fmt"
 	"html/template"
 	"strings"
+	"time"
 
+	"github.com/MrGray17/Mirage/internal/effectgraph"
 	"github.com/MrGray17/Mirage/internal/receipt"
 )
 
-type pageData struct {
-	Receipt           *receipt.Receipt
-	Task              string
-	Agent             string
-	RunShort          string
-	Status            string
-	Attempted         int
-	Authorized        int
-	Denied            int
-	Committed         int
-	AuthorizedEffects []receipt.Effect
-	DeniedEffects     []receipt.Effect
-	Mutation          receipt.Mutation
+type effectRow struct {
+	Index       int
+	Number      string
+	Operation   string
+	Resource    string
+	EnforcedBy  string
+	State       string
+	StateClass  string
+	IsCommitted bool
 }
 
+type committedEffectView struct {
+	Index          int
+	Number         string
+	Authorized     receipt.Effect
+	Observed       receipt.Mutation
+	Committed      receipt.Mutation
+	RealityDisplay string
+	BeforeShort    string
+	AfterShort     string
+}
+
+type proofView struct {
+	ReceiptHash      string
+	GraphHash        string
+	ContractHash     string
+	RunID            string
+	StartedAt        string
+	CompletedAt      string
+	Duration         string
+	VerificationPlan string
+	CommitPlan       string
+	CommitOID        string
+	BeforeDigest     string
+	AfterDigest      string
+}
+
+type pageData struct {
+	Task         string
+	RunShort     string
+	Status       string
+	Attempted    int
+	Blocked      int
+	Committed    int
+	Effects      []effectRow
+	Inspector    committedEffectView
+	Verification string
+	Proof        proofView
+}
+
+// Render verifies evidence before mapping it into a presentation-only view.
+// Neither the mapping nor the template participates in authorization.
 func Render(evidence *receipt.Receipt) ([]byte, error) {
 	if err := receipt.Verify(evidence); err != nil {
 		return nil, fmt.Errorf("render only verified evidence: %w", err)
 	}
-	view, err := template.New("observatory").Funcs(template.FuncMap{"short": shortIdentity}).Parse(pageTemplate)
+	data, err := buildPageData(evidence)
+	if err != nil {
+		return nil, fmt.Errorf("build Observatory view: %w", err)
+	}
+	view, err := template.New("observatory").Parse(pageTemplate)
 	if err != nil {
 		return nil, fmt.Errorf("parse Observatory template: %w", err)
-	}
-	data := pageData{
-		Receipt: evidence, RunShort: shortIdentity(evidence.RunID), Status: "VERIFIED",
-		Attempted: len(evidence.AttemptedEffects), Authorized: len(evidence.AuthorizedEffects),
-		Denied: len(evidence.DeniedEffects), Committed: len(evidence.CommittedMutations),
-		AuthorizedEffects: append([]receipt.Effect(nil), evidence.AuthorizedEffects...),
-		DeniedEffects:     append([]receipt.Effect(nil), evidence.DeniedEffects...),
-		Mutation:          evidence.ObservedMutations[0],
-	}
-	if data.Committed > 0 {
-		data.Status = "COMMITTED"
-	}
-	for _, node := range evidence.EffectGraph.Nodes {
-		switch node.Type {
-		case "TASK":
-			data.Task = node.Label
-		case "AGENT":
-			data.Agent = node.Label
-		}
 	}
 	var output bytes.Buffer
 	if err := view.Execute(&output, data); err != nil {
@@ -60,13 +84,121 @@ func Render(evidence *receipt.Receipt) ([]byte, error) {
 	return output.Bytes(), nil
 }
 
+func buildPageData(evidence *receipt.Receipt) (pageData, error) {
+	data := pageData{
+		RunShort:     shortIdentity(evidence.RunID),
+		Status:       "VERIFIED",
+		Attempted:    len(evidence.AttemptedEffects),
+		Blocked:      len(evidence.DeniedEffects),
+		Committed:    len(evidence.CommittedMutations),
+		Verification: evidence.Verification,
+		Proof: proofView{
+			ReceiptHash:      evidence.SHA256,
+			GraphHash:        evidence.EffectGraphHash,
+			ContractHash:     evidence.ContractHash,
+			RunID:            evidence.RunID,
+			StartedAt:        evidence.StartedAt,
+			CompletedAt:      evidence.CompletedAt,
+			VerificationPlan: evidence.VerificationPlan,
+			CommitPlan:       evidence.CommitPlan,
+			CommitOID:        evidence.CommitOID,
+		},
+	}
+	if data.Committed > 0 {
+		data.Status = "COMMITTED"
+	}
+	for _, node := range evidence.EffectGraph.Nodes {
+		if node.Type == "TASK" {
+			data.Task = node.Label
+			break
+		}
+	}
+	started, startErr := time.Parse(time.RFC3339Nano, evidence.StartedAt)
+	completed, completedErr := time.Parse(time.RFC3339Nano, evidence.CompletedAt)
+	if startErr != nil || completedErr != nil {
+		return pageData{}, fmt.Errorf("verified receipt time could not be parsed")
+	}
+	data.Proof.Duration = formatDuration(completed.Sub(started))
+
+	committed := evidence.CommittedMutations[0]
+	observed := evidence.ObservedMutations[0]
+	committedIndex := -1
+	var authority receipt.Effect
+	for index, attempted := range evidence.AttemptedEffects {
+		state, class := "BLOCKED", "blocked"
+		if containsEffect(evidence.AuthorizedEffects, attempted) {
+			state, class = "AUTHORIZED", "authorized"
+			if effectgraph.CompetitionV1AuthorizesMutation(
+				attempted.Operation, attempted.Resource, committed.Operation, committed.Resource,
+			) {
+				state, class = "AUTHORIZED", "selected"
+				committedIndex = index
+				authority = attempted
+			}
+		}
+		data.Effects = append(data.Effects, effectRow{
+			Index: index + 1, Number: fmt.Sprintf("%02d", index+1), Operation: attempted.Operation,
+			Resource: attempted.Resource, EnforcedBy: attempted.EnforcedBy, State: state,
+			StateClass: class, IsCommitted: class == "selected",
+		})
+	}
+	if committedIndex < 0 {
+		return pageData{}, fmt.Errorf("verified committed mutation has no display authority")
+	}
+	data.Inspector = committedEffectView{
+		Index: committedIndex + 1, Number: fmt.Sprintf("%02d", committedIndex+1),
+		Authorized: authority, Observed: observed, Committed: committed,
+		RealityDisplay: displayResource(committed.Resource),
+		BeforeShort:    shortDigest(committed.BeforeDigest),
+		AfterShort:     shortDigest(committed.AfterDigest),
+	}
+	data.Proof.BeforeDigest = committed.BeforeDigest
+	data.Proof.AfterDigest = committed.AfterDigest
+	return data, nil
+}
+
+func containsEffect(effects []receipt.Effect, wanted receipt.Effect) bool {
+	for _, effect := range effects {
+		if effect == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func displayResource(resource string) string {
+	if trimmed := strings.TrimPrefix(resource, "/workspace/"); trimmed != resource && trimmed != "" {
+		return trimmed
+	}
+	return resource
+}
+
 func shortIdentity(value string) string {
 	const visible = 8
 	trimmed := strings.TrimPrefix(value, "sha256:")
-	if len(trimmed) <= visible*2+1 {
+	if len(trimmed) <= visible {
 		return trimmed
 	}
-	return trimmed[:visible] + "..." + trimmed[len(trimmed)-visible:]
+	return trimmed[len(trimmed)-visible:]
+}
+
+func shortDigest(value string) string {
+	const visible = 8
+	digest := value
+	if strings.HasPrefix(value, "sha256:") {
+		digest = strings.TrimPrefix(value, "sha256:")
+	}
+	if len(digest) <= visible*2+1 {
+		return digest
+	}
+	return digest[:visible] + "…" + digest[len(digest)-visible:]
+}
+
+func formatDuration(value time.Duration) string {
+	if value < time.Millisecond {
+		return value.String()
+	}
+	return value.Round(time.Millisecond).String()
 }
 
 const pageTemplate = `<!doctype html>
@@ -75,301 +207,355 @@ const pageTemplate = `<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
-  <title>MIRAGE Observatory &mdash; {{.Receipt.RunID}}</title>
+  <title>MIRAGE Observatory &mdash; {{.Proof.RunID}}</title>
   <style>
     :root {
-      color-scheme: dark;
-      --bg: #090a09;
-      --ink: #f0eee7;
-      --muted: #888d88;
-      --quiet: #575c58;
-      --line: #282c29;
-      --green: #79c99b;
-      --green-line: #477b5d;
-      --red: #d77b74;
-      --amber: #d4aa67;
-      --sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color-scheme: light;
+      --canvas: #f7f6f2;
+      --surface: #ffffff;
+      --ink: #171716;
+      --muted: #6b6964;
+      --quiet: #827f78;
+      --border: #e5e1d8;
+      --border-strong: #dedad2;
+      --rail: #b8b3aa;
+      --orange: #f45b20;
+      --orange-soft: #fff3ec;
+      --orange-muted: #b9562d;
+      --green: #18794e;
+      --green-soft: #edf7f1;
+      --red: #c83a2e;
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
       --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
     }
     * { box-sizing: border-box; }
-    html { background: var(--bg); }
+    html { background: var(--canvas); }
     body {
       margin: 0;
       min-width: 320px;
       min-height: 100vh;
-      background: var(--bg);
+      background: var(--canvas);
       color: var(--ink);
-      font: 14px/1.4 var(--sans);
+      font: 14px/1.45 var(--sans);
       text-rendering: optimizeLegibility;
     }
     code { font-family: var(--mono); }
     .shell {
-      width: min(1280px, 100%);
+      width: min(1360px, 100%);
       min-height: 100vh;
       margin: 0 auto;
-      padding: 24px 42px 20px;
-      display: flex;
-      flex-direction: column;
+      padding: 0 32px 24px;
     }
     .topbar {
-      min-height: 48px;
-      padding-bottom: 16px;
-      border-bottom: 1px solid var(--line);
+      min-height: 54px;
+      border-bottom: 1px solid var(--border);
       display: flex;
-      align-items: flex-start;
+      align-items: center;
       justify-content: space-between;
-      gap: 28px;
+      gap: 20px;
     }
-    .wordmark { margin: 0; font-size: 19px; line-height: 1; font-weight: 680; letter-spacing: .22em; }
-    .tagline { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
-    .run-state { display: flex; align-items: center; gap: 20px; color: var(--muted); }
-    .run-id { display: flex; gap: 8px; align-items: baseline; white-space: nowrap; }
-    .micro { color: var(--quiet); font-size: 9px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; }
-    .run-id code { color: var(--ink); font-size: 11px; }
-    .terminal-state { color: var(--green); font-size: 10px; font-weight: 700; letter-spacing: .12em; }
+    .brand { display: flex; align-items: baseline; gap: 9px; min-width: 0; }
+    .brand h1 { margin: 0; color: var(--orange); font-size: 18px; line-height: 1; font-weight: 750; letter-spacing: .16em; }
+    .brand span { color: var(--muted); font-size: 14px; }
+    .run-state { display: flex; align-items: center; gap: 18px; min-width: 0; }
+    .run-id { color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .run-id code { margin-left: 5px; color: var(--ink); font-size: 11px; }
+    .terminal-state { color: var(--green); font-size: 11px; font-weight: 750; letter-spacing: .08em; }
     .terminal-state::before {
       content: "";
       display: inline-block;
-      width: 6px;
-      height: 6px;
+      width: 7px;
+      height: 7px;
       margin-right: 7px;
+      border: 1px solid var(--green);
       border-radius: 50%;
       background: var(--green);
-      vertical-align: 1px;
+      vertical-align: 0;
     }
-    .execution-map {
-      flex: 1;
-      padding-top: 15px;
-      display: flex;
-      flex-direction: column;
-      align-items: stretch;
-    }
-    .realm-label { color: var(--quiet); font-size: 8px; font-weight: 700; letter-spacing: .2em; text-transform: uppercase; }
-    .realm-label.untrusted { align-self: flex-start; }
-    .origin { text-align: center; }
-    .task-label { margin-top: 3px; }
-    .task { max-width: 620px; margin: 3px auto 0; font-size: clamp(14px, 1.5vw, 18px); font-weight: 520; letter-spacing: -.015em; }
-    .connector {
-      width: 1px;
-      height: 14px;
-      margin: 7px auto;
-      background: var(--line);
+    .task-strip { padding: 11px 0 13px; border-bottom: 1px solid var(--border); }
+    .eyebrow { margin: 0 0 4px; color: var(--muted); font-size: 11px; font-weight: 720; letter-spacing: .11em; text-transform: uppercase; }
+    .task-strip h2 { max-width: 980px; margin: 0; font-size: clamp(20px, 1.8vw, 25px); line-height: 1.24; font-weight: 620; letter-spacing: -.02em; }
+    .summary { margin: 7px 0 0; color: var(--muted); font-size: 13px; }
+    .summary strong { color: var(--ink); font-weight: 680; }
+    .summary .blocked { color: var(--red); }
+    .summary .committed { color: var(--green); }
+    .workbench { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(340px, 1fr); gap: 24px; padding: 18px 0 20px; }
+    .section-heading { margin-bottom: 9px; }
+    .section-heading h2 { margin: 0; font-size: 12px; font-weight: 750; letter-spacing: .09em; text-transform: uppercase; }
+    .effect-list { margin: 0; padding: 0; border-top: 1px solid var(--border); list-style: none; }
+    .effect-row {
       position: relative;
-    }
-    .connector::after, .survivor-line::after {
-      content: "";
-      position: absolute;
-      left: -2px;
-      bottom: -1px;
-      width: 5px;
-      height: 5px;
-      border-right: 1px solid var(--muted);
-      border-bottom: 1px solid var(--muted);
-      transform: rotate(45deg);
-    }
-    .agent {
-      display: inline-flex;
-      align-items: center;
-      gap: 9px;
-      color: var(--amber);
-      font-size: 10px;
-      font-weight: 750;
-      letter-spacing: .14em;
-      text-transform: uppercase;
-    }
-    .agent::before { content: ""; width: 6px; height: 6px; border: 1px solid var(--amber); transform: rotate(45deg); }
-    .agent-source { margin-top: 2px; color: var(--quiet); font: 9px/1.3 var(--mono); }
-    .attempts {
-      position: relative;
-      width: 100%;
-      margin-top: 13px;
-      padding-top: 20px;
+      min-width: 0;
+      min-height: 48px;
+      padding: 8px 10px 7px 0;
       display: grid;
-      grid-template-columns: repeat(5, minmax(0, 1fr));
-      column-gap: 22px;
-    }
-    .attempts::before { content: ""; position: absolute; top: 0; left: 9.5%; right: 9.5%; border-top: 1px solid var(--line); }
-    .attempts::after { content: ""; position: absolute; top: -13px; left: 50%; height: 13px; border-left: 1px solid var(--line); }
-    .effect { position: relative; min-width: 0; text-align: center; overflow-wrap: anywhere; }
-    .effect::before { content: ""; position: absolute; top: -20px; left: 50%; height: 14px; border-left: 1px solid var(--line); }
-    .effect.denied:nth-child(1) { grid-column: 1; }
-    .effect.denied:nth-child(2) { grid-column: 2; }
-    .effect.denied:nth-child(3) { grid-column: 5; }
-    .effect.denied:nth-child(n+4) { grid-column: auto; }
-    .effect.authorized { grid-column: 3; grid-row: 1; }
-    .effect .operation { display: block; font: 700 10px/1.2 var(--mono); letter-spacing: .1em; }
-    .effect code { display: block; min-height: 2.8em; margin-top: 3px; color: var(--muted); font-size: 10px; }
-    .effect .disposition { display: block; margin-top: 2px; font-size: 9px; font-weight: 750; letter-spacing: .12em; }
-    .effect.denied .disposition, .dead-end { color: var(--red); }
-    .effect.authorized .operation, .effect.authorized .disposition { color: var(--green); }
-    .dead-end { display: block; height: 16px; margin-top: 3px; font: 16px/1 var(--sans); }
-    .survivor-line { width: 1px; height: 19px; margin: 4px auto 0; background: var(--green-line); position: relative; }
-    .survivor-line::after { border-color: var(--green); }
-    .causal-chain { width: min(300px, 100%); margin: 0 auto; text-align: center; }
-    .chain-node { line-height: 1.2; }
-    .chain-node strong { display: block; font-size: 10px; letter-spacing: .12em; text-transform: uppercase; }
-    .chain-node code { display: block; margin-top: 3px; color: var(--muted); font-size: 9px; overflow-wrap: anywhere; }
-    .chain-node.verified strong { color: var(--green); }
-    .boundary { position: relative; width: 100%; height: 25px; margin-top: 6px; display: flex; align-items: center; justify-content: center; }
-    .boundary::before { content: ""; position: absolute; left: 0; right: 0; border-top: 1px solid #363b37; }
-    .boundary::after { content: ""; position: absolute; top: -7px; bottom: -7px; left: 50%; border-left: 1px solid var(--green-line); }
-    .boundary span {
-      position: relative;
-      z-index: 1;
-      padding: 0 14px;
-      background: var(--bg);
-      color: #9ba09b;
-      font-size: 8px;
-      font-weight: 750;
-      letter-spacing: .22em;
-      text-transform: uppercase;
-      transform: translateX(108px);
-    }
-    .trusted-zone { position: relative; padding-top: 8px; text-align: center; }
-    .trusted-zone::before { content: ""; position: absolute; top: 0; left: 50%; height: 8px; border-left: 1px solid var(--green-line); }
-    .trusted-zone .realm-label { position: absolute; top: 7px; left: 0; color: var(--green-line); }
-    .reality { width: min(270px, 100%); margin: 0 auto; padding-top: 3px; border-top: 1px solid var(--green-line); }
-    .reality strong { display: block; color: var(--green); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; }
-    .reality code { display: block; margin-top: 3px; color: var(--ink); font-size: 11px; }
-    .metrics {
-      margin-top: 13px;
-      padding: 10px 0;
-      border-top: 1px solid var(--line);
-      border-bottom: 1px solid var(--line);
-      display: flex;
+      grid-template-columns: 32px 34px 74px minmax(0, 1fr) 104px;
+      column-gap: 8px;
       align-items: baseline;
-      justify-content: center;
-      gap: clamp(20px, 5vw, 68px);
-      white-space: nowrap;
     }
-    .metric { color: var(--muted); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
-    .metric b { margin-right: 5px; color: var(--ink); font-size: 16px; font-weight: 600; }
-    .metric.denied b { color: var(--red); }
-    .metric.good b { color: var(--green); }
-    .proof { padding-top: 12px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 20px 48px; align-items: end; }
-    .hashes { margin: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 13px; }
-    .hashes dt { color: var(--quiet); font-size: 8px; font-weight: 700; letter-spacing: .13em; text-transform: uppercase; }
-    .hashes dd { margin: 0; min-width: 0; }
-    .hashes code { color: var(--muted); font-size: 9px; }
-    .invariant { text-align: right; }
-    .invariant code { display: block; color: var(--ink); font-size: 11px; }
-    .invariant span { display: block; margin-top: 3px; color: var(--green); font-size: 9px; font-weight: 750; letter-spacing: .14em; }
-    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
-    @media (max-width: 1024px) {
-      .shell { padding-inline: 28px; }
-      .attempts { column-gap: 12px; }
-      .effect code { font-size: 9px; }
-      .proof { gap: 20px; }
+    .effect-row.selected { background: var(--orange-soft); }
+    .history-rail { grid-column: 1; grid-row: 1 / 3; position: relative; align-self: stretch; min-height: 34px; }
+    .history-rail::before { content: ""; position: absolute; top: -8px; bottom: -7px; left: 11px; width: 2px; background: var(--rail); }
+    .effect-row.blocked .history-rail::after { content: ""; position: absolute; top: 10px; left: 11px; width: 16px; border-top: 1.5px solid var(--red); }
+    .effect-row.selected .history-rail::after { content: ""; position: absolute; top: -2px; left: 11px; width: 2px; height: 27px; background: var(--orange); }
+    .history-node { position: absolute; z-index: 1; }
+    .effect-row.blocked .history-node { top: 1px; left: 23px; color: var(--red); font: 750 15px/1 var(--sans); }
+    .effect-row.blocked .history-node::before { content: "×"; }
+    .effect-row.selected .history-node { top: 6px; left: 7px; width: 10px; height: 10px; border: 2px solid var(--orange); border-radius: 50%; background: var(--orange); }
+    .effect-index { grid-column: 2; color: var(--quiet); font: 11px/1.4 var(--mono); }
+    .effect-operation { grid-column: 3; color: var(--ink); font: 700 13px/1.4 var(--mono); letter-spacing: .035em; }
+    .effect-resource { grid-column: 4; min-width: 0; color: var(--ink); font: 13px/1.4 var(--mono); overflow-wrap: anywhere; word-break: break-word; }
+    .effect-state { grid-column: 5; font-size: 12px; font-weight: 760; letter-spacing: .05em; text-align: right; }
+    .effect-row.blocked .effect-state { color: var(--red); }
+    .effect-row.authorized .effect-state,
+    .effect-row.selected .effect-state { color: var(--orange-muted); font-weight: 700; }
+    .effect-enforcement { grid-column: 4 / 6; min-width: 0; margin-top: 2px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+    .effect-enforcement code { font-size: 11px; }
+    .history-continuation { min-width: 0; }
+    .history-stage {
+      min-height: 31px;
+      padding-right: 10px;
+      display: grid;
+      grid-template-columns: 32px 34px 76px 105px minmax(0, 1fr);
+      column-gap: 8px;
+      align-items: center;
     }
-    @media (max-width: 720px) {
-      .shell { padding: 20px 20px 24px; }
-      .topbar { align-items: flex-start; }
+    .history-stage .history-rail { grid-row: 1; min-height: 31px; }
+    .history-stage .history-rail::before { top: 0; bottom: 0; }
+    .history-stage .history-node { top: 10px; left: 8px; width: 8px; height: 8px; border: 1.5px solid #756f66; border-radius: 50%; background: var(--canvas); }
+    .history-stage.verified .history-node,
+    .history-stage.committed .history-node { border-color: var(--green); background: var(--green-soft); }
+    .history-stage.committed .history-node { background: var(--green); }
+    .history-stage.reality-stage .history-node { top: 10px; left: 8px; width: 8px; height: 8px; border: 1.5px solid var(--green); background: var(--green-soft); transform: rotate(45deg); }
+    .history-stage.committed .history-rail::before,
+    .history-stage.reality-stage .history-rail::before { background: var(--green); }
+    .history-stage.reality-stage .history-rail::before { bottom: 16px; }
+    .history-stage-label { grid-column: 3; color: var(--muted); font-size: 11px; font-weight: 720; letter-spacing: .07em; text-transform: uppercase; }
+    .history-stage-action { grid-column: 4; min-width: 0; color: var(--ink); font-size: 12px; font-weight: 650; }
+    .history-stage-resource { grid-column: 5; min-width: 0; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+    .history-stage.verified .history-stage-action,
+    .history-stage.committed .history-stage-action,
+    .history-stage.reality-stage .history-stage-resource { color: var(--green); }
+    .history-stage.reality-stage .history-stage-resource { font-size: 12px; font-weight: 720; }
+    .history-boundary { min-height: 29px; display: grid; grid-template-columns: 32px minmax(0, 1fr); align-items: center; }
+    .history-boundary .history-rail { grid-row: 1; min-height: 29px; }
+    .history-boundary .history-rail::before { top: 0; bottom: 0; background: linear-gradient(to bottom, var(--rail) 0 50%, var(--green) 50% 100%); }
+    .history-boundary-line { grid-column: 1 / -1; position: relative; margin-left: 11px; border-top: 1px solid var(--border-strong); text-align: center; }
+    .history-boundary-line span { position: relative; top: -8px; padding: 0 9px; background: var(--canvas); color: var(--muted); font-size: 10px; font-weight: 720; letter-spacing: .1em; text-transform: uppercase; }
+    .inspector {
+      min-width: 0;
+      padding: 18px 20px 18px 22px;
+      border-left: 1px solid var(--border-strong);
+      border-radius: 0;
+      background: var(--surface);
+    }
+    .inspector-heading { margin-bottom: 15px; }
+    .inspector-heading .eyebrow { color: var(--orange-muted); font-size: 10px; }
+    .inspector-heading h2 { margin: 0; font-size: 25px; line-height: 1.2; font-weight: 720; }
+    .inspector-heading code { display: block; margin-top: 2px; color: var(--ink); font-size: 13px; overflow-wrap: anywhere; }
+    .causal-step { display: grid; grid-template-columns: 104px minmax(0, 1fr); gap: 10px; align-items: start; }
+    .causal-step + .causal-step { margin-top: 10px; }
+    .step-label { color: var(--muted); font-size: 11px; font-weight: 720; letter-spacing: .075em; text-transform: uppercase; }
+    .step-value { min-width: 0; }
+    .step-value strong { display: block; font-size: 14px; font-weight: 690; }
+    .step-value code { display: block; margin-top: 1px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+    .step-value .verified, .step-value .committed-label { color: var(--green); }
+    .reality { margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--border); }
+    .reality h3 { margin: 0 0 3px; color: var(--green); font-size: 11px; font-weight: 760; letter-spacing: .09em; text-transform: uppercase; }
+    .reality p { margin: 0; font-size: 18px; font-weight: 720; letter-spacing: -.01em; }
+    .reality p code { color: var(--ink); font-size: 17px; font-weight: 720; }
+    .digests { margin: 9px 0 0; display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 3px 10px; }
+    .digests dt { color: var(--muted); font-size: 11px; }
+    .digests dd { min-width: 0; margin: 0; }
+    .digests code { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+    .proof-footer { border-top: 1px solid var(--border-strong); }
+    .proof-status { min-height: 50px; display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+    .invariant { margin: 0; color: var(--ink); font-size: 13px; }
+    .invariant::before { content: "✓"; margin-right: 8px; color: var(--green); font-weight: 800; }
+    .receipt-status { color: var(--muted); font-size: 12px; }
+    .receipt-status strong { margin-left: 7px; color: var(--green); font-size: 11px; letter-spacing: .08em; }
+    details { border-top: 1px solid var(--border); }
+    summary { width: fit-content; padding: 11px 0; color: var(--muted); cursor: pointer; font-size: 13px; font-weight: 600; }
+    summary::marker { color: var(--orange); }
+    summary:focus-visible { outline: 2px solid var(--orange); outline-offset: 4px; border-radius: 2px; }
+    .proof-groups { padding: 6px 0 19px; display: grid; grid-template-columns: 1.2fr .9fr 1.1fr; gap: 34px; }
+    .proof-group { min-width: 0; }
+    .proof-group h3 { margin: 0 0 10px; color: var(--ink); font-size: 12px; font-weight: 680; }
+    .proof-grid { margin: 0; display: grid; grid-template-columns: 116px minmax(0, 1fr); gap: 9px 14px; }
+    .proof-grid dt { color: var(--muted); font-size: 11px; }
+    .proof-grid dd { min-width: 0; margin: 0; }
+    .proof-grid code, .proof-grid time { color: var(--muted); font: 11px/1.5 var(--mono); overflow-wrap: anywhere; }
+    @media (max-width: 850px) {
+      .shell { padding-inline: 22px; }
+      .workbench { grid-template-columns: 1fr; gap: 28px; }
+      .inspector { padding: 18px 20px; border-top: 1px solid var(--border-strong); border-left: 0; }
+      .proof-groups { grid-template-columns: 1fr; gap: 22px; }
+    }
+    @media (max-width: 540px) {
+      .shell { padding: 0 16px 20px; }
+      .topbar { min-height: 74px; align-items: flex-start; padding: 17px 0; }
+      .brand { display: grid; gap: 4px; }
       .run-state { display: grid; gap: 4px; justify-items: end; }
-      .execution-map { padding-top: 20px; }
-      .attempts { display: flex; flex-direction: column; gap: 17px; padding-top: 10px; }
-      .attempts::before, .attempts::after, .effect::before { display: none; }
-      .effect { text-align: left; padding-left: 18px; border-left: 1px solid var(--line); }
-      .effect.authorized { order: 2; border-color: var(--green-line); }
-      .effect.denied { order: 1; }
-      .dead-end { position: absolute; left: -7px; top: 13px; background: var(--bg); }
-      .survivor-line { margin-left: -19px; height: 16px; }
-      .causal-chain { margin-top: 5px; }
-      .metrics { justify-content: space-between; gap: 8px; white-space: normal; }
-      .metric { text-align: center; font-size: 8px; }
-      .metric b { display: block; margin: 0 0 2px; }
-      .proof { grid-template-columns: 1fr; }
-      .invariant { text-align: left; }
-      .boundary span { transform: translateX(80px); }
+      .run-id { max-width: 180px; overflow-wrap: anywhere; white-space: normal; text-align: right; }
+      .task-strip { padding: 12px 0 14px; }
+      .workbench { padding-top: 18px; }
+      .effect-row { grid-template-columns: 28px 30px 62px minmax(0, 1fr); row-gap: 5px; padding-right: 0; }
+      .history-rail { grid-column: 1; }
+      .effect-index { grid-column: 2; }
+      .effect-operation { grid-column: 3; }
+      .effect-resource { grid-column: 4; }
+      .effect-state { grid-column: 3; grid-row: 2; text-align: left; }
+      .effect-enforcement { grid-column: 4; grid-row: 2; margin-top: 0; }
+      .history-stage { grid-template-columns: 28px 30px 76px minmax(0, 1fr); padding: 3px 0; }
+      .history-stage-label { grid-column: 3; }
+      .history-stage-action { grid-column: 4; }
+      .history-stage-resource { grid-column: 4; grid-row: 2; margin-top: 2px; }
+      .history-stage.observed .history-rail,
+      .history-stage.committed .history-rail { grid-row: 1 / 3; }
+      .history-stage.reality-stage .history-stage-resource { grid-row: 1; margin-top: 0; }
+      .history-boundary { grid-template-columns: 28px minmax(0, 1fr); }
+      .inspector { padding: 17px 15px; }
+      .causal-step { grid-template-columns: 88px minmax(0, 1fr); gap: 8px; }
+      .proof-status { padding: 13px 0; align-items: flex-start; flex-direction: column; gap: 7px; }
+      .proof-grid { grid-template-columns: 1fr; gap: 2px; }
+      .proof-grid dd { margin-bottom: 7px; }
     }
   </style>
 </head>
 <body>
   <div class="shell">
     <header class="topbar">
-      <div>
-        <h1 class="wordmark">MIRAGE</h1>
-        <p class="tagline">transactional security runtime</p>
-      </div>
+      <div class="brand"><h1>MIRAGE</h1><span>Observatory</span></div>
       <div class="run-state">
-        <div class="run-id"><span class="micro">Run</span><code title="{{.Receipt.RunID}}">{{.RunShort}}</code></div>
+        <div class="run-id">run <code title="{{.Proof.RunID}}">{{.RunShort}}</code></div>
         <div class="terminal-state">{{.Status}}</div>
       </div>
     </header>
 
-    <main class="execution-map">
-      <span class="realm-label untrusted">Speculative / untrusted</span>
-      <section class="origin" aria-label="Untrusted execution">
-        <div class="task-label micro">Task</div>
-        <div class="task">{{.Task}}</div>
-        <div class="connector" aria-hidden="true"></div>
-        <div class="agent">Untrusted agent</div>
-        <div class="agent-source">{{.Agent}}</div>
+    <main>
+      <section class="task-strip" aria-labelledby="task-heading">
+        <p class="eyebrow">Task</p>
+        <h2 id="task-heading">{{.Task}}</h2>
+        <p class="summary"><strong>{{.Attempted}}</strong> effects &middot; <strong class="blocked">{{.Blocked}}</strong> blocked &middot; <strong class="committed">{{.Committed}}</strong> committed</p>
       </section>
 
-      <section class="attempts" aria-label="Attempted effects">
-        {{range .DeniedEffects}}
-        <article class="effect denied">
-          <span class="operation">{{.Operation}}</span>
-          <code>{{.Resource}}</code>
-          <span class="disposition">DENIED</span>
-          <span class="dead-end" aria-label="terminated">&times;</span>
-        </article>
-        {{end}}
-        {{range .AuthorizedEffects}}
-        <article class="effect authorized">
-          <span class="operation">{{.Operation}}</span>
-          <code>{{.Resource}}</code>
-          <span class="disposition">AUTHORIZED</span>
-          <span class="survivor-line" aria-hidden="true"></span>
-        </article>
-        {{end}}
-      </section>
+      <div class="workbench">
+        <section class="effect-trace" aria-labelledby="effects-heading">
+          <div class="section-heading"><h2 id="effects-heading">Execution history</h2></div>
+          <ol class="effect-list">
+            {{range .Effects}}
+            <li class="effect-row {{.StateClass}}">
+              <span class="history-rail" aria-hidden="true"><span class="history-node"></span></span>
+              <span class="effect-index">{{.Number}}</span>
+              <span class="effect-operation">{{.Operation}}</span>
+              <code class="effect-resource">{{.Resource}}</code>
+              <span class="effect-state">{{.State}}</span>
+              <span class="effect-enforcement">via <code>{{.EnforcedBy}}</code></span>
+            </li>
+            {{end}}
+          </ol>
+          <div class="history-continuation" aria-label="Verified path into reality">
+            <div class="history-stage observed">
+              <span class="history-rail" aria-hidden="true"><span class="history-node"></span></span>
+              <span class="history-stage-label">Observed</span>
+              <strong class="history-stage-action">{{.Inspector.Observed.Operation}}</strong><code class="history-stage-resource">{{.Inspector.Observed.Resource}}</code>
+            </div>
+            <div class="history-stage verified">
+              <span class="history-rail" aria-hidden="true"><span class="history-node"></span></span>
+              <span class="history-stage-label">Verified</span>
+              <strong class="history-stage-action">{{.Verification}}</strong>
+            </div>
+            <div class="history-boundary">
+              <span class="history-rail" aria-hidden="true"></span>
+              <div class="history-boundary-line"><span>Trust boundary</span></div>
+            </div>
+            <div class="history-stage committed">
+              <span class="history-rail" aria-hidden="true"><span class="history-node"></span></span>
+              <span class="history-stage-label">Committed</span>
+              <strong class="history-stage-action">{{.Inspector.Committed.Operation}}</strong><code class="history-stage-resource">{{.Inspector.Committed.Resource}}</code>
+            </div>
+            <div class="history-stage reality-stage">
+              <span class="history-rail" aria-hidden="true"><span class="history-node"></span></span>
+              <span class="history-stage-label">Reality</span>
+              <span class="history-stage-resource"><code>{{.Inspector.RealityDisplay}}</code> changed</span>
+            </div>
+          </div>
+        </section>
 
-      <section class="causal-chain" aria-label="Authorized causal path">
-        <div class="chain-node">
-          <strong>Observed mutation</strong>
-          <code>{{.Mutation.Operation}} {{.Mutation.Resource}}</code>
-        </div>
-        <div class="survivor-line" aria-hidden="true"></div>
-        <div class="chain-node verified">
-          <strong>Verified</strong>
-          <code title="{{.Receipt.VerificationPlan}}">plan {{short .Receipt.VerificationPlan}}</code>
-        </div>
-        <div class="survivor-line" aria-hidden="true"></div>
-      </section>
+        <aside class="inspector" aria-labelledby="inspector-heading">
+          <header class="inspector-heading">
+            <p class="eyebrow">Effect {{.Inspector.Number}}</p>
+            <h2 id="inspector-heading">{{.Inspector.Authorized.Operation}}</h2>
+            <code>{{.Inspector.Authorized.Resource}}</code>
+          </header>
 
-      <div class="boundary"><span>Trust boundary</span></div>
+          <div class="causal-step">
+            <span class="step-label">Authorized</span>
+            <span class="step-value"><strong>Effect Contract</strong><code>{{.Inspector.Authorized.EnforcedBy}}</code></span>
+          </div>
+          <div class="causal-step">
+            <span class="step-label">Observed</span>
+            <span class="step-value"><strong>{{.Inspector.Observed.Operation}}</strong><code>{{.Inspector.Observed.Resource}}</code></span>
+          </div>
+          <div class="causal-step">
+            <span class="step-label">Verification</span>
+            <span class="step-value"><strong class="verified">{{.Verification}}</strong></span>
+          </div>
+          <div class="causal-step">
+            <span class="step-label">Committed</span>
+            <span class="step-value"><strong class="committed-label">{{.Inspector.Committed.Operation}}</strong><code>{{.Inspector.Committed.Resource}}</code></span>
+          </div>
 
-      <section class="trusted-zone" aria-label="Trusted reality">
-        <span class="realm-label">Trusted reality</span>
-        <div class="chain-node verified"><strong>Trusted commit</strong></div>
-        <div class="survivor-line" aria-hidden="true"></div>
-        <div class="reality">
-          <strong>Reality</strong>
-          <code>{{.Mutation.Resource}}</code>
-        </div>
-      </section>
-
-      <section class="metrics" aria-label="Execution totals">
-        <div class="metric"><b>{{.Attempted}}</b>attempted</div>
-        <div class="metric denied"><b>{{.Denied}}</b>denied</div>
-        <div class="metric good"><b>{{.Authorized}}</b>authorized</div>
-        <div class="metric good"><b>{{.Committed}}</b>committed</div>
-      </section>
-
-      <footer class="proof">
-        <dl class="hashes">
-          <dt>Contract</dt><dd><code title="{{.Receipt.ContractHash}}">{{short .Receipt.ContractHash}}</code><span class="sr-only">{{.Receipt.ContractHash}}</span></dd>
-          <dt>Graph</dt><dd><code title="{{.Receipt.EffectGraphHash}}">{{short .Receipt.EffectGraphHash}}</code><span class="sr-only">{{.Receipt.EffectGraphHash}}</span></dd>
-          <dt>Receipt</dt><dd><code title="{{.Receipt.SHA256}}">{{short .Receipt.SHA256}}</code><span class="sr-only">{{.Receipt.SHA256}}</span></dd>
-          <dt>Commit plan</dt><dd><code title="{{.Receipt.CommitPlan}}">{{short .Receipt.CommitPlan}}</code><span class="sr-only">{{.Receipt.CommitPlan}}</span></dd>
-        </dl>
-        <div class="invariant">
-          <code>CommittedEffects &sube; AuthorizedEffects</code>
-          <span>PASSED</span>
-        </div>
-      </footer>
+          <section class="reality" aria-labelledby="reality-heading">
+            <h3 id="reality-heading">Reality</h3>
+            <p><code>{{.Inspector.RealityDisplay}}</code> changed</p>
+            <dl class="digests">
+              <dt>Before</dt><dd><code>{{.Inspector.BeforeShort}}</code></dd>
+              <dt>After</dt><dd><code>{{.Inspector.AfterShort}}</code></dd>
+            </dl>
+          </section>
+        </aside>
+      </div>
     </main>
+
+    <footer class="proof-footer">
+      <div class="proof-status">
+        <p class="invariant">CommittedEffects &sube; AuthorizedEffects</p>
+        <div class="receipt-status">Receipt <strong>VALID</strong></div>
+      </div>
+      <details>
+        <summary>Cryptographic proof</summary>
+        <div class="proof-groups">
+          <section class="proof-group" aria-labelledby="integrity-proof-heading">
+            <h3 id="integrity-proof-heading">Integrity</h3>
+            <dl class="proof-grid">
+              <dt>Receipt SHA-256</dt><dd><code>{{.Proof.ReceiptHash}}</code></dd>
+              <dt>Effect Graph SHA-256</dt><dd><code>{{.Proof.GraphHash}}</code></dd>
+              <dt>Contract SHA-256</dt><dd><code>{{.Proof.ContractHash}}</code></dd>
+              <dt>Before SHA-256</dt><dd><code>{{.Proof.BeforeDigest}}</code></dd>
+              <dt>After SHA-256</dt><dd><code>{{.Proof.AfterDigest}}</code></dd>
+            </dl>
+          </section>
+          <section class="proof-group" aria-labelledby="run-proof-heading">
+            <h3 id="run-proof-heading">Run</h3>
+            <dl class="proof-grid">
+              <dt>Run ID</dt><dd><code>{{.Proof.RunID}}</code></dd>
+              <dt>Started</dt><dd><time>{{.Proof.StartedAt}}</time></dd>
+              <dt>Completed</dt><dd><time>{{.Proof.CompletedAt}}</time></dd>
+              <dt>Duration</dt><dd><code>{{.Proof.Duration}}</code></dd>
+            </dl>
+          </section>
+          <section class="proof-group" aria-labelledby="plans-proof-heading">
+            <h3 id="plans-proof-heading">Plans</h3>
+            <dl class="proof-grid">
+              <dt>Verification</dt><dd><code>{{.Proof.VerificationPlan}}</code></dd>
+              <dt>Commit</dt><dd><code>{{.Proof.CommitPlan}}</code></dd>
+              {{if .Proof.CommitOID}}<dt>Commit OID</dt><dd><code>{{.Proof.CommitOID}}</code></dd>{{end}}
+            </dl>
+          </section>
+        </div>
+      </details>
+    </footer>
   </div>
 </body>
 </html>
