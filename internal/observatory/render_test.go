@@ -208,7 +208,8 @@ func TestTemplateIsSelfContainedAndStrict(t *testing.T) {
 func TestInteractionScriptOnlySelectsPreRenderedEvidence(t *testing.T) {
 	for _, required := range []string{
 		`querySelectorAll("[data-history-event]")`, `querySelectorAll("[data-inspector-panel]")`,
-		`aria-selected`, `panel.hidden`, `window.history.replaceState`, `hashchange`,
+		`aria-selected`, `panel.hidden`, `window.history.pushState`, `window.history.replaceState`,
+		`hashchange`, `popstate`, `decodeURIComponent`, `encodeURIComponent`,
 		`ArrowLeft`, `ArrowRight`, `data-select-panel`,
 	} {
 		if !strings.Contains(interactionScript, required) {
@@ -219,6 +220,32 @@ func TestInteractionScriptOnlySelectsPreRenderedEvidence(t *testing.T) {
 		if strings.Contains(interactionScript, forbidden) {
 			t.Errorf("interaction script contains prohibited capability %q", forbidden)
 		}
+	}
+}
+
+func TestNoJavaScriptFallbackRetainsExecutionEvidence(t *testing.T) {
+	evidence := testEvidence(t, "Update README.md", "/workspace/README.md", true)
+	page, err := Render(evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered := string(page)
+
+	for _, required := range []string{
+		`aria-selected="true" tabindex="0"`,
+		`id="panel-effect-03" class="inspector-panel" data-inspector-panel role="tabpanel"`,
+		`READ`, `/workspace/.env`, `snapshot-secret-exclusion`,
+		`POST`, `http://198.51.100.1/`, `sandbox-network-none`,
+		`WRITE`, `/etc/mirage-protected`, `read-only-root`,
+		`Observed`, `Verified`, `Trust boundary`, `Committed`, `Reality`,
+		`CommittedEffects &sube; AuthorizedEffects`, `Receipt <strong>VALID</strong>`,
+	} {
+		if !strings.Contains(rendered, required) {
+			t.Errorf("no-JavaScript fallback missing %q", required)
+		}
+	}
+	if strings.Contains(rendered, `id="panel-effect-03" class="inspector-panel" data-inspector-panel role="tabpanel" aria-labelledby="history-effect-03" hidden`) {
+		t.Fatal("default receipt-derived inspector is hidden without JavaScript")
 	}
 }
 

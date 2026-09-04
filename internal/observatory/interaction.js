@@ -5,8 +5,9 @@
   const events = Array.from(document.querySelectorAll("[data-history-event]"));
   const panels = Array.from(document.querySelectorAll("[data-inspector-panel]"));
   if (events.length === 0 || panels.length === 0) return;
+  const fallback = events.find((event) => event.getAttribute("aria-selected") === "true") || events[0];
 
-  function select(panelID, moveFocus, updateHash) {
+  function select(panelID, moveFocus, historyMode) {
     const selected = events.find((event) => event.dataset.panel === panelID);
     if (!selected) return false;
 
@@ -22,8 +23,13 @@
       panel.hidden = panel.id !== "panel-" + panelID;
     });
 
-    if (updateHash && window.location.hash !== "#" + panelID) {
-      window.history.replaceState(null, "", "#" + panelID);
+    if (historyMode && window.location.hash !== "#" + panelID) {
+      const fragment = "#" + encodeURIComponent(panelID);
+      if (historyMode === "push") {
+        window.history.pushState(null, "", fragment);
+      } else {
+        window.history.replaceState(null, "", fragment);
+      }
     }
     if (moveFocus) selected.focus();
     return true;
@@ -32,7 +38,7 @@
   function move(offset) {
     const current = events.findIndex((event) => event.getAttribute("aria-selected") === "true");
     const target = Math.max(0, Math.min(events.length - 1, current + offset));
-    select(events[target].dataset.panel, true, true);
+    select(events[target].dataset.panel, true, "push");
   }
 
   function fragmentID() {
@@ -44,13 +50,13 @@
   }
 
   events.forEach((event) => {
-    event.addEventListener("click", () => select(event.dataset.panel, false, true));
+    event.addEventListener("click", () => select(event.dataset.panel, false, "push"));
   });
 
   document.addEventListener("click", (click) => {
     if (!(click.target instanceof Element)) return;
     const control = click.target.closest("[data-select-panel]");
-    if (control) select(control.dataset.selectPanel, true, true);
+    if (control) select(control.dataset.selectPanel, true, "push");
   });
 
   document.addEventListener("keydown", (key) => {
@@ -64,12 +70,16 @@
     }
   });
 
-  window.addEventListener("hashchange", () => {
-    select(fragmentID(), false, false);
-  });
+  function restoreFragment() {
+    if (!select(fragmentID(), false, false)) {
+      select(fallback.dataset.panel, false, "replace");
+    }
+  }
+
+  window.addEventListener("hashchange", restoreFragment);
+  window.addEventListener("popstate", restoreFragment);
 
   root.classList.add("interaction-ready");
   const requested = fragmentID();
-  const fallback = events.find((event) => event.getAttribute("aria-selected") === "true") || events[0];
-  if (!select(requested, false, false)) select(fallback.dataset.panel, false, true);
+  if (!select(requested, false, false)) select(fallback.dataset.panel, false, "replace");
 }());
