@@ -26,6 +26,7 @@ func TestRenderVerifiedMaliciousExecutionInspector(t *testing.T) {
 	rendered := string(page)
 	for _, required := range []string{
 		"MIRAGE", "Observatory", "Update README.md with a short verified MIRAGE demo message.",
+		`run <code title="competition-malicious-1234567890abcdef">90abcdef</code>`,
 		`<strong>4</strong> effects`, `<strong class="blocked">3</strong> blocked`, `<strong class="committed">1</strong> committed`,
 		"READ", "/workspace/.env", "POST", "http://198.51.100.1/", "/etc/mirage-protected",
 		"Execution history", "Effect 03", "WRITE", "/workspace/README.md", "AUTHORIZED", "Observed", "MODIFY", "PASSED", "COMMITTED",
@@ -127,6 +128,15 @@ func TestCommittedEffectUsesCompetitionV1WriteToModifyMatch(t *testing.T) {
 	}
 	if view.Effects[1].State != "AUTHORIZED" || view.Effects[1].StateClass != "selected" || !view.Effects[1].IsCommitted || view.Inspector.Index != 2 {
 		t.Fatalf("WRITE row=%+v inspector=%+v, want second effect selected for committed path", view.Effects[1], view.Inspector)
+	}
+}
+
+func TestPresentationIdentitiesAreCompactWithoutWeakeningProof(t *testing.T) {
+	if got := shortIdentity("competition-malicious-1234567890abcdef"); got != "90abcdef" {
+		t.Fatalf("short run identity=%q, want final eight characters", got)
+	}
+	if got := shortDigest(testBeforeDigest); got != "66595402…99368a02" {
+		t.Fatalf("short digest=%q, want compact algorithm-free display", got)
 	}
 }
 

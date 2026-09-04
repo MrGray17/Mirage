@@ -176,24 +176,22 @@ func displayResource(resource string) string {
 func shortIdentity(value string) string {
 	const visible = 8
 	trimmed := strings.TrimPrefix(value, "sha256:")
-	if len(trimmed) <= visible*2+1 {
+	if len(trimmed) <= visible {
 		return trimmed
 	}
-	return trimmed[:visible] + "..." + trimmed[len(trimmed)-visible:]
+	return trimmed[len(trimmed)-visible:]
 }
 
 func shortDigest(value string) string {
 	const visible = 8
-	prefix := ""
 	digest := value
 	if strings.HasPrefix(value, "sha256:") {
-		prefix = "sha256:"
-		digest = strings.TrimPrefix(value, prefix)
+		digest = strings.TrimPrefix(value, "sha256:")
 	}
 	if len(digest) <= visible*2+1 {
-		return value
+		return digest
 	}
-	return prefix + digest[:visible] + "…" + digest[len(digest)-visible:]
+	return digest[:visible] + "…" + digest[len(digest)-visible:]
 }
 
 func formatDuration(value time.Duration) string {
@@ -257,8 +255,8 @@ const pageTemplate = `<!doctype html>
       gap: 20px;
     }
     .brand { display: flex; align-items: baseline; gap: 9px; min-width: 0; }
-    .brand h1 { margin: 0; color: var(--orange); font-size: 16px; line-height: 1; font-weight: 760; letter-spacing: .18em; }
-    .brand span { color: var(--muted); font-size: 13px; }
+    .brand h1 { margin: 0; color: var(--orange); font-size: 18px; line-height: 1; font-weight: 750; letter-spacing: .16em; }
+    .brand span { color: var(--muted); font-size: 14px; }
     .run-state { display: flex; align-items: center; gap: 18px; min-width: 0; }
     .run-id { color: var(--muted); font-size: 12px; white-space: nowrap; }
     .run-id code { margin-left: 5px; color: var(--ink); font-size: 11px; }
@@ -271,19 +269,19 @@ const pageTemplate = `<!doctype html>
       margin-right: 7px;
       border: 1px solid var(--green);
       border-radius: 50%;
-      background: var(--green-soft);
+      background: var(--green);
       vertical-align: 0;
     }
-    .task-strip { padding: 14px 0 16px; border-bottom: 1px solid var(--border); }
+    .task-strip { padding: 11px 0 13px; border-bottom: 1px solid var(--border); }
     .eyebrow { margin: 0 0 4px; color: var(--muted); font-size: 11px; font-weight: 720; letter-spacing: .11em; text-transform: uppercase; }
-    .task-strip h2 { max-width: 980px; margin: 0; font-size: clamp(21px, 2.1vw, 27px); line-height: 1.24; font-weight: 620; letter-spacing: -.02em; }
+    .task-strip h2 { max-width: 980px; margin: 0; font-size: clamp(20px, 1.8vw, 25px); line-height: 1.24; font-weight: 620; letter-spacing: -.02em; }
     .summary { margin: 7px 0 0; color: var(--muted); font-size: 13px; }
     .summary strong { color: var(--ink); font-weight: 680; }
     .summary .blocked { color: var(--red); }
     .summary .committed { color: var(--green); }
-    .workbench { display: grid; grid-template-columns: minmax(0, 3fr) minmax(360px, 2fr); gap: 28px; padding: 20px 0 22px; }
+    .workbench { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(340px, 1fr); gap: 24px; padding: 18px 0 20px; }
     .section-heading { margin-bottom: 9px; }
-    .section-heading h2 { margin: 0; font-size: 13px; font-weight: 760; letter-spacing: .09em; text-transform: uppercase; }
+    .section-heading h2 { margin: 0; font-size: 12px; font-weight: 750; letter-spacing: .09em; text-transform: uppercase; }
     .effect-list { margin: 0; padding: 0; border-top: 1px solid var(--border); list-style: none; }
     .effect-row {
       position: relative;
@@ -296,14 +294,14 @@ const pageTemplate = `<!doctype html>
       align-items: baseline;
     }
     .effect-row.selected { background: var(--orange-soft); }
-    .effect-row.selected::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 2px; background: var(--orange); }
     .history-rail { grid-column: 1; grid-row: 1 / 3; position: relative; align-self: stretch; min-height: 34px; }
-    .history-rail::before { content: ""; position: absolute; top: -8px; bottom: -7px; left: 11px; border-left: 2px solid var(--rail); }
+    .history-rail::before { content: ""; position: absolute; top: -8px; bottom: -7px; left: 11px; width: 2px; background: var(--rail); }
     .effect-row.blocked .history-rail::after { content: ""; position: absolute; top: 10px; left: 11px; width: 16px; border-top: 1.5px solid var(--red); }
+    .effect-row.selected .history-rail::after { content: ""; position: absolute; top: -2px; left: 11px; width: 2px; height: 27px; background: var(--orange); }
     .history-node { position: absolute; z-index: 1; }
     .effect-row.blocked .history-node { top: 1px; left: 23px; color: var(--red); font: 750 15px/1 var(--sans); }
     .effect-row.blocked .history-node::before { content: "×"; }
-    .effect-row.selected .history-node { top: 6px; left: 7px; width: 10px; height: 10px; border: 2px solid var(--orange); border-radius: 50%; background: var(--surface); }
+    .effect-row.selected .history-node { top: 6px; left: 7px; width: 10px; height: 10px; border: 2px solid var(--orange); border-radius: 50%; background: var(--orange); }
     .effect-index { grid-column: 2; color: var(--quiet); font: 11px/1.4 var(--mono); }
     .effect-operation { grid-column: 3; color: var(--ink); font: 700 13px/1.4 var(--mono); letter-spacing: .035em; }
     .effect-resource { grid-column: 4; min-width: 0; color: var(--ink); font: 13px/1.4 var(--mono); overflow-wrap: anywhere; word-break: break-word; }
@@ -313,12 +311,12 @@ const pageTemplate = `<!doctype html>
     .effect-row.selected .effect-state { color: var(--orange-muted); font-weight: 700; }
     .effect-enforcement { grid-column: 4 / 6; min-width: 0; margin-top: 2px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
     .effect-enforcement code { font-size: 11px; }
-    .history-continuation { border-bottom: 1px solid var(--border); }
+    .history-continuation { min-width: 0; }
     .history-stage {
       min-height: 31px;
       padding-right: 10px;
       display: grid;
-      grid-template-columns: 32px 34px 74px minmax(0, 1fr) 104px;
+      grid-template-columns: 32px 34px 76px 105px minmax(0, 1fr);
       column-gap: 8px;
       align-items: center;
     }
@@ -327,36 +325,39 @@ const pageTemplate = `<!doctype html>
     .history-stage .history-node { top: 10px; left: 8px; width: 8px; height: 8px; border: 1.5px solid #756f66; border-radius: 50%; background: var(--canvas); }
     .history-stage.verified .history-node,
     .history-stage.committed .history-node { border-color: var(--green); background: var(--green-soft); }
+    .history-stage.committed .history-node { background: var(--green); }
     .history-stage.reality-stage .history-node { top: 10px; left: 8px; width: 8px; height: 8px; border: 1.5px solid var(--green); background: var(--green-soft); transform: rotate(45deg); }
+    .history-stage.committed .history-rail::before,
+    .history-stage.reality-stage .history-rail::before { background: var(--green); }
     .history-stage.reality-stage .history-rail::before { bottom: 16px; }
     .history-stage-label { grid-column: 3; color: var(--muted); font-size: 11px; font-weight: 720; letter-spacing: .07em; text-transform: uppercase; }
-    .history-stage-value { grid-column: 4 / 6; min-width: 0; color: var(--ink); font-size: 12px; font-weight: 650; }
-    .history-stage-value code { margin-left: 7px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
-    .history-stage.verified .history-stage-value,
-    .history-stage.committed .history-stage-value,
-    .history-stage.reality-stage .history-stage-value { color: var(--green); }
-    .history-stage.reality-stage .history-stage-value { font-weight: 720; }
+    .history-stage-action { grid-column: 4; min-width: 0; color: var(--ink); font-size: 12px; font-weight: 650; }
+    .history-stage-resource { grid-column: 5; min-width: 0; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+    .history-stage.verified .history-stage-action,
+    .history-stage.committed .history-stage-action,
+    .history-stage.reality-stage .history-stage-resource { color: var(--green); }
+    .history-stage.reality-stage .history-stage-resource { font-size: 12px; font-weight: 720; }
     .history-boundary { min-height: 29px; display: grid; grid-template-columns: 32px minmax(0, 1fr); align-items: center; }
     .history-boundary .history-rail { grid-row: 1; min-height: 29px; }
-    .history-boundary .history-rail::before { top: 0; bottom: 0; }
-    .history-boundary-line { grid-column: 2; position: relative; border-top: 1px solid var(--border-strong); text-align: center; }
+    .history-boundary .history-rail::before { top: 0; bottom: 0; background: linear-gradient(to bottom, var(--rail) 0 50%, var(--green) 50% 100%); }
+    .history-boundary-line { grid-column: 1 / -1; position: relative; margin-left: 11px; border-top: 1px solid var(--border-strong); text-align: center; }
     .history-boundary-line span { position: relative; top: -8px; padding: 0 9px; background: var(--canvas); color: var(--muted); font-size: 10px; font-weight: 720; letter-spacing: .1em; text-transform: uppercase; }
     .inspector {
       min-width: 0;
-      padding: 18px 20px;
-      border: 1px solid var(--border-strong);
-      border-radius: 8px;
+      padding: 18px 20px 18px 22px;
+      border-left: 1px solid var(--border-strong);
+      border-radius: 0;
       background: var(--surface);
     }
-    .inspector-heading { margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+    .inspector-heading { margin-bottom: 15px; }
     .inspector-heading .eyebrow { color: var(--orange-muted); font-size: 10px; }
-    .inspector-heading h2 { margin: 0; font-size: 22px; line-height: 1.2; font-weight: 720; }
+    .inspector-heading h2 { margin: 0; font-size: 25px; line-height: 1.2; font-weight: 720; }
     .inspector-heading code { display: block; margin-top: 2px; color: var(--ink); font-size: 13px; overflow-wrap: anywhere; }
     .causal-step { display: grid; grid-template-columns: 104px minmax(0, 1fr); gap: 10px; align-items: start; }
     .causal-step + .causal-step { margin-top: 10px; }
     .step-label { color: var(--muted); font-size: 11px; font-weight: 720; letter-spacing: .075em; text-transform: uppercase; }
     .step-value { min-width: 0; }
-    .step-value strong { display: block; font-size: 13px; font-weight: 690; }
+    .step-value strong { display: block; font-size: 14px; font-weight: 690; }
     .step-value code { display: block; margin-top: 1px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
     .step-value .verified, .step-value .committed-label { color: var(--green); }
     .reality { margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--border); }
@@ -374,7 +375,7 @@ const pageTemplate = `<!doctype html>
     .receipt-status { color: var(--muted); font-size: 12px; }
     .receipt-status strong { margin-left: 7px; color: var(--green); font-size: 11px; letter-spacing: .08em; }
     details { border-top: 1px solid var(--border); }
-    summary { width: fit-content; padding: 12px 0; color: var(--ink); cursor: pointer; font-size: 14px; font-weight: 650; }
+    summary { width: fit-content; padding: 11px 0; color: var(--muted); cursor: pointer; font-size: 13px; font-weight: 600; }
     summary::marker { color: var(--orange); }
     summary:focus-visible { outline: 2px solid var(--orange); outline-offset: 4px; border-radius: 2px; }
     .proof-groups { padding: 6px 0 19px; display: grid; grid-template-columns: 1.2fr .9fr 1.1fr; gap: 34px; }
@@ -387,7 +388,7 @@ const pageTemplate = `<!doctype html>
     @media (max-width: 850px) {
       .shell { padding-inline: 22px; }
       .workbench { grid-template-columns: 1fr; gap: 28px; }
-      .inspector { padding: 18px 20px; }
+      .inspector { padding: 18px 20px; border-top: 1px solid var(--border-strong); border-left: 0; }
       .proof-groups { grid-template-columns: 1fr; gap: 22px; }
     }
     @media (max-width: 540px) {
@@ -396,7 +397,7 @@ const pageTemplate = `<!doctype html>
       .brand { display: grid; gap: 4px; }
       .run-state { display: grid; gap: 4px; justify-items: end; }
       .run-id { max-width: 180px; overflow-wrap: anywhere; white-space: normal; text-align: right; }
-      .task-strip { padding: 14px 0 16px; }
+      .task-strip { padding: 12px 0 14px; }
       .workbench { padding-top: 18px; }
       .effect-row { grid-template-columns: 28px 30px 62px minmax(0, 1fr); row-gap: 5px; padding-right: 0; }
       .history-rail { grid-column: 1; }
@@ -407,10 +408,13 @@ const pageTemplate = `<!doctype html>
       .effect-enforcement { grid-column: 4; grid-row: 2; margin-top: 0; }
       .history-stage { grid-template-columns: 28px 30px 76px minmax(0, 1fr); padding: 3px 0; }
       .history-stage-label { grid-column: 3; }
-      .history-stage-value { grid-column: 4; }
-      .history-stage-value code { display: block; margin: 2px 0 0; }
+      .history-stage-action { grid-column: 4; }
+      .history-stage-resource { grid-column: 4; grid-row: 2; margin-top: 2px; }
+      .history-stage.observed .history-rail,
+      .history-stage.committed .history-rail { grid-row: 1 / 3; }
+      .history-stage.reality-stage .history-stage-resource { grid-row: 1; margin-top: 0; }
       .history-boundary { grid-template-columns: 28px minmax(0, 1fr); }
-      .inspector { padding: 17px 15px; border-radius: 8px; }
+      .inspector { padding: 17px 15px; }
       .causal-step { grid-template-columns: 88px minmax(0, 1fr); gap: 8px; }
       .proof-status { padding: 13px 0; align-items: flex-start; flex-direction: column; gap: 7px; }
       .proof-grid { grid-template-columns: 1fr; gap: 2px; }
@@ -454,12 +458,12 @@ const pageTemplate = `<!doctype html>
             <div class="history-stage observed">
               <span class="history-rail" aria-hidden="true"><span class="history-node"></span></span>
               <span class="history-stage-label">Observed</span>
-              <span class="history-stage-value"><strong>{{.Inspector.Observed.Operation}}</strong><code>{{.Inspector.Observed.Resource}}</code></span>
+              <strong class="history-stage-action">{{.Inspector.Observed.Operation}}</strong><code class="history-stage-resource">{{.Inspector.Observed.Resource}}</code>
             </div>
             <div class="history-stage verified">
               <span class="history-rail" aria-hidden="true"><span class="history-node"></span></span>
               <span class="history-stage-label">Verified</span>
-              <span class="history-stage-value">{{.Verification}}</span>
+              <strong class="history-stage-action">{{.Verification}}</strong>
             </div>
             <div class="history-boundary">
               <span class="history-rail" aria-hidden="true"></span>
@@ -468,12 +472,12 @@ const pageTemplate = `<!doctype html>
             <div class="history-stage committed">
               <span class="history-rail" aria-hidden="true"><span class="history-node"></span></span>
               <span class="history-stage-label">Committed</span>
-              <span class="history-stage-value"><strong>{{.Inspector.Committed.Operation}}</strong><code>{{.Inspector.Committed.Resource}}</code></span>
+              <strong class="history-stage-action">{{.Inspector.Committed.Operation}}</strong><code class="history-stage-resource">{{.Inspector.Committed.Resource}}</code>
             </div>
             <div class="history-stage reality-stage">
               <span class="history-rail" aria-hidden="true"><span class="history-node"></span></span>
               <span class="history-stage-label">Reality</span>
-              <span class="history-stage-value"><code>{{.Inspector.RealityDisplay}}</code> changed</span>
+              <span class="history-stage-resource"><code>{{.Inspector.RealityDisplay}}</code> changed</span>
             </div>
           </div>
         </section>
@@ -498,7 +502,7 @@ const pageTemplate = `<!doctype html>
             <span class="step-value"><strong class="verified">{{.Verification}}</strong></span>
           </div>
           <div class="causal-step">
-            <span class="step-label">Commit</span>
+            <span class="step-label">Committed</span>
             <span class="step-value"><strong class="committed-label">{{.Inspector.Committed.Operation}}</strong><code>{{.Inspector.Committed.Resource}}</code></span>
           </div>
 
