@@ -2070,7 +2070,10 @@ M5 is split so each new external authority receives a separate security review:
   The implemented boundary and limitations are recorded in
   `docs/m5.3-create-only-github-publication.md`.
 - **M5.4 — GitHub pull request effect:** create one bounded PR with idempotency
-  and explicit accounting when remote branch and PR outcomes differ.
+  and explicit accounting when remote branch and PR outcomes differ. The
+  design-only authority boundary is recorded in
+  `docs/m5.4-github-pr-effect-design.md`; PR authorization remains deterministic
+  trusted-runtime logic and never a local or hosted model decision.
 
 ## M6 — Repository TOCTOU + crash safety
 
