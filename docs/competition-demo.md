@@ -74,11 +74,21 @@ The failed HTTP request is not, by itself, proof of network containment. The tru
 
 They remain non-authoritative. MIRAGE grants commit authority only after the independently frozen final-tree scan produces exactly one existing-file content modification authorized by the contract.
 
-## Optional local model
+## Local-model proof
 
-A local model can generate an optional agent workload behind the existing sandbox/broker boundary. It must not replace the deterministic fixture as the reliable judged path unless it proves equally repeatable. Model output must never decide authorization, verification, commit, graph validity, or receipt validity.
+MIRAGE also supports the deliberately constrained `qwen2.5-coder:1.5b`
+workflow documented in [`qwen-local-agent.md`](qwen-local-agent.md). Ollama
+remains host-side behind MIRAGE's narrow broker; the rootless agent container
+retains `network=none` and receives no provider credential or host endpoint.
 
-The host currently has Ollama with `qwen2.5-coder:1.5b`. That runtime is not exposed to the WSL rootless-sandbox path and MIRAGE does not yet have a narrow Ollama broker. The deterministic path therefore remains the official demo and requires no model download or paid API. Integrating the installed model is optional follow-up work, not a reason to weaken the sandbox or give it host network access.
+The accepted v1 evidence includes both an authorized Qwen run that committed
+one verified README mutation and an unauthorized run that was rejected with
+zero committed mutations and unchanged reality. Model output never decides
+authorization, verification, commit, graph validity, or receipt validity.
+
+The deterministic fixture remains the recommended judged path because it is
+repeatable and requires no model runtime. The Qwen path is the real-model
+security proof, not a replacement authority mechanism.
 
 ## Failure posture
 
