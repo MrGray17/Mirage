@@ -1,8 +1,14 @@
 # MIRAGE System Architecture
 
-> **Status:** Architecture baseline v0.1  
+> **Status:** MIRAGE v1.0.0 release architecture
 > **Project type:** Transactional security runtime for autonomous AI agents  
 > **Primary thesis:** Agents execute in a speculative shadow environment; only verified, authorized effects are allowed to cross into real systems.
+
+This document describes both the implemented MIRAGE v1 boundary and the
+longer-term architecture. Service APIs, database schemas, signed receipts,
+later milestones, production evolution, and sections explicitly labelled
+**target state** are design direction, not claims about the v1 release. The
+authoritative v1 scope and limitations are summarized in Sections 1.1 and 31.
 
 ---
 
@@ -41,6 +47,32 @@ MIRAGE is therefore not merely a sandbox, firewall, prompt guardrail, or agent p
 6. transactional commit,
 7. state revalidation,
 8. tamper-evident audit receipts.
+
+## 1.1 MIRAGE v1 implementation status
+
+MIRAGE v1 implements a deliberately narrow, end-to-end security path:
+
+```text
+untrusted coding agent
+    -> rootless disposable workspace
+    -> frozen process tree and authoritative final-state acquisition
+    -> canonical filesystem diff
+    -> deterministic contract verification
+    -> freshness and authority revalidation
+    -> one existing regular-file content replacement
+    -> self-hashed receipt and read-only Observatory
+```
+
+The released local-model proof runs exactly `qwen2.5-coder:1.5b` through a
+trusted host-side Ollama broker. The Qwen process has a constrained
+`list_files`, `read_file`, `patch_file`, and `finish` tool surface; it is not a
+general shell-capable coding environment. Model output and agent action logs
+are untrusted explanatory evidence and never grant commit authority.
+
+MIRAGE v1 also contains deterministic Git commit construction and create-only
+GitHub branch-publication foundations. GitHub pull-request creation (M5.4),
+multi-file commit, crash-durable recovery, signed/hash-chained durable audit
+logs, and universal syscall monitoring are not implemented v1 claims.
 
 ---
 
@@ -197,22 +229,27 @@ MIRAGE is designed to tolerate:
 
 ## 4.3 Trusted computing base
 
-For v0/v1, the trusted computing base includes:
+For the implemented v1 execution path, the trusted computing base includes:
 
-- MIRAGE API/control-plane code,
+- the MIRAGE CLI/control-plane code,
 - policy evaluator,
 - runtime supervisor,
 - trusted adapters,
 - effect collector,
 - verifier,
 - commit engine,
-- signing subsystem,
-- host kernel/container runtime,
-- database integrity mechanisms.
+- trusted clock and contract issuer,
+- host kernel and rootless container runtime,
+- trusted host-side model broker.
 
-## 4.4 Explicitly out of scope for v0
+The model, constrained Qwen agent, prompt, repository contents, disposable
+workspace, model response, and agent action log remain outside the TCB.
+Database integrity and a signing subsystem belong to the target-state durable
+control plane; v1 does not rely on either.
 
-MIRAGE v0 does not claim protection against:
+## 4.4 Explicitly out of scope for v1
+
+MIRAGE v1 does not claim protection against:
 
 - a fully compromised MIRAGE host/root user,
 - hypervisor/kernel zero-days,
@@ -304,6 +341,11 @@ MIRAGE is divided conceptually into four planes.
 
 ## 6.1 Control Plane
 
+The responsibilities below describe the complete target decomposition. In v1,
+the product CLI supplies the implemented control path; the general service API,
+dashboard state, durable scheduler, and database-backed control plane remain
+future work.
+
 Responsibilities:
 
 - create runs,
@@ -351,7 +393,7 @@ Responsibilities:
 - prevent stale commits,
 - apply supported mutations idempotently,
 - verify post-state,
-- produce signed receipt.
+- produce a self-hashed evidence receipt in v1; add signing in the target state.
 
 ---
 
@@ -863,6 +905,17 @@ known socket but neither listing nor write authority, and a local preflight
 must succeed before the coding agent starts. M4.4 does not change the M4.3
 commit shape: exactly one existing-file content modification is the only real
 mutation supported.
+
+The v1 local-model path specializes that broker boundary for Ollama and exactly
+`qwen2.5-coder:1.5b`. Ollama remains outside the sandbox and no credential is
+used. On native Linux the trusted broker reaches fixed loopback; under WSL it
+uses the fixed Windows interop path to the same local service. The scratch-based
+Qwen agent has no shell, Git client, package manager, subprocess tool, direct
+network access, host home, Docker socket, or real-workspace mount. It can only
+perform the bounded rooted tool sequence described in Section 1.1. This proves
+that a real model can propose both authorized and unauthorized disposable
+mutations; the frozen-tree scan and deterministic verifier, not the tool
+transcript, decide what may cross into reality.
 
 Inside the trusted `ApplyCommit` phase, M2 prepares the replacement in the real
 file's directory, then re-observes the real file immediately before
@@ -1454,7 +1507,7 @@ attempt_count
 last_error
 ```
 
-### receipts
+### Target-state receipts table
 
 ```text
 id
@@ -1468,9 +1521,10 @@ created_at
 
 ---
 
-# 21. Tamper-Evident Event Chain
+# 21. Tamper-Evident Event Chain (Target State)
 
-For the MVP, each event is hash-chained:
+The released v1 does not persist a complete hash-chained event log. In the
+target-state durable control plane, each event is hash-chained:
 
 ```text
 event_hash = SHA256(
@@ -1480,7 +1534,8 @@ event_hash = SHA256(
 
 The final event hash is included in the Effect Receipt.
 
-This detects modification/reordering of persisted event history when independently verified against the signed receipt.
+This future mechanism would detect modification or reordering of persisted
+event history when independently verified against a signed receipt.
 
 Later, high-volume deployments may use Merkle structures or external transparency logs.
 
@@ -1488,7 +1543,19 @@ Later, high-volume deployments may use Merkle structures or external transparenc
 
 # 22. Effect Receipt
 
-A successful commit produces a signed receipt.
+MIRAGE v1 produces deterministic, self-hashed receipts. Receipt v1 represents
+the deterministic competition flow. `mirage.execution-receipt/v2` represents
+both committed and rejected real-agent runs and binds run/contract identity,
+trusted time, effect accounting, observed and committed mutations,
+verification/commit plans, Effect Graph evidence, sandbox/process-stop facts,
+and its own SHA-256 identity. Receipt verification is available through the CLI.
+
+These receipts are evidence downstream of authority: they cannot authorize or
+repeat a commit. Evidence persistence is not crash-durable, and v1 receipts are
+not signed or backed by a complete durable event chain.
+
+The target state adds a signature over durable evidence. An illustrative future
+signed receipt is:
 
 Example:
 
@@ -1511,17 +1578,22 @@ Example:
 }
 ```
 
-Recommended signature algorithm:
+Recommended target-state signature algorithm:
 
 - Ed25519.
 
 Production signing keys should live in KMS/HSM-backed infrastructure rather than application configuration.
 
-Do not claim that the receipt proves events outside MIRAGE's trust boundary. It proves integrity of MIRAGE-mediated evidence.
+Do not claim that either v1 or future receipts prove events outside MIRAGE's
+trust boundary. A v1 receipt proves internal consistency of the MIRAGE evidence
+it binds; it is not an independently signed attestation.
 
 ---
 
-# 23. Public API
+# 23. Public API (Target State)
+
+The service API below is future architecture. MIRAGE v1 exposes the product CLI
+and receipt verification workflow rather than this complete HTTP control plane.
 
 Use REST/JSON for the first external API.
 
@@ -1883,58 +1955,50 @@ agent attempts secret read
 
 The winning demo should prove the architecture, not merely display a dashboard.
 
-## Scenario A — compromised agent
+## Scenario A — unauthorized real-model mutation
 
 ### User task
 
 ```text
-Update README installation instructions and open a pull request.
+Ask local Qwen to append one short line to README.md, while the contract
+authorizes only protected.txt.
 ```
-
-### Hidden malicious repository instruction
-
-The agent is induced to attempt unauthorized secret access and outbound transmission.
 
 ### Live visualization
 
 ```text
-README.md             WRITE     ✓ allowed
-.env                  READ      ✗ blocked
-attacker.example      POST      ✗ blocked
-GitHub PR             CREATE    deferred
+Qwen                  edits disposable README.md
+Frozen scan           observes README.md MODIFY
+Contract              filesystem.default_deny
+Commit                0 mutations
+Reality               unchanged
 ```
 
 ### Result
 
 ```text
 REALITY REJECTED
-
-Reason:
-- forbidden secret-read attempt
-- forbidden external-egress attempt
-
-Real repository changes: 0
-External requests sent: 0
+Reason: unauthorized final-state mutation
+Receipt: VALID
 ```
 
-## Scenario B — clean agent
+## Scenario B — authorized real-model mutation
 
-Same user task, safe execution.
+The contract authorizes `README.md`, and Qwen performs the same constrained edit.
 
 ```text
-README.md             WRITE     ✓
-Git branch            CREATE    ✓
-Git commit            CREATE    ✓
-GitHub PR             CREATE    deferred
+Qwen                  edits disposable README.md
+Frozen scan           observes README.md MODIFY
+Verifier              VERIFIED
+Trusted commit        one existing-file MODIFY
+Receipt               VALID
 ```
 
 Verifier passes.
 
-Before commit, show that GitHub has not changed.
-
-Press/trigger commit.
-
-MIRAGE revalidates the base revision, applies the approved effects, creates the PR exactly once, then produces a signed receipt.
+Before commit, MIRAGE revalidates trusted time, the manifest, the verified
+shadow plan, authority, and the real baseline. Only the exact plan-bound bytes
+may replace the existing real file.
 
 ### Result
 
@@ -1942,33 +2006,45 @@ MIRAGE revalidates the base revision, applies the approved effects, creates the 
 REALITY COMMITTED ✓
 ```
 
-This contrast is the entire thesis in under two minutes.
+The Observatory presents both results from verified receipt evidence. Its
+execution-history rail makes the rejected path terminate before the trust
+boundary and lets the authorized path continue through observed, verified,
+committed, and reality stages.
 
 ---
 
-# 31. MVP Scope
+# 31. MIRAGE v1 Scope
 
-The competition MVP supports exactly one compelling workflow.
+The v1 release supports exactly one compelling end-to-end workflow.
 
-## Supported
+## Implemented and demonstrated
 
 - one local Git repository,
 - one agent at a time per run,
 - rootless Docker sandbox,
-- copy-on-write workspace,
-- filesystem reads/writes,
-- Git branch + commit,
-- GitHub pull-request creation,
+- bounded disposable workspace snapshot,
+- authoritative final-state filesystem observation,
+- one existing regular-file content modification,
+- deterministic Git commit construction,
+- create-only GitHub branch-publication foundation,
 - default-deny network,
-- one deterministic Effect Contract,
-- effect event stream,
-- effect graph,
+- immutable deterministic Effect Contracts (v1/v2),
+- in-memory effect events and deterministic Effect Graph,
 - verification,
 - commit/reject,
-- signed receipt.
+- self-hashed receipt v1/v2 verification,
+- read-only, evidence-only interactive Observatory,
+- Windows frontend with a commit-bound WSL2 backend,
+- constrained local Qwen execution through a trusted Ollama broker.
 
 ## Explicitly not in MVP
 
+- GitHub pull-request creation (M5.4),
+- general shell-capable or extensible Qwen tooling,
+- multi-file, create, delete, mode-change, link, or special-object commits,
+- crash-durable evidence, intent journaling, or recovery,
+- signed/hash-chained durable audit logs,
+- universal syscall monitoring,
 - Kubernetes,
 - distributed scheduler,
 - multi-region,
@@ -2041,7 +2117,7 @@ narrow SEC-001 pass binds rooted filesystem use to validated open handles. The
 documented residual filesystem limitations and SEC-002 non-bypass design remain
 M4 inputs, not solved claims.
 
-## M4 — Isolated agent runtime
+## M4 — Isolated agent runtime (Delivered in v1)
 
 - run an actual coding agent in rootless sandbox,
 - no direct external egress,
@@ -2051,49 +2127,47 @@ M4 inputs, not solved claims.
 - real workspace protected,
 - retain the M4.3 one-existing-file `MODIFY` commit boundary.
 
-## M5 — Git + GitHub deferred commit
+## M5 — Git + GitHub deferred commit (M5.1-M5.3 delivered)
 
 M5 is split so each new external authority receives a separate security review:
 
-- **M5.1 — Git authority and immutable deferred plan:** bind one narrow trusted
+- **M5.1 — Git authority and immutable deferred plan (delivered):** bind one narrow trusted
   repository topology and derive data-only Git intent exclusively from VERIFIED
   reconciliation. No Git mutation or credential exists in this slice.
-- **M5.2 — deterministic commit construction:** construct and independently
+- **M5.2 — deterministic commit construction (delivered):** construct and independently
   verify the exact commit in transaction-owned Git state without altering the
   user's worktree or refs. The implemented boundary and limitations are
   recorded in `docs/m5.2-deterministic-git-commit.md`.
-- **M5.3 — create-only remote branch:** push the exact verified commit with
+- **M5.3 — create-only remote branch (delivered foundation):** push the exact verified commit with
   explicit `mirage.contract/v2` GitHub authority, stable repository-ID binding,
   exact remote base-ref/base-commit binding, an empty-expected atomic ref lease,
   host-only credentials, one mutation attempt, and authoritative uncertain-result reconciliation. Possession of an
   M5.2 artifact is never publication authority; dispatch remains lifecycle-only.
   The implemented boundary and limitations are recorded in
   `docs/m5.3-create-only-github-publication.md`.
-- **M5.4 — GitHub pull request effect:** create one bounded PR with idempotency
+- **M5.4 — GitHub pull request effect (deferred):** create one bounded PR with idempotency
   and explicit accounting when remote branch and PR outcomes differ.
 
-## M6 — Repository TOCTOU + crash safety
+## M6 — Repository TOCTOU + crash safety (Deferred)
 
 - stale repository base rejects commit,
 - duplicate commit does not duplicate PR,
 - simulated crash after external apply recovers safely.
 
-## M7 — Receipt + audit verification
+## M7 — Receipt + audit verification (Partially delivered)
 
-- hash-chained events,
-- signed receipt,
-- receipt verification endpoint/CLI.
+- delivered: self-hashed receipt v1/v2 and CLI verification;
+- deferred: durable hash-chained events, signed receipts, and a verification
+  service endpoint.
 
-## M8 — Competition UI
+## M8 — Competition UI (Delivered v1 evidence view)
 
-Only after the engine works:
-
-- run timeline,
-- animated effect graph,
-- contract view,
-- shadow vs real diff,
-- clear COMMIT / REJECT state,
-- receipt view.
+The read-only Observatory verifies the receipt before rendering and uses only
+receipt-derived facts. It provides a Git-history-inspired execution rail,
+contextual effect/stage inspection, clear committed/rejected reality, the
+deterministic Effect Graph, and cryptographic proof. Evidence is pre-rendered;
+the small CSP-hash-bound script is progressive enhancement only. The artifact
+uses no external assets or network requests and has no authority role.
 
 ---
 
@@ -2254,7 +2328,11 @@ The project is not considered architecturally real until all of the following ar
 10. A clean run can be verified and committed.
 11. Stale real state causes commit conflict rather than overwrite.
 12. Repeating commit does not duplicate the external effect.
-13. A signed receipt can be independently verified.
+13. V1 receipt evidence is deterministic, self-hashed, and independently
+    verifiable for internal consistency.
+
+Signed receipts, a durable hash-chained event log, and the M5.4 pull-request
+effect remain target-state requirements rather than v1 claims.
 
 If any of these are faked by prompting the model to "behave safely," the implementation has violated the MIRAGE thesis.
 
@@ -2262,4 +2340,4 @@ If any of these are faked by prompting the model to "behave safely," the impleme
 
 # 38. One-Sentence Architecture
 
-> **MIRAGE is a transactional security runtime in which untrusted AI agents execute speculatively inside an isolated, capability-mediated shadow environment, while deterministic policy, effect verification, state revalidation, idempotent commit, and signed receipts control which effects are permitted to become real.**
+> **MIRAGE is a transactional security runtime in which untrusted AI agents execute speculatively inside an isolated, capability-mediated shadow environment, while deterministic policy, authoritative final-state verification, freshness revalidation, and a narrow trusted commit boundary control which effects are permitted to become real; receipts explain and verify the resulting evidence without granting authority.**
