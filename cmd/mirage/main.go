@@ -27,6 +27,7 @@ import (
 	"github.com/MrGray17/Mirage/internal/runtime/githubbinding"
 	"github.com/MrGray17/Mirage/internal/runtime/gitpublication"
 	"github.com/MrGray17/Mirage/internal/runtime/modelbroker"
+	"github.com/MrGray17/Mirage/internal/runtime/qwenagent"
 	"github.com/MrGray17/Mirage/internal/runtime/workspace"
 )
 
@@ -602,8 +603,14 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 	allowedResource := flags.String("allow", "", "the one existing file the M4.3 boundary may modify (for example /workspace/README.md)")
 	timeout := flags.Duration("timeout", 10*time.Minute, "maximum coding-agent execution time")
 	quota := flags.Int64("workspace-quota-bytes", 64<<20, "hard writable disposable-workspace capacity")
-	brokerKind := flags.String("model-broker", "none", "trusted model broker: none, openai, or deepseek")
+	agentMode := flags.String("agent", "generic", "coding-agent evidence mode: generic or qwen")
+	brokerKind := flags.String("model-broker", "none", "trusted model broker: none, openai, deepseek, or ollama")
 	model := flags.String("model", "", "exact model allowed by the trusted broker")
+	evidenceOut := flags.String("evidence-out", "", "new Qwen receipt path; defaults to the MIRAGE run cache")
+	observatoryOut := flags.String("observatory-out", "", "new verified Qwen Observatory path; defaults beside the receipt")
+	outputDir := flags.String("output-dir", "", "directory for a new per-run Qwen evidence directory")
+	format := flags.String("format", "text", "Qwen evidence summary format: text or json")
+	open := flags.Bool("open", false, "open the verified Qwen Observatory after the run")
 	publishGitHub := flags.Bool("publish-github", false, "create the contract-authorized MIRAGE run branch on github.com")
 	githubRepository := flags.String("github-repo", "", "canonical GitHub owner/repo; free-form URLs are not accepted")
 	if err := flags.Parse(args); err != nil {
@@ -619,17 +626,46 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 	if len(command) == 0 {
 		return errors.New("an absolute coding-agent command is required after --")
 	}
+	if *agentMode != "generic" && *agentMode != "qwen" {
+		return errors.New("--agent must be generic or qwen")
+	}
+	if *format != "text" && *format != "json" {
+		return errors.New("--format must be text or json")
+	}
+	if strings.TrimSpace(*outputDir) != "" && (strings.TrimSpace(*evidenceOut) != "" || strings.TrimSpace(*observatoryOut) != "") {
+		return errors.New("--output-dir cannot be combined with --evidence-out or --observatory-out")
+	}
 	if *timeout < time.Second || *timeout > 30*time.Minute {
 		return errors.New("--timeout must be between 1s and 30m")
 	}
-	if *brokerKind != "none" && *brokerKind != "openai" && *brokerKind != "deepseek" {
-		return errors.New("--model-broker must be none, openai, or deepseek")
+	if *brokerKind != "none" && *brokerKind != "openai" && *brokerKind != "deepseek" && *brokerKind != "ollama" {
+		return errors.New("--model-broker must be none, openai, deepseek, or ollama")
 	}
 	if *brokerKind == "none" && strings.TrimSpace(*model) != "" {
 		return errors.New("--model requires an explicitly enabled model broker")
 	}
 	if *brokerKind == "deepseek" && strings.TrimSpace(*model) != modelbroker.DeepSeekV4Flash {
 		return fmt.Errorf("DeepSeek model must be exactly %s; fallback is disabled", modelbroker.DeepSeekV4Flash)
+	}
+	if *brokerKind == "ollama" && strings.TrimSpace(*model) != modelbroker.Qwen25Coder15B {
+		return fmt.Errorf("Ollama model must be exactly %s; fallback is disabled", modelbroker.Qwen25Coder15B)
+	}
+	if *agentMode == "qwen" {
+		if *brokerKind != "ollama" || strings.TrimSpace(*model) != modelbroker.Qwen25Coder15B {
+			return fmt.Errorf("--agent qwen requires the trusted Ollama broker and exact model %s", modelbroker.Qwen25Coder15B)
+		}
+		if len(command) != 2 || command[0] != "/usr/local/bin/mirage-qwen-agent" || strings.TrimSpace(command[1]) == "" {
+			return errors.New("--agent qwen requires the fixed driver command and exactly one non-empty task argument")
+		}
+		if *publishGitHub {
+			return errors.New("--agent qwen evidence mode does not authorize GitHub publication")
+		}
+	} else if strings.TrimSpace(*evidenceOut) != "" || strings.TrimSpace(*observatoryOut) != "" || strings.TrimSpace(*outputDir) != "" || *format != "text" || *open {
+		return errors.New("agent evidence output options require --agent qwen")
+	}
+	progress := stdout
+	if *agentMode == "qwen" && *format == "json" {
+		progress = stderr
 	}
 	if *brokerKind != "none" && strings.TrimSpace(*model) == "" {
 		return errors.New("--model is required by the trusted model broker")
@@ -663,20 +699,30 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 	brokerDirectory := ""
 	brokerIdentity := ""
 	if *brokerKind != "none" {
-		keyEnvironment := "OPENAI_API_KEY"
-		if *brokerKind == "deepseek" {
-			keyEnvironment = "DEEPSEEK_API_KEY"
-		}
-		apiKey := strings.TrimSpace(os.Getenv(keyEnvironment))
-		if apiKey == "" {
-			return fmt.Errorf("%s is required by the trusted %s broker; the key remains in the Mirage host process", keyEnvironment, *brokerKind)
+		apiKey := ""
+		if *brokerKind != "ollama" {
+			keyEnvironment := "OPENAI_API_KEY"
+			if *brokerKind == "deepseek" {
+				keyEnvironment = "DEEPSEEK_API_KEY"
+			}
+			apiKey = strings.TrimSpace(os.Getenv(keyEnvironment))
+			if apiKey == "" {
+				return fmt.Errorf("%s is required by the trusted %s broker; the key remains in the Mirage host process", keyEnvironment, *brokerKind)
+			}
 		}
 		brokerConfig := modelbroker.Config{
 			APIKey: apiKey,
 			Model:  strings.TrimSpace(*model),
 			RunID:  "coding-agent-" + disposable.Token()[:16],
 		}
-		if *brokerKind == "deepseek" {
+		if *brokerKind == "ollama" {
+			brokerConfig.MaxRequests = 16
+			brokerConfig.MaxConcurrent = 1
+			brokerConfig.MaxRequestBytes = 1 << 20
+			brokerConfig.MaxResponseBytes = 4 << 20
+			brokerConfig.MaxOutputTokens = 2048
+			broker, err = modelbroker.NewOllama(brokerConfig)
+		} else if *brokerKind == "deepseek" {
 			// The live M4.4 acceptance is intentionally tiny. These trusted
 			// caps constrain provider spend as well as sandbox abuse.
 			brokerConfig.MaxRequests = 6
@@ -725,6 +771,11 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 	}
 	issuedAt := time.Now().UTC()
 	runID := "coding-agent-" + disposable.Token()[:16]
+	if *agentMode == "qwen" {
+		if err := preflightQwenEvidence(qwenProductSpec{RunID: runID, RealWorkspace: disposable.RealWorkspace(), EvidenceOut: *evidenceOut, ObservatoryOut: *observatoryOut, OutputDir: *outputDir}); err != nil {
+			return errors.Join(err, closeBroker())
+		}
+	}
 	contractVersion := contracts.VersionV1
 	publicationPolicy := contracts.GitHubPublicationPolicy{}
 	if *publishGitHub {
@@ -785,7 +836,7 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return errors.Join(err, cleanupAgentRuntime(lifecycle, disposable, closeBroker))
 	}
-	fmt.Fprintf(stdout, "runtime=%s workspace=hard-quota-disposable quota_bytes=%d\n", lifecycle.State(), *quota)
+	fmt.Fprintf(progress, "runtime=%s workspace=hard-quota-disposable quota_bytes=%d\n", lifecycle.State(), *quota)
 
 	startCtx, cancelStart := context.WithTimeout(commandCtx, operationTimeout)
 	err = lifecycle.Start(startCtx)
@@ -793,13 +844,13 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return errors.Join(err, cleanupAgentRuntime(lifecycle, disposable, closeBroker))
 	}
-	fmt.Fprintf(stdout, "runtime=%s agent=%s network=none broker=%s\n", lifecycle.State(), command[0], *brokerKind)
+	fmt.Fprintf(progress, "runtime=%s agent=%s network=none broker=%s\n", lifecycle.State(), command[0], *brokerKind)
 
 	waitCtx, cancelWait := context.WithTimeout(commandCtx, *timeout)
 	waitErr := launcher.Wait(waitCtx)
 	cancelWait()
 	if waitErr != nil {
-		fmt.Fprintf(stdout, "agent completion unavailable: %v; freezing without commit authority\n", waitErr)
+		fmt.Fprintf(progress, "agent completion unavailable: %v; freezing without commit authority\n", waitErr)
 	}
 	freezeCtx, cancelFreeze := context.WithTimeout(context.Background(), operationTimeout)
 	freezeErr := lifecycle.Freeze(freezeCtx)
@@ -807,14 +858,24 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 	if freezeErr != nil {
 		return errors.Join(freezeErr, waitErr, cleanupAgentRuntime(lifecycle, disposable, closeBroker))
 	}
-	fmt.Fprintf(stdout, "runtime=%s process_tree=stopped frozen_tree=exported\n", lifecycle.State())
+	fmt.Fprintf(progress, "runtime=%s process_tree=stopped frozen_tree=exported\n", lifecycle.State())
 	var brokerDiagnostic modelbroker.DiagnosticSnapshot
 	if broker != nil {
 		brokerDiagnostic = broker.Diagnostics()
-		fmt.Fprintf(stdout, "broker_preflight_connections=%d broker_requests=%d broker_successful_responses=%d\n", brokerDiagnostic.PreflightConnections, brokerDiagnostic.Requests, brokerDiagnostic.SuccessfulResponses)
+		fmt.Fprintf(progress, "broker_preflight_connections=%d broker_requests=%d broker_successful_responses=%d\n", brokerDiagnostic.PreflightConnections, brokerDiagnostic.Requests, brokerDiagnostic.SuccessfulResponses)
+	}
+	var qwenActions []qwenagent.CompletedAction
+	if *agentMode == "qwen" && waitErr == nil {
+		qwenActions, err = qwenagent.ParseCompletedActions(launcher.Diagnostics().Stdout)
+		if err != nil {
+			if rejectErr := lifecycle.Reject(); rejectErr != nil {
+				err = errors.Join(err, rejectErr)
+			}
+			return errors.Join(fmt.Errorf("verify constrained Qwen action evidence: %w", err), cleanupAgentRuntime(lifecycle, disposable, closeBroker))
+		}
 	}
 	if waitErr != nil {
-		emitAgentDiagnostic(stdout, resolveAgentDiagnostic(launcher.Diagnostics(), brokerDiagnostic))
+		emitAgentDiagnostic(progress, resolveAgentDiagnostic(launcher.Diagnostics(), brokerDiagnostic))
 		if err := lifecycle.Reject(); err != nil {
 			return errors.Join(waitErr, err, cleanupAgentRuntime(lifecycle, disposable, closeBroker))
 		}
@@ -827,13 +888,40 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 		return errors.Join(err, cleanupAgentRuntime(lifecycle, disposable, closeBroker))
 	}
 	plan, _ := lifecycle.Reconciliation()
-	fmt.Fprintf(stdout, "runtime=%s plan=%s mutations=%d violations=%d\n", lifecycle.State(), plan.Hash(), len(plan.Mutations()), len(decision.Violations()))
+	fmt.Fprintf(progress, "runtime=%s plan=%s mutations=%d violations=%d\n", lifecycle.State(), plan.Hash(), len(plan.Mutations()), len(decision.Violations()))
 	for _, violation := range decision.Violations() {
-		fmt.Fprintf(stdout, "violation operation=%s resource=%s rule=%s\n", violation.Operation, violation.Resource, violation.RuleID)
+		fmt.Fprintf(progress, "violation operation=%s resource=%s rule=%s\n", violation.Operation, violation.Resource, violation.RuleID)
 	}
 	if !decision.Allowed {
+		if *agentMode == "qwen" {
+			if realityErr := verifyRejectedReality(binding); realityErr != nil {
+				return errors.Join(realityErr, cleanupAgentRuntime(lifecycle, disposable, closeBroker))
+			}
+		}
 		cleanupErr := cleanupAgentRuntime(lifecycle, disposable, closeBroker)
-		return errors.Join(fmt.Errorf("coding-agent final state rejected with %d policy violation(s)", len(decision.Violations())), cleanupErr)
+		if cleanupErr != nil {
+			return errors.Join(fmt.Errorf("coding-agent final state rejected with %d policy violation(s)", len(decision.Violations())), cleanupErr)
+		}
+		if *agentMode == "qwen" {
+			summary, evidenceErr := persistQwenProductEvidence(qwenProductSpec{
+				RunID: runID, Task: command[1], ContractHash: contract.Hash(), ManifestHash: manifest.Identity(),
+				StartedAt: issuedAt, CompletedAt: time.Now().UTC(), AgentImage: *agentImage, SandboxIdentity: launcher.Identity(),
+				Actions: qwenActions, Plan: plan, Decision: decision, RealWorkspace: disposable.RealWorkspace(), CleanupComplete: true,
+				ProcessTreeStopped: true, Reality: "M4_VISIBLE_BASELINE_UNCHANGED",
+				EvidenceOut: *evidenceOut, ObservatoryOut: *observatoryOut, OutputDir: *outputDir,
+			})
+			if evidenceErr != nil {
+				return errors.Join(fmt.Errorf("coding-agent final state rejected with %d policy violation(s)", len(decision.Violations())), evidenceErr)
+			}
+			if err := emitQwenSummary(stdout, summary, *format); err != nil {
+				return err
+			}
+			if *open {
+				openObservatory(summary.ObservatoryPath, stderr)
+			}
+			return fmt.Errorf("coding-agent final state rejected with %d policy violation(s); verified evidence persisted at %s", len(decision.Violations()), summary.ReceiptPath)
+		}
+		return fmt.Errorf("coding-agent final state rejected with %d policy violation(s)", len(decision.Violations()))
 	}
 	if *publishGitHub {
 		if _, err := lifecycle.DeriveGitEffectPlan(); err != nil {
@@ -861,7 +949,7 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 		record, publishErr := lifecycle.PublishGitHub(publishCtx, engine)
 		cancelPublish()
 		if record != nil {
-			fmt.Fprintf(stdout, "runtime=%s repository_id=%d repository=%s target_ref=%s commit_oid=%s transport_acknowledged=%t reconciled=%t publication_record=%s\n", lifecycle.State(), record.RepositoryID(), record.RepositoryFullName(), record.TargetRef(), record.CommitOID(), record.TransportAcknowledged(), record.ResolvedByReconciliation(), record.Identity())
+			fmt.Fprintf(progress, "runtime=%s repository_id=%d repository=%s target_ref=%s commit_oid=%s transport_acknowledged=%t reconciled=%t publication_record=%s\n", lifecycle.State(), record.RepositoryID(), record.RepositoryFullName(), record.TargetRef(), record.CommitOID(), record.TransportAcknowledged(), record.ResolvedByReconciliation(), record.Identity())
 		}
 		if publishErr != nil {
 			return errors.Join(publishErr, cleanupAgentRuntime(lifecycle, disposable, closeBroker))
@@ -870,13 +958,40 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 			return errors.Join(errors.New("publication evidence does not bind the exact commit artifact"), cleanupAgentRuntime(lifecycle, disposable, closeBroker))
 		}
 	} else {
-		if _, err := lifecycle.PreCommit(); err != nil {
+		commitPlan, err := lifecycle.PreCommit()
+		if err != nil {
 			return errors.Join(err, cleanupAgentRuntime(lifecycle, disposable, closeBroker))
 		}
 		if err := lifecycle.Commit(); err != nil {
 			return errors.Join(err, cleanupAgentRuntime(lifecycle, disposable, closeBroker))
 		}
-		fmt.Fprintf(stdout, "runtime=%s committed_resource=%s\n", lifecycle.State(), *allowedResource)
+		fmt.Fprintf(progress, "runtime=%s committed_resource=%s\n", lifecycle.State(), *allowedResource)
+		if *agentMode == "qwen" {
+			if err := verifyCommittedReality(disposable.RealWorkspace(), plan); err != nil {
+				return errors.Join(err, cleanupAgentRuntime(lifecycle, disposable, closeBroker))
+			}
+			if err := cleanupAgentRuntime(lifecycle, disposable, closeBroker); err != nil {
+				return err
+			}
+			summary, err := persistQwenProductEvidence(qwenProductSpec{
+				RunID: runID, Task: command[1], ContractHash: contract.Hash(), ManifestHash: manifest.Identity(),
+				StartedAt: issuedAt, CompletedAt: time.Now().UTC(), AgentImage: *agentImage, SandboxIdentity: launcher.Identity(),
+				Actions: qwenActions, Plan: plan, Decision: decision, Committed: true, CommitPlan: commitPlan.Hash(),
+				RealWorkspace: disposable.RealWorkspace(), CleanupComplete: true,
+				ProcessTreeStopped: true, Reality: "COMMITTED_RESOURCE_VERIFIED",
+				EvidenceOut: *evidenceOut, ObservatoryOut: *observatoryOut, OutputDir: *outputDir,
+			})
+			if err != nil {
+				return err
+			}
+			if err := emitQwenSummary(stdout, summary, *format); err != nil {
+				return err
+			}
+			if *open {
+				openObservatory(summary.ObservatoryPath, stderr)
+			}
+			return nil
+		}
 	}
 	cleanupErr := cleanupAgentRuntime(lifecycle, disposable, closeBroker)
 	return cleanupErr

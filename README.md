@@ -72,6 +72,10 @@ Run the matching normal workflow:
 mirage run benign
 ```
 
+The advanced local-model proof uses a separate, intentionally narrow Qwen
+agent without changing the official deterministic demo. See
+[`docs/qwen-local-agent.md`](docs/qwen-local-agent.md).
+
 `mirage doctor` observes the exact Linux runtime prerequisites without changing the machine. `mirage setup` may pull only the official pinned image; a run never pulls. The Windows executable is a frontend: it delegates exact arguments to the configured WSL2 Linux backend and does not claim native Windows sandboxing.
 
 ## What actually happens

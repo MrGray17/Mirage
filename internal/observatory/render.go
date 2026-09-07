@@ -25,8 +25,15 @@ type effectRow struct {
 	State       string
 	StateClass  string
 	IsCommitted bool
+	Selected    bool
 	PanelID     string
 	PathID      string
+}
+
+type observedRow struct {
+	PanelID   string
+	Operation string
+	Resource  string
 }
 
 type inspectorFact struct {
@@ -75,18 +82,21 @@ type committedEffectView struct {
 }
 
 type proofView struct {
-	ReceiptHash      string
-	GraphHash        string
-	ContractHash     string
-	RunID            string
-	StartedAt        string
-	CompletedAt      string
-	Duration         string
-	VerificationPlan string
-	CommitPlan       string
-	CommitOID        string
-	BeforeDigest     string
-	AfterDigest      string
+	ReceiptHash        string
+	GraphHash          string
+	ContractHash       string
+	RunID              string
+	StartedAt          string
+	CompletedAt        string
+	Duration           string
+	VerificationPlan   string
+	CommitPlan         string
+	CommitOID          string
+	BeforeDigest       string
+	AfterDigest        string
+	ProcessTreeStopped bool
+	CleanupComplete    bool
+	Reality            string
 }
 
 type pageData struct {
@@ -101,6 +111,11 @@ type pageData struct {
 	Panels       []inspectorPanel
 	Verification string
 	Proof        proofView
+	HasCommit    bool
+	Rejected     bool
+	Observed     []observedRow
+	AgentActions []receipt.AgentAction
+	Rejections   []receipt.Rejection
 }
 
 //go:embed interaction.js
@@ -140,16 +155,23 @@ func buildPageData(evidence *receipt.Receipt) (pageData, error) {
 		Blocked:      len(evidence.DeniedEffects),
 		Committed:    len(evidence.CommittedMutations),
 		Verification: evidence.Verification,
+		HasCommit:    len(evidence.CommittedMutations) > 0,
+		Rejected:     evidence.Outcome == receipt.OutcomeRejected,
+		AgentActions: append([]receipt.AgentAction(nil), evidence.AgentActions...),
+		Rejections:   append([]receipt.Rejection(nil), evidence.Rejections...),
 		Proof: proofView{
-			ReceiptHash:      evidence.SHA256,
-			GraphHash:        evidence.EffectGraphHash,
-			ContractHash:     evidence.ContractHash,
-			RunID:            evidence.RunID,
-			StartedAt:        evidence.StartedAt,
-			CompletedAt:      evidence.CompletedAt,
-			VerificationPlan: evidence.VerificationPlan,
-			CommitPlan:       evidence.CommitPlan,
-			CommitOID:        evidence.CommitOID,
+			ReceiptHash:        evidence.SHA256,
+			GraphHash:          evidence.EffectGraphHash,
+			ContractHash:       evidence.ContractHash,
+			RunID:              evidence.RunID,
+			StartedAt:          evidence.StartedAt,
+			CompletedAt:        evidence.CompletedAt,
+			VerificationPlan:   evidence.VerificationPlan,
+			CommitPlan:         evidence.CommitPlan,
+			CommitOID:          evidence.CommitOID,
+			ProcessTreeStopped: evidence.ProcessTreeStopped,
+			CleanupComplete:    evidence.CleanupComplete,
+			Reality:            evidence.Reality,
 		},
 	}
 	if data.Committed > 0 {
@@ -167,6 +189,12 @@ func buildPageData(evidence *receipt.Receipt) (pageData, error) {
 		return pageData{}, fmt.Errorf("verified receipt time could not be parsed")
 	}
 	data.Proof.Duration = formatDuration(completed.Sub(started))
+	for index, mutation := range evidence.ObservedMutations {
+		data.Observed = append(data.Observed, observedRow{PanelID: fmt.Sprintf("observed-%02d", index+1), Operation: mutation.Operation, Resource: mutation.Resource})
+	}
+	if data.Rejected {
+		return buildRejectedPageData(data, evidence)
+	}
 
 	committed := evidence.CommittedMutations[0]
 	observed := evidence.ObservedMutations[0]
@@ -190,7 +218,8 @@ func buildPageData(evidence *receipt.Receipt) (pageData, error) {
 			Index: index + 1, Number: fmt.Sprintf("%02d", index+1), Operation: attempted.Operation,
 			Resource: attempted.Resource, EnforcedBy: attempted.EnforcedBy, State: state,
 			StateClass: class, IsCommitted: class == "selected",
-			PanelID: fmt.Sprintf("effect-%02d", index+1), PathID: pathID,
+			Selected: class == "selected",
+			PanelID:  fmt.Sprintf("effect-%02d", index+1), PathID: pathID,
 		})
 	}
 	if committedIndex < 0 {
@@ -207,6 +236,72 @@ func buildPageData(evidence *receipt.Receipt) (pageData, error) {
 	data.Proof.AfterDigest = committed.AfterDigest
 	data.Panels = buildInspectorPanels(data.Effects, data.Inspector, data.Verification, data.Proof)
 	return data, nil
+}
+
+func buildRejectedPageData(data pageData, evidence *receipt.Receipt) (pageData, error) {
+	data.Status = "REJECTED"
+	for index, attempted := range evidence.AttemptedEffects {
+		data.Effects = append(data.Effects, effectRow{
+			Index: index + 1, Number: fmt.Sprintf("%02d", index+1), Operation: attempted.Operation,
+			Resource: attempted.Resource, EnforcedBy: attempted.EnforcedBy, State: "BLOCKED", StateClass: "blocked",
+			Selected: index == 0, PanelID: fmt.Sprintf("effect-%02d", index+1), PathID: fmt.Sprintf("effect-%02d", index+1),
+		})
+	}
+	if len(data.Effects) == 0 {
+		return pageData{}, fmt.Errorf("verified rejected receipt has no attempted effect")
+	}
+	if len(evidence.ObservedMutations) > 0 {
+		data.Proof.BeforeDigest = evidence.ObservedMutations[0].BeforeDigest
+		data.Proof.AfterDigest = evidence.ObservedMutations[0].AfterDigest
+	}
+	data.Panels = buildRejectedPanels(data.Effects, evidence)
+	return data, nil
+}
+
+func buildRejectedPanels(effects []effectRow, evidence *receipt.Receipt) []inspectorPanel {
+	panels := make([]inspectorPanel, 0, len(effects)+len(evidence.ObservedMutations)+1)
+	for _, effect := range effects {
+		facts := []inspectorFact{{Label: "Enforced by", Value: effect.EnforcedBy, ValueCode: true}}
+		for _, rejection := range evidence.Rejections {
+			facts = append(facts, inspectorFact{Label: "Rule", Value: rejection.Rule, ValueCode: true}, inspectorFact{Label: "Reason", Value: rejection.Reason})
+		}
+		panels = append(panels, inspectorPanel{
+			ID: effect.PanelID, HistoryID: "history-" + effect.PanelID, Eyebrow: "Effect " + effect.Number,
+			Title: effect.Operation, Resource: effect.Resource, Status: "BLOCKED", StatusClass: "blocked",
+			Facts: facts, Result: "Observed only in the disposable workspace. No mutation crossed into reality.",
+			Selected: effect.Selected, NavLabel: effect.Number + " " + effect.Operation, NavDetail: displayResource(effect.Resource),
+		})
+	}
+	for index, mutation := range evidence.ObservedMutations {
+		id := fmt.Sprintf("observed-%02d", index+1)
+		panels = append(panels, inspectorPanel{
+			ID: id, HistoryID: "history-" + id, Eyebrow: "Observed disposable mutation", Title: mutation.Operation,
+			Resource: mutation.Resource, Status: "NOT COMMITTED", StatusClass: "blocked",
+			Facts:    []inspectorFact{{Label: "Before", Value: shortDigest(mutation.BeforeDigest), ValueCode: true}, {Label: "After", Value: shortDigest(mutation.AfterDigest), ValueCode: true}},
+			Result:   "Trusted frozen-tree scanning observed this mutation. Contract verification rejected it before the trust boundary.",
+			NavLabel: "OBSERVED", NavDetail: displayResource(mutation.Resource),
+		})
+	}
+	facts := []inspectorFact{{Label: "Verification plan", Value: evidence.VerificationPlan, ValueCode: true}}
+	for _, rejection := range evidence.Rejections {
+		facts = append(facts, inspectorFact{Label: "Denied by", Value: rejection.Rule, ValueCode: true})
+	}
+	panels = append(panels, inspectorPanel{
+		ID: "rejected", HistoryID: "history-rejected", Eyebrow: "Verification", Title: "REJECTED",
+		Status: "ZERO COMMITTED MUTATIONS", StatusClass: "blocked", Facts: facts,
+		Result: "The trusted verifier denied the frozen final state. Reality remained unchanged.", NavLabel: "REJECTED", NavDetail: "zero committed mutations",
+	})
+	for index := range panels {
+		if index > 0 {
+			previous := panels[index-1]
+			panels[index].Previous = &inspectorLink{PanelID: previous.ID, Label: previous.NavLabel, Detail: previous.NavDetail}
+		}
+		if index+1 < len(panels) {
+			next := panels[index+1]
+			panels[index].Next = &inspectorLink{PanelID: next.ID, Label: next.NavLabel, Detail: next.NavDetail}
+		}
+	}
+	return panels
 }
 
 func buildInspectorPanels(effects []effectRow, committed committedEffectView, verification string, proof proofView) []inspectorPanel {
@@ -632,7 +727,7 @@ const pageTemplateSource = `<!doctype html>
             <ol class="effect-list" role="presentation">
               {{range .Effects}}
               <li role="presentation">
-                <button type="button" role="tab" id="history-{{.PanelID}}" class="effect-row history-event {{.StateClass}}{{if .IsCommitted}} is-selected is-path{{end}}" data-history-event data-panel="{{.PanelID}}" data-path="{{.PathID}}" aria-controls="panel-{{.PanelID}}" aria-selected="{{if .IsCommitted}}true{{else}}false{{end}}" tabindex="{{if .IsCommitted}}0{{else}}-1{{end}}">
+                <button type="button" role="tab" id="history-{{.PanelID}}" class="effect-row history-event {{.StateClass}}{{if .Selected}} is-selected{{end}}{{if .IsCommitted}} is-path{{end}}" data-history-event data-panel="{{.PanelID}}" data-path="{{.PathID}}" aria-controls="panel-{{.PanelID}}" aria-selected="{{if .Selected}}true{{else}}false{{end}}" tabindex="{{if .Selected}}0{{else}}-1{{end}}">
                   <span class="history-rail" aria-hidden="true"><span class="history-node"></span></span>
                   <span class="effect-index">{{.Number}}</span>
                   <span class="effect-operation">{{.Operation}}</span>
@@ -644,6 +739,7 @@ const pageTemplateSource = `<!doctype html>
               {{end}}
             </ol>
             <div class="history-continuation" aria-label="Verified path into reality">
+            {{if .HasCommit}}
             <button type="button" role="tab" id="history-observed" class="history-stage history-event observed is-path" data-history-event data-panel="observed" data-path="surviving" aria-controls="panel-observed" aria-selected="false" tabindex="-1">
               <span class="history-rail" aria-hidden="true"><span class="history-node"></span></span>
               <span class="history-stage-label">Observed</span>
@@ -668,6 +764,20 @@ const pageTemplateSource = `<!doctype html>
               <span class="history-stage-label">Reality</span>
               <span class="history-stage-resource"><code>{{.Inspector.RealityDisplay}}</code> changed</span>
             </button>
+            {{else}}
+            {{range .Observed}}
+            <button type="button" role="tab" id="history-{{.PanelID}}" class="history-stage history-event observed" data-history-event data-panel="{{.PanelID}}" data-path="rejected" aria-controls="panel-{{.PanelID}}" aria-selected="false" tabindex="-1">
+              <span class="history-rail" aria-hidden="true"><span class="history-node"></span></span>
+              <span class="history-stage-label">Observed</span>
+              <strong class="history-stage-action">{{.Operation}}</strong><code class="history-stage-resource">{{.Resource}}</code>
+            </button>
+            {{end}}
+            <button type="button" role="tab" id="history-rejected" class="history-stage history-event blocked" data-history-event data-panel="rejected" data-path="rejected" aria-controls="panel-rejected" aria-selected="false" tabindex="-1">
+              <span class="history-rail" aria-hidden="true"><span class="history-node"></span></span>
+              <span class="history-stage-label">Verification</span>
+              <strong class="history-stage-action">REJECTED</strong><span class="history-stage-resource">Reality unchanged</span>
+            </button>
+            {{end}}
             </div>
           </div>
         </section>
@@ -759,16 +869,27 @@ const pageTemplateSource = `<!doctype html>
               <dt>Started</dt><dd><time>{{.Proof.StartedAt}}</time></dd>
               <dt>Completed</dt><dd><time>{{.Proof.CompletedAt}}</time></dd>
               <dt>Duration</dt><dd><code>{{.Proof.Duration}}</code></dd>
+              {{if .Proof.Reality}}<dt>Process tree stopped</dt><dd><code>{{.Proof.ProcessTreeStopped}}</code></dd>
+              <dt>Cleanup complete</dt><dd><code>{{.Proof.CleanupComplete}}</code></dd>
+              <dt>Reality</dt><dd><code>{{.Proof.Reality}}</code></dd>{{end}}
             </dl>
           </section>
           <section class="proof-group" aria-labelledby="plans-proof-heading">
             <h3 id="plans-proof-heading">Plans</h3>
             <dl class="proof-grid">
               <dt>Verification</dt><dd><code>{{.Proof.VerificationPlan}}</code></dd>
-              <dt>Commit</dt><dd><code>{{.Proof.CommitPlan}}</code></dd>
+              {{if .Proof.CommitPlan}}<dt>Commit</dt><dd><code>{{.Proof.CommitPlan}}</code></dd>{{end}}
               {{if .Proof.CommitOID}}<dt>Commit OID</dt><dd><code>{{.Proof.CommitOID}}</code></dd>{{end}}
             </dl>
           </section>
+          {{if .AgentActions}}
+          <section class="proof-group" aria-labelledby="agent-actions-heading">
+            <h3 id="agent-actions-heading">Completed agent actions</h3>
+            <dl class="proof-grid">
+              {{range .AgentActions}}<dt>{{printf "%02d" .Sequence}} {{.Tool}}</dt><dd><code>{{if .Resource}}{{.Resource}}{{else}}&mdash;{{end}}</code></dd>{{end}}
+            </dl>
+          </section>
+          {{end}}
         </div>
       </details>
     </footer>

@@ -43,6 +43,55 @@ func TestDeepSeekRequiresExactApprovedModel(t *testing.T) {
 	}
 }
 
+func TestOllamaRequiresExactLocalModelAndNoCredential(t *testing.T) {
+	t.Parallel()
+	for _, model := range []string{"", "qwen2.5-coder", "qwen2.5-coder:7b", " QWEN2.5-CODER:1.5B "} {
+		if _, err := NewOllama(Config{Model: model, RunID: "run-1"}); err == nil || !errors.Is(err, ErrInvalidConfig) {
+			t.Errorf("model %q returned %v", model, err)
+		}
+	}
+	broker, err := NewOllama(Config{Model: Qwen25Coder15B, RunID: "run-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if broker.Identity() == "" {
+		t.Fatal("local broker identity is empty")
+	}
+}
+
+func TestOllamaTransportRejectsAnythingExceptTheFixedPolicyRequest(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		method string
+		url    string
+	}{
+		{method: http.MethodGet, url: ollamaPolicyURL},
+		{method: http.MethodPost, url: "https://example.com/v1/responses"},
+		{method: http.MethodPost, url: ollamaPolicyURL + "?model=other"},
+	} {
+		request, err := http.NewRequest(test.method, test.url, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := (ollamaTransport{}).RoundTrip(request); err == nil {
+			t.Errorf("%s %s was not denied", test.method, test.url)
+		}
+	}
+}
+
+func TestBoundedOllamaBufferFailsClosedWithoutUnboundedGrowth(t *testing.T) {
+	t.Parallel()
+	buffer := boundedOllamaBuffer{limit: 4}
+	input := []byte("123456789")
+	written, err := buffer.Write(input)
+	if err != nil || written != len(input) {
+		t.Fatalf("Write() = (%d, %v), want (%d, nil)", written, err, len(input))
+	}
+	if got := buffer.String(); got != "1234" || !buffer.overflow {
+		t.Fatalf("buffer = (%q, overflow=%t), want (%q, true)", got, buffer.overflow, "1234")
+	}
+}
+
 func TestProviderAffectsBrokerPolicyIdentity(t *testing.T) {
 	config := Config{APIKey: "secret", Model: DeepSeekV4Flash, RunID: "run-1"}
 	openAI, err := newResponses(config, "openai-responses", nil, openAIResponsesURL)

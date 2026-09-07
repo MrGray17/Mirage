@@ -194,6 +194,31 @@ func TestRunAgentRequiresNarrowInputsBeforeWorkspaceCreation(t *testing.T) {
 	if err := run([]string{"run", "agent", "--image", image, "--helper-image", image, "--allow", "/workspace/README.md", "--model-broker", "deepseek", "--model", "deepseek-v4-pro", "--", "/agent"}, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "exactly "+modelbroker.DeepSeekV4Flash) {
 		t.Fatalf("DeepSeek fallback error = %v", err)
 	}
+	if err := run([]string{"run", "agent", "--image", image, "--helper-image", image, "--allow", "/workspace/README.md", "--model-broker", "ollama", "--model", "qwen2.5-coder:7b", "--", "/agent"}, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "exactly "+modelbroker.Qwen25Coder15B) {
+		t.Fatalf("Ollama fallback error = %v", err)
+	}
+}
+
+func TestRunAgentQwenEvidenceModeRequiresFixedCompatibilityBoundary(t *testing.T) {
+	image := "example.invalid/image@sha256:" + strings.Repeat("0", 64)
+	base := []string{"run", "agent", "--image", image, "--helper-image", image, "--allow", "/workspace/README.md", "--agent", "qwen"}
+	var stdout, stderr bytes.Buffer
+	args := append(append([]string(nil), base...), "--", "/usr/local/bin/mirage-qwen-agent", "task")
+	if err := run(args, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "trusted Ollama broker") {
+		t.Fatalf("missing Ollama boundary error=%v", err)
+	}
+	args = append(append([]string(nil), base...), "--model-broker", "ollama", "--model", modelbroker.Qwen25Coder15B, "--", "/other-agent", "task")
+	if err := run(args, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "fixed driver command") {
+		t.Fatalf("alternate command error=%v", err)
+	}
+	args = append(append([]string(nil), base...), "--model-broker", "ollama", "--model", modelbroker.Qwen25Coder15B, "--publish-github", "--github-repo", "owner/repo", "--", "/usr/local/bin/mirage-qwen-agent", "task")
+	if err := run(args, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "does not authorize GitHub") {
+		t.Fatalf("publication widening error=%v", err)
+	}
+	args = []string{"run", "agent", "--image", image, "--helper-image", image, "--allow", "/workspace/README.md", "--evidence-out", "/tmp/receipt.json", "--", "/agent"}
+	if err := run(args, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "require --agent qwen") {
+		t.Fatalf("generic evidence error=%v", err)
+	}
 }
 
 func TestRunAgentRequiresExplicitGitHubPublicationAuthorityAndDedicatedCredential(t *testing.T) {

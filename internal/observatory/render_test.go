@@ -72,6 +72,52 @@ func TestRenderRejectsInvalidReceipt(t *testing.T) {
 	}
 }
 
+func TestRenderRejectedAgentReceiptShowsObservedButUncommittedTruth(t *testing.T) {
+	evidence := rejectedAgentEvidence(t)
+	page, err := Render(evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(page)
+	for _, wanted := range []string{"REJECTED", "ZERO COMMITTED MUTATIONS", "Reality unchanged", "filesystem.default_deny", "Completed agent actions", "read_file", "/workspace/README.md", "Receipt <strong>VALID</strong>"} {
+		if !strings.Contains(text, wanted) {
+			t.Errorf("page omitted %q", wanted)
+		}
+	}
+	for _, forbidden := range []string{"id=\"history-trust-boundary\"", "id=\"history-committed\"", "id=\"history-reality\""} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("rejected page falsely rendered %q", forbidden)
+		}
+	}
+}
+
+func rejectedAgentEvidence(t *testing.T) *receipt.Receipt {
+	t.Helper()
+	effect := receipt.Effect{Operation: "WRITE", Resource: "/workspace/README.md", EnforcedBy: "trusted-reconciliation"}
+	mutation := receipt.Mutation{Operation: "MODIFY", Resource: "/workspace/README.md", BeforeDigest: "sha256:before", AfterDigest: "sha256:after"}
+	graph, err := effectgraph.New(effectgraph.Spec{
+		RunID: "agent-rejected", Task: "edit README", Agent: "structured-qwen-agent", Verification: "REJECTED", VerificationPlan: "sha256:plan",
+		Effects:   []effectgraph.Effect{{Operation: effect.Operation, Resource: effect.Resource, Disposition: "DENIED", EnforcedBy: effect.EnforcedBy}},
+		Mutations: []effectgraph.Mutation{{Operation: mutation.Operation, Resource: mutation.Resource, AfterDigest: mutation.AfterDigest}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	evidence, err := receipt.New(receipt.Spec{
+		Version: receipt.VersionV2, RunID: "agent-rejected", ContractHash: "sha256:contract", StartedAt: start, CompletedAt: start.Add(time.Second),
+		AttemptedEffects: []receipt.Effect{effect}, DeniedEffects: []receipt.Effect{effect}, ObservedMutations: []receipt.Mutation{mutation}, Verification: "REJECTED", VerificationPlan: "sha256:plan", Graph: graph,
+		Outcome: receipt.OutcomeRejected, AgentImage: "agent@sha256:exact", SandboxIdentity: "sha256:sandbox",
+		AgentActions:       []receipt.AgentAction{{Sequence: 1, Tool: "list_files", Resource: "/workspace"}, {Sequence: 2, Tool: "read_file", Resource: "/workspace/README.md"}, {Sequence: 3, Tool: "patch_file", Resource: "/workspace/README.md"}, {Sequence: 4, Tool: "finish"}},
+		Rejections:         []receipt.Rejection{{Operation: "MODIFY", Resource: "/workspace/README.md", Rule: "filesystem.default_deny", Reason: "resource is not authorized"}},
+		ProcessTreeStopped: true, CleanupComplete: true, Reality: "M4_VISIBLE_BASELINE_UNCHANGED",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return evidence
+}
+
 func TestRenderVerifiedBenignReceipt(t *testing.T) {
 	evidence := testEvidence(t, "Update README.md", "/workspace/README.md", false)
 	page, err := Render(evidence)
