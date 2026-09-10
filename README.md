@@ -66,32 +66,74 @@ MIRAGE does not depend on model obedience. Malformed model output fails closed,
 and an unauthorized final mutation is rejected even when the model completed
 its requested edit inside the disposable workspace.
 
-## Quick deterministic demo
+## Install or upgrade MIRAGE v1
+
+MIRAGE installs from a Git checkout and embeds the checkout's complete commit
+identity in the binary. Install only from the commit you intend to run, and
+verify the reported identity afterward.
+
+### Windows 11 with WSL2
 
 Prerequisites:
 
-- Linux, or Windows with WSL2;
-- Go 1.24 or newer;
-- rootless Docker, cgroup v2 with delegated CPU/memory/PID controllers, and
-  built-in seccomp.
+- Git and Go 1.24 or newer on Windows;
+- WSL2 with an Ubuntu distribution;
+- rootless Docker inside Ubuntu, using cgroup v2, the `systemd` cgroup driver,
+  delegated CPU/memory/PID controllers, and built-in seccomp.
 
-Install and inspect the environment:
-
-```bash
-./scripts/install.sh
-mirage setup
-mirage doctor
-```
-
-Windows PowerShell installs a native frontend backed by the same WSL2 runtime:
+From PowerShell in the repository root:
 
 ```powershell
+git status --short
+git pull --ff-only
 .\scripts\install.ps1 -Distribution Ubuntu
+```
+
+`git status --short` should print nothing. The installer builds a native
+Windows frontend and a Linux backend from the same source commit, installs them
+under `%LOCALAPPDATA%\Mirage` and the selected WSL user's home, and records the
+backend path in `%LOCALAPPDATA%\Mirage\config.json`. It does not install or
+reconfigure WSL, Docker, Go, Git, or Ollama.
+
+Open a new PowerShell window so the user PATH refreshes, then verify the exact
+frontend/backend pair and prepare the pinned demo image:
+
+```powershell
+mirage version
 mirage setup
 mirage doctor
 ```
 
-Run the malicious fixture:
+`mirage version` must report `mirage 1.0.0`, a full 40-character lowercase Git
+commit, bridge protocol 1, and `platform=windows`. `mirage doctor` checks that
+the WSL backend has the same version, commit, and bridge protocol and must finish
+with `READY`; do not run an agent if it reports `NOT READY`.
+
+To upgrade later, fetch the desired clean source revision and rerun the same
+PowerShell installer. Never update only the frontend or only the WSL backend;
+the frontend intentionally refuses a mismatched commit identity.
+
+### Native Linux
+
+Prerequisites are Git, Go 1.24 or newer, and the same rootless-Docker security
+properties listed above. From the repository root:
+
+```bash
+git status --short
+git pull --ff-only
+./scripts/install.sh
+export PATH="$HOME/.local/bin:$PATH"
+mirage version
+mirage setup
+mirage doctor
+```
+
+The status command should print nothing. `mirage version` must report version
+`1.0.0`, the checkout's complete commit identity, and `platform=linux`.
+
+## Quick deterministic demo
+
+After installation and a successful `mirage doctor`, run the malicious fixture:
 
 ```bash
 mirage run --open
@@ -128,13 +170,41 @@ details.
 ## Real local-Qwen proof
 
 Ollama must already be serving exactly `qwen2.5-coder:1.5b`; MIRAGE never pulls
-or installs a model. Build the constrained, scratch-based agent image from the
-repository root and capture its immutable image identity:
+or installs a model. Install Ollama separately on the trusted host, start it,
+and explicitly obtain the required local model:
+
+```powershell
+ollama pull qwen2.5-coder:1.5b
+ollama list
+```
+
+On Windows, leave Ollama running on Windows and perform the remaining commands
+inside the configured Ubuntu distribution. The trusted MIRAGE broker uses the
+fixed Windows-loopback interop path; the sandbox itself retains `network=none`.
+
+Select the installed Linux binary. A native Linux install uses the first path;
+the Windows installer uses the second:
+
+```bash
+# Native Linux:
+MIRAGE_BIN="$HOME/.local/bin/mirage"
+
+# Windows installer + WSL2 (use this instead on Windows):
+MIRAGE_BIN="$HOME/.local/share/mirage/bin/mirage"
+
+"$MIRAGE_BIN" version
+"$MIRAGE_BIN" doctor
+```
+
+The reported version and commit must match the frontend/source installation.
+Build the constrained, scratch-based Qwen agent image from the repository root
+and capture its immutable image identity:
 
 ```bash
 docker build -t mirage-qwen-agent:v1 -f build/m44-qwen-agent/Dockerfile .
 QWEN_IMAGE="$(docker image inspect --format '{{index .RepoDigests 0}}' mirage-qwen-agent:v1)"
 HELPER_IMAGE="busybox@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0"
+test -n "$QWEN_IMAGE"
 mkdir -p "$HOME/.cache/mirage"
 DEMO_ROOT="$(mktemp -d "$HOME/.cache/mirage/qwen-v1.XXXXXX")"
 mkdir -p "$DEMO_ROOT/authorized" "$DEMO_ROOT/rejected"
@@ -146,7 +216,7 @@ cp README.md "$DEMO_ROOT/rejected/protected.txt"
 Authorized run—Qwen edits the one contract-authorized file:
 
 ```bash
-mirage run agent \
+"$MIRAGE_BIN" run agent \
   --agent qwen \
   --workspace "$DEMO_ROOT/authorized" \
   --image "$QWEN_IMAGE" \
@@ -169,7 +239,7 @@ Rejected run—the contract authorizes `protected.txt`, while the model is asked
 to edit `README.md`:
 
 ```bash
-mirage run agent \
+"$MIRAGE_BIN" run agent \
   --agent qwen \
   --workspace "$DEMO_ROOT/rejected" \
   --image "$QWEN_IMAGE" \

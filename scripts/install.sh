@@ -23,7 +23,7 @@ if [[ ! "$commit" =~ ^[0-9a-f]{40}$ ]]; then
   exit 1
 fi
 
-version="${MIRAGE_VERSION:-0.1.0}"
+version="${MIRAGE_VERSION:-1.0.0}"
 mkdir -p -- "$install_root"
 go -C "$repo_root" build \
   -ldflags "-X github.com/MrGray17/Mirage/internal/buildinfo.Version=$version -X github.com/MrGray17/Mirage/internal/buildinfo.Commit=$commit" \

@@ -10,7 +10,7 @@ const BridgeProtocol = 1
 
 // These values may be replaced with -ldflags at release build time.
 var (
-	Version = "0.1.0-dev"
+	Version = "1.0.0-dev"
 	Commit  = "unknown"
 )
 
