@@ -106,6 +106,44 @@ func ImageAvailable(ctx context.Context, dockerBinary, image string) error {
 	return nil
 }
 
+// ResolveLocalImageDigest converts one explicitly trusted local build tag into
+// the single immutable repository digest Docker reports for it. The returned
+// digest, never the mutable tag, is supplied to the sandbox launcher.
+func ResolveLocalImageDigest(ctx context.Context, dockerBinary, tag, repository string) (string, error) {
+	return resolveLocalImageDigest(ctx, dockerBinary, tag, repository, execCommandRunner{})
+}
+
+func resolveLocalImageDigest(ctx context.Context, dockerBinary, tag, repository string, runner commandRunner) (string, error) {
+	if strings.TrimSpace(dockerBinary) == "" {
+		dockerBinary = "docker"
+	}
+	if tag == "" || tag != strings.TrimSpace(tag) || len(tag) > 256 || strings.ContainsAny(tag, "\r\n\t ") {
+		return "", fmt.Errorf("%w: local image tag is invalid", ErrInvalidConfig)
+	}
+	if repository == "" || repository != strings.TrimSpace(repository) || len(repository) > 256 || strings.ContainsAny(repository, "@\r\n\t ") {
+		return "", fmt.Errorf("%w: local image repository is invalid", ErrInvalidConfig)
+	}
+	output, err := runner.Run(ctx, dockerBinary, "image", "inspect", "--format", "{{json .RepoDigests}}", tag)
+	if err != nil {
+		return "", fmt.Errorf("%w: inspect trusted local image tag %q: %w", ErrIsolation, tag, err)
+	}
+	var digests []string
+	if err := json.Unmarshal(output, &digests); err != nil {
+		return "", fmt.Errorf("%w: decode local image digest inventory: %w", ErrIsolation, err)
+	}
+	prefix := repository + "@sha256:"
+	matches := make([]string, 0, 1)
+	for _, digest := range digests {
+		if strings.HasPrefix(digest, prefix) && digestImagePattern.MatchString(digest) {
+			matches = append(matches, digest)
+		}
+	}
+	if len(matches) != 1 {
+		return "", fmt.Errorf("%w: local image tag %q has %d exact %q repository digests; rebuild it before running", ErrIsolation, tag, len(matches), repository)
+	}
+	return matches[0], nil
+}
+
 // EnsureImage is setup's sole acquisition operation. The exact digest must be
 // supplied by trusted code, and availability is verified after the pull.
 func EnsureImage(ctx context.Context, dockerBinary, image string) (bool, error) {

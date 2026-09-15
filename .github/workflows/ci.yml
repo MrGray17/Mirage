@@ -39,6 +39,11 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Verify constrained OpenCode adapter
+        run: |
+          node --check build/m44-opencode-agent/entrypoint.js
+          node --test build/m44-opencode-agent/compat.test.js
+
       - name: Test with race detector
         run: go test -race -count=1 -cover ./...
 

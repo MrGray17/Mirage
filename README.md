@@ -264,6 +264,48 @@ Exact receipt and Observatory paths are printed by both commands. See
 [the local Qwen guide](docs/qwen-local-agent.md) for the security and evidence
 semantics.
 
+## OpenCode compatibility
+
+MIRAGE can also run the real OpenCode CLI inside the same rootless,
+network-disabled hostile-agent runtime. The supported compatibility slice pins
+OpenCode `1.18.30` and routes its model traffic through MIRAGE's trusted
+host-side Ollama broker to `qwen2.5-coder:1.5b`. OpenCode receives no model
+credential, no host endpoint, no real-workspace mount, and no direct network.
+The host OpenCode app/CLI is not mounted or trusted; the sandbox image carries
+its own pinned copy.
+
+Build the pinned agent image:
+
+```bash
+docker build --pull=false -t mirage-opencode-agent:v1 build/m44-opencode-agent
+OPENCODE_IMAGE="$(docker image inspect --format '{{index .RepoDigests 0}}' mirage-opencode-agent:v1)"
+test -n "$OPENCODE_IMAGE"
+mkdir -p "$HOME/.cache/mirage"
+OPENCODE_ROOT="$(mktemp -d "$HOME/.cache/mirage/opencode.XXXXXX")"
+printf '# OpenCode test\n' > "$OPENCODE_ROOT/README.md"
+```
+
+Run it against one existing file with the product command:
+
+```bash
+"$MIRAGE_BIN" run opencode \
+  --workspace "$OPENCODE_ROOT" \
+  --allow README.md \
+  --task "Replace README.md with exactly: OpenCode edited this file through MIRAGE."
+```
+
+The product command fixes the pinned sandbox/helper images, local model,
+host-only Ollama broker, network-disabled OpenCode entrypoint, quota, and exact
+`/workspace/README.md` authority. `mirage run agent` remains the advanced
+compatibility interface.
+
+The pinned OpenCode/Bun process runs under a fixed 512 MiB cgroup memory
+ceiling. The final frozen state—not OpenCode's narration or internal permission
+decision—determines whether anything reaches reality. This first slice uses the
+generic trusted lifecycle and does not fabricate a Qwen-v2 receipt or
+Observatory. See [the OpenCode guide](docs/opencode-local-agent.md) for the
+exact constrained structured-write adapter, guarantee, and limitations.
+
 ## Evidence and Observatory
 
 Receipts bind run and contract identity, trusted time, effect accounting,
@@ -309,6 +351,7 @@ commit authority.
 - `internal/runtime/realcommit`: narrow trusted real-world commit
 - `internal/runtime/qwenagent`: constrained untrusted local-model driver
 - `internal/runtime/modelbroker`: trusted host-side provider boundary
+- `build/m44-opencode-agent`: pinned OpenCode runtime and broker bridge
 - `internal/effectgraph`: deterministic causal evidence
 - `internal/receipt`: receipt construction and verification
 - `internal/observatory`: read-only evidence visualization

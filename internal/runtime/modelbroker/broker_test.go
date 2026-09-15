@@ -57,6 +57,13 @@ func TestOllamaRequiresExactLocalModelAndNoCredential(t *testing.T) {
 	if broker.Identity() == "" {
 		t.Fatal("local broker identity is empty")
 	}
+	chatBroker, err := NewOllamaChat(Config{Model: Qwen25Coder15B, RunID: "run-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chatBroker.Identity() == "" || chatBroker.Identity() == broker.Identity() {
+		t.Fatal("chat protocol lacks its own non-empty broker identity")
+	}
 }
 
 func TestOllamaTransportRejectsAnythingExceptTheFixedPolicyRequest(t *testing.T) {
@@ -65,9 +72,11 @@ func TestOllamaTransportRejectsAnythingExceptTheFixedPolicyRequest(t *testing.T)
 		method string
 		url    string
 	}{
-		{method: http.MethodGet, url: ollamaPolicyURL},
+		{method: http.MethodGet, url: ollamaResponsesPolicy},
 		{method: http.MethodPost, url: "https://example.com/v1/responses"},
-		{method: http.MethodPost, url: ollamaPolicyURL + "?model=other"},
+		{method: http.MethodPost, url: ollamaResponsesPolicy + "?model=other"},
+		{method: http.MethodGet, url: ollamaChatPolicy},
+		{method: http.MethodPost, url: ollamaChatPolicy + "?model=other"},
 	} {
 		request, err := http.NewRequest(test.method, test.url, nil)
 		if err != nil {
@@ -76,6 +85,66 @@ func TestOllamaTransportRejectsAnythingExceptTheFixedPolicyRequest(t *testing.T)
 		if _, err := (ollamaTransport{}).RoundTrip(request); err == nil {
 			t.Errorf("%s %s was not denied", test.method, test.url)
 		}
+	}
+}
+
+func TestBrokerForwardsOnlyBoundedAuthorizedChatRequests(t *testing.T) {
+	var upstreamCalls int
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		upstreamCalls++
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Error(err)
+		}
+		var bounded map[string]json.RawMessage
+		if err := json.Unmarshal(body, &bounded); err != nil {
+			t.Error(err)
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		var maxTokens int
+		if err := json.Unmarshal(bounded[chatTokenField], &maxTokens); err != nil || maxTokens != 128 {
+			t.Errorf("trusted chat output-token cap = %d, %v", maxTokens, err)
+		}
+		if _, ok := bounded[responsesTokenField]; ok {
+			t.Error("Responses token field crossed the chat boundary")
+		}
+		if _, ok := bounded["max_completion_tokens"]; ok {
+			t.Error("alternate completion token field crossed the chat boundary")
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"id":"chat-1"}`))
+	}))
+	defer upstream.Close()
+	broker, err := newProtocol(Config{
+		APIKey: "host-only-secret", Model: "qwen-test", RunID: "run-chat",
+		TempRoot: shortTempRoot(t), MaxRequests: 1, MaxOutputTokens: 128,
+	}, "test-chat", upstream.Client(), upstream.URL, chatRequestPath, chatTokenField)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := broker.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = broker.Close(context.Background()) }()
+	client := unixHTTPClient(filepath.Join(broker.Directory(), SocketName))
+	response, err := client.Post("http://mirage"+chatRequestPath, "application/json", strings.NewReader(
+		`{"model":"qwen-test","max_tokens":4096,"max_output_tokens":8192,"max_completion_tokens":16384,"messages":[],"tools":[{"type":"function","function":{"name":"write"}}]}`,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK || upstreamCalls != 1 {
+		t.Fatalf("chat response = %d, upstream calls = %d", response.StatusCode, upstreamCalls)
+	}
+	response, err = client.Post("http://mirage"+responsesRequestPath, "application/json", strings.NewReader(`{"model":"qwen-test"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusNotFound || upstreamCalls != 1 {
+		t.Fatalf("wrong protocol response = %d, upstream calls = %d", response.StatusCode, upstreamCalls)
 	}
 }
 

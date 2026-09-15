@@ -14,9 +14,11 @@ import (
 )
 
 const (
-	Qwen25Coder15B  = "qwen2.5-coder:1.5b"
-	ollamaLoopback  = "http://127.0.0.1:11434/v1/responses"
-	ollamaPolicyURL = "https://ollama.local.invalid/v1/responses"
+	Qwen25Coder15B        = "qwen2.5-coder:1.5b"
+	ollamaResponsesURL    = "http://127.0.0.1:11434/v1/responses"
+	ollamaResponsesPolicy = "https://ollama.local.invalid/v1/responses"
+	ollamaChatURL         = "http://127.0.0.1:11434/v1/chat/completions"
+	ollamaChatPolicy      = "https://ollama.local.invalid/v1/chat/completions"
 )
 
 // NewOllama creates the single local-model broker accepted by the Qwen agent
@@ -33,13 +35,31 @@ func NewOllama(config Config) (*Broker, error) {
 			return errors.New("local Ollama broker refuses redirects")
 		},
 	}
-	return newResponses(config, "ollama-local-responses", client, ollamaPolicyURL)
+	return newResponses(config, "ollama-local-responses", client, ollamaResponsesPolicy)
+}
+
+// NewOllamaChat creates the fixed OpenAI-compatible chat endpoint used by the
+// pinned OpenCode integration. It retains the same host-only transport and
+// exact local-model binding as NewOllama.
+func NewOllamaChat(config Config) (*Broker, error) {
+	if strings.TrimSpace(config.Model) != Qwen25Coder15B {
+		return nil, fmt.Errorf("%w: Ollama model must be exactly %s", ErrInvalidConfig, Qwen25Coder15B)
+	}
+	config.APIKey = "ollama-local-no-secret"
+	client := &http.Client{
+		Transport: ollamaTransport{},
+		Timeout:   defaultUpstreamTimeout,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return errors.New("local Ollama broker refuses redirects")
+		},
+	}
+	return newProtocol(config, "ollama-local-chat-completions", client, ollamaChatPolicy, chatRequestPath, chatTokenField)
 }
 
 type ollamaTransport struct{}
 
 func (ollamaTransport) RoundTrip(request *http.Request) (*http.Response, error) {
-	if request.Method != http.MethodPost || request.URL.String() != ollamaPolicyURL {
+	if request.Method != http.MethodPost || (request.URL.String() != ollamaResponsesPolicy && request.URL.String() != ollamaChatPolicy) {
 		return nil, errors.New("local Ollama transport denied request")
 	}
 	if isWSLInteropAvailable() {
@@ -71,11 +91,15 @@ func isWSLInteropAvailable() bool {
 
 func roundTripWindowsOllama(request *http.Request) (*http.Response, error) {
 	const marker = "\nMIRAGE_OLLAMA_STATUS:"
+	target := ollamaResponsesURL
+	if request.URL.String() == ollamaChatPolicy {
+		target = ollamaChatURL
+	}
 	command := exec.CommandContext(request.Context(), "/init", "/mnt/c/Windows/System32/curl.exe",
 		"--silent", "--show-error", "--max-time", strconv.Itoa(int(defaultUpstreamTimeout/time.Second)),
 		"--noproxy", "*", "--proxy", "", "--request", "POST",
 		"--header", "Content-Type: application/json", "--header", "Accept: application/json",
-		"--data-binary", "@-", "--write-out", marker+"%{http_code}", ollamaLoopback,
+		"--data-binary", "@-", "--write-out", marker+"%{http_code}", target,
 	)
 	command.Stdin = request.Body
 	command.Env = []string{

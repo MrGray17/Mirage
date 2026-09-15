@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -24,6 +26,63 @@ func TestRunRequiresExplicitHostileFixtureCommand(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "mirage run") || !strings.Contains(stdout.String(), "mirage doctor") {
 		t.Fatalf("help = %q", stdout.String())
+	}
+}
+
+func TestRunOpenCodeBuildsTheNarrowAgentInvocation(t *testing.T) {
+	const agentImage = "mirage-opencode-agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	var captured []string
+	invoke := func(args []string, _, _ io.Writer) error {
+		captured = append([]string(nil), args...)
+		return nil
+	}
+	var stdout, stderr bytes.Buffer
+	resolve := func(context.Context) (string, error) { return agentImage, nil }
+	if err := runOpenCodeWith([]string{"--workspace", "/project", "--allow", "README.md", "--task", "Update the heading"}, &stdout, &stderr, invoke, resolve); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(captured, "\x00")
+	for _, expected := range []string{
+		"--agent\x00opencode",
+		"--workspace\x00/project",
+		"--image\x00" + agentImage,
+		"--helper-image\x00" + demo.OfficialImage,
+		"--allow\x00/workspace/README.md",
+		"--model-broker\x00ollama",
+		"--model\x00" + modelbroker.Qwen25Coder15B,
+		"--\x00" + openCodeCommand + "\x00Update the heading",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("invocation missing %q: %#v", expected, captured)
+		}
+	}
+	if !strings.Contains(stdout.String(), "real repository mounted    no") {
+		t.Fatalf("summary = %q", stdout.String())
+	}
+}
+
+func TestRunOpenCodeRejectsMissingTaskAndWiderAuthority(t *testing.T) {
+	invoke := func([]string, io.Writer, io.Writer) error {
+		t.Fatal("agent runtime was invoked")
+		return nil
+	}
+	resolve := func(context.Context) (string, error) {
+		t.Fatal("image resolution was attempted")
+		return "", nil
+	}
+	for _, test := range []struct {
+		args []string
+		want string
+	}{
+		{nil, "task is required"},
+		{[]string{"--allow", "main.go", "--task", "edit it"}, "exactly one existing README.md"},
+		{[]string{"--open", "--task", "edit it"}, "not yet available"},
+	} {
+		var stdout, stderr bytes.Buffer
+		err := runOpenCodeWith(test.args, &stdout, &stderr, invoke, resolve)
+		if err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Fatalf("args=%v error=%v; want %q", test.args, err, test.want)
+		}
 	}
 }
 
@@ -218,6 +277,45 @@ func TestRunAgentQwenEvidenceModeRequiresFixedCompatibilityBoundary(t *testing.T
 	args = []string{"run", "agent", "--image", image, "--helper-image", image, "--allow", "/workspace/README.md", "--evidence-out", "/tmp/receipt.json", "--", "/agent"}
 	if err := run(args, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "require --agent qwen") {
 		t.Fatalf("generic evidence error=%v", err)
+	}
+}
+
+func TestRunAgentOpenCodeModeRequiresFixedCompatibilityBoundary(t *testing.T) {
+	image := "example.invalid/image@sha256:" + strings.Repeat("0", 64)
+	base := []string{"run", "agent", "--image", image, "--helper-image", image, "--allow", "/workspace/README.md", "--agent", "opencode"}
+	var stdout, stderr bytes.Buffer
+	args := append(append([]string(nil), base...), "--", "/usr/local/bin/mirage-opencode", "task")
+	if err := run(args, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "trusted Ollama broker") {
+		t.Fatalf("missing Ollama boundary error=%v", err)
+	}
+	args = append(append([]string(nil), base...), "--model-broker", "ollama", "--model", modelbroker.Qwen25Coder15B, "--", "/other-agent", "task")
+	if err := run(args, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "fixed driver command") {
+		t.Fatalf("alternate command error=%v", err)
+	}
+	args = append(append([]string(nil), base...), "--model-broker", "ollama", "--model", modelbroker.Qwen25Coder15B, "--publish-github", "--github-repo", "owner/repo", "--", "/usr/local/bin/mirage-opencode", "task")
+	if err := run(args, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "does not authorize GitHub") {
+		t.Fatalf("publication widening error=%v", err)
+	}
+	args = append(append([]string(nil), base...), "--model-broker", "ollama", "--model", modelbroker.Qwen25Coder15B, "--open", "--", "/usr/local/bin/mirage-opencode", "task")
+	if err := run(args, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "require --agent qwen") {
+		t.Fatalf("unsupported product evidence error=%v", err)
+	}
+	otherResource := append([]string(nil), base...)
+	otherResource[7] = "/workspace/other.txt"
+	args = append(otherResource, "--model-broker", "ollama", "--model", modelbroker.Qwen25Coder15B, "--", "/usr/local/bin/mirage-opencode", "task")
+	if err := run(args, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "only --allow /workspace/README.md") {
+		t.Fatalf("alternate resource error=%v", err)
+	}
+}
+
+func TestAgentMemoryProfile(t *testing.T) {
+	if got := agentMemoryProfile("opencode"); got != 512<<20 {
+		t.Fatalf("OpenCode memory profile = %d, want %d", got, int64(512<<20))
+	}
+	for _, mode := range []string{"generic", "qwen", "unknown"} {
+		if got := agentMemoryProfile(mode); got != 0 {
+			t.Fatalf("%s memory profile = %d, want launcher default", mode, got)
+		}
 	}
 }
 

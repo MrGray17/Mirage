@@ -17,6 +17,13 @@ import (
 	"github.com/MrGray17/Mirage/internal/buildinfo"
 	"github.com/MrGray17/Mirage/internal/demo"
 	runtimedocker "github.com/MrGray17/Mirage/internal/runtime/docker"
+	"github.com/MrGray17/Mirage/internal/runtime/modelbroker"
+)
+
+const (
+	openCodeAgentTag        = "mirage-opencode-agent:v1"
+	openCodeAgentRepository = "mirage-opencode-agent"
+	openCodeCommand         = "/usr/local/bin/mirage-opencode"
 )
 
 func printHelp(writer io.Writer) {
@@ -25,6 +32,7 @@ Transactional security runtime for AI agents
 
 Usage:
   mirage run [malicious|benign] [--open] [--json]
+  mirage run opencode [--workspace DIR] [--allow README.md] --task "TASK"
   mirage doctor
   mirage setup
   mirage verify <receipt.json>
@@ -36,7 +44,85 @@ Run the verified security demo:
 Advanced compatibility commands:
   mirage demo malicious|benign [options]
   mirage run hostile-fixture [options]
-  mirage run agent [options] -- /absolute/agent command...`)
+  mirage run agent [options] -- /absolute/agent command...
+
+Supported real-agent compatibility modes:
+  --agent qwen       constrained Qwen evidence workflow
+  --agent opencode   OpenCode through the trusted local Ollama broker`)
+}
+
+func runOpenCode(args []string, stdout, stderr io.Writer) error {
+	resolve := func(ctx context.Context) (string, error) {
+		return runtimedocker.ResolveLocalImageDigest(ctx, "docker", openCodeAgentTag, openCodeAgentRepository)
+	}
+	return runOpenCodeWith(args, stdout, stderr, runAgent, resolve)
+}
+
+func runOpenCodeWith(args []string, stdout, stderr io.Writer, invoke func([]string, io.Writer, io.Writer) error, resolveImage func(context.Context) (string, error)) error {
+	flags := flag.NewFlagSet("run opencode", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	workspace := flags.String("workspace", ".", "real project directory; OpenCode receives only a disposable snapshot")
+	allowedFile := flags.String("allow", "README.md", "one existing file allowed to cross into reality (currently README.md only)")
+	taskFlag := flags.String("task", "", "coding task for OpenCode and local Qwen")
+	timeout := flags.Duration("timeout", 5*time.Minute, "maximum OpenCode execution time")
+	quota := flags.Int64("workspace-quota-bytes", 64<<20, "hard disposable-workspace capacity")
+	open := flags.Bool("open", false, "reserved until OpenCode receipts are supported")
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if *open {
+		return errors.New("--open is not yet available for OpenCode because its agent-neutral receipt and Observatory view are not implemented")
+	}
+	task := strings.TrimSpace(*taskFlag)
+	if flags.NArg() > 0 {
+		if task != "" {
+			return errors.New("provide the task either with --task or as the final quoted argument, not both")
+		}
+		task = strings.TrimSpace(strings.Join(flags.Args(), " "))
+	}
+	if task == "" {
+		return errors.New("OpenCode task is required; use --task \"describe the change\"")
+	}
+	allowed := strings.TrimSpace(*allowedFile)
+	if allowed != "README.md" && allowed != "./README.md" && allowed != "/workspace/README.md" {
+		return errors.New("the current OpenCode boundary supports exactly one existing README.md; use --allow README.md")
+	}
+	if *timeout < time.Second || *timeout > 30*time.Minute {
+		return errors.New("--timeout must be between 1s and 30m")
+	}
+	if *quota <= 0 {
+		return errors.New("--workspace-quota-bytes must be positive")
+	}
+	resolveCtx, cancelResolve := context.WithTimeout(context.Background(), operationTimeout)
+	agentImage, err := resolveImage(resolveCtx)
+	cancelResolve()
+	if err != nil {
+		return fmt.Errorf("resolve pinned OpenCode sandbox image (build %s first): %w", openCodeAgentTag, err)
+	}
+
+	fmt.Fprintln(stdout, "MIRAGE OPENCODE")
+	fmt.Fprintf(stdout, "  workspace                  %s\n", *workspace)
+	fmt.Fprintln(stdout, "  authority                  MODIFY /workspace/README.md")
+	fmt.Fprintf(stdout, "  model                      %s (trusted local Ollama broker)\n", modelbroker.Qwen25Coder15B)
+	fmt.Fprintln(stdout, "  agent network              none")
+	fmt.Fprintln(stdout, "  real repository mounted    no")
+
+	agentArgs := []string{
+		"--agent", "opencode",
+		"--workspace", *workspace,
+		"--image", agentImage,
+		"--helper-image", demo.OfficialImage,
+		"--allow", "/workspace/README.md",
+		"--model-broker", "ollama",
+		"--model", modelbroker.Qwen25Coder15B,
+		"--timeout", timeout.String(),
+		"--workspace-quota-bytes", fmt.Sprintf("%d", *quota),
+		"--", openCodeCommand, task,
+	}
+	return invoke(agentArgs, stdout, stderr)
 }
 
 func runVersion(args []string, stdout, stderr io.Writer) error {

@@ -34,6 +34,10 @@ const (
 	defaultMaxOutputTokens   = 32768
 	defaultUpstreamTimeout   = 5 * time.Minute
 	defaultReadHeaderTimeout = 5 * time.Second
+	responsesRequestPath     = "/v1/responses"
+	chatRequestPath          = "/v1/chat/completions"
+	responsesTokenField      = "max_output_tokens"
+	chatTokenField           = "max_tokens"
 )
 
 var (
@@ -65,6 +69,8 @@ type Broker struct {
 	server               *http.Server
 	client               *http.Client
 	upstream             *url.URL
+	requestPath          string
+	outputTokenField     string
 	requests             int
 	inFlight             int
 	diagnostic           diagnostics.Record
@@ -95,10 +101,17 @@ func NewDeepSeek(config Config) (*Broker, error) {
 }
 
 func newResponses(config Config, provider string, client *http.Client, upstream string) (*Broker, error) {
+	return newProtocol(config, provider, client, upstream, responsesRequestPath, responsesTokenField)
+}
+
+func newProtocol(config Config, provider string, client *http.Client, upstream, requestPath, outputTokenField string) (*Broker, error) {
 	config.APIKey = strings.TrimSpace(config.APIKey)
 	config.Model = strings.TrimSpace(config.Model)
 	config.RunID = strings.TrimSpace(config.RunID)
 	provider = strings.TrimSpace(provider)
+	if (requestPath != responsesRequestPath || outputTokenField != responsesTokenField) && (requestPath != chatRequestPath || outputTokenField != chatTokenField) {
+		return nil, fmt.Errorf("%w: model protocol is unsupported", ErrInvalidConfig)
+	}
 	if config.APIKey == "" || config.Model == "" || config.RunID == "" || provider == "" || len(config.Model) > 256 || len(config.RunID) > 256 || len(provider) > 256 {
 		return nil, fmt.Errorf("%w: provider, API key, model, and run ID are required", ErrInvalidConfig)
 	}
@@ -178,10 +191,12 @@ func newResponses(config Config, provider string, client *http.Client, upstream 
 	}
 	digest := sha256.Sum256(encoded)
 	return &Broker{
-		config:   config,
-		identity: fmt.Sprintf("sha256:%x", digest),
-		client:   client,
-		upstream: upstreamURL,
+		config:           config,
+		identity:         fmt.Sprintf("sha256:%x", digest),
+		client:           client,
+		upstream:         upstreamURL,
+		requestPath:      requestPath,
+		outputTokenField: outputTokenField,
 	}, nil
 }
 
@@ -302,7 +317,7 @@ func (b *Broker) handle(writer http.ResponseWriter, request *http.Request) {
 		writer.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if request.Method != http.MethodPost || request.URL.Path != "/v1/responses" || request.URL.RawQuery != "" {
+	if request.Method != http.MethodPost || request.URL.Path != b.requestPath || request.URL.RawQuery != "" {
 		http.Error(writer, "model broker endpoint denied", http.StatusNotFound)
 		return
 	}
@@ -341,14 +356,20 @@ func (b *Broker) handle(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	var requestedOutputTokens int
-	if raw, ok := envelope["max_output_tokens"]; ok && string(raw) != "null" {
+	if raw, ok := envelope[b.outputTokenField]; ok && string(raw) != "null" {
 		if err := json.Unmarshal(raw, &requestedOutputTokens); err != nil || requestedOutputTokens < 1 {
 			http.Error(writer, "model broker output budget is invalid", http.StatusForbidden)
 			return
 		}
 	}
 	if requestedOutputTokens == 0 || requestedOutputTokens > b.config.MaxOutputTokens {
-		envelope["max_output_tokens"] = json.RawMessage(fmt.Sprintf("%d", b.config.MaxOutputTokens))
+		envelope[b.outputTokenField] = json.RawMessage(fmt.Sprintf("%d", b.config.MaxOutputTokens))
+	}
+	if b.outputTokenField == chatTokenField {
+		// Do not forward alternate token-limit fields that could compete with
+		// the one bounded field understood by the fixed Ollama chat endpoint.
+		delete(envelope, responsesTokenField)
+		delete(envelope, "max_completion_tokens")
 	}
 	boundedBody, err := json.Marshal(envelope)
 	if err != nil {
@@ -392,7 +413,7 @@ func (b *Broker) handle(writer http.ResponseWriter, request *http.Request) {
 	}
 	contentType := response.Header.Get("Content-Type")
 	if !validResponsesPayload(contentType, responseBody) {
-		b.recordFailure(diagnostics.Record{Class: diagnostics.ProviderSchema, Stage: "provider_schema", ProviderStatus: response.StatusCode, Message: "provider returned a malformed Responses payload"})
+		b.recordFailure(diagnostics.Record{Class: diagnostics.ProviderSchema, Stage: "provider_schema", ProviderStatus: response.StatusCode, Message: "provider returned a malformed model payload"})
 		writer.Header().Set("Content-Type", "application/json")
 		writer.Header().Set("Cache-Control", "no-store")
 		writer.WriteHeader(http.StatusBadGateway)

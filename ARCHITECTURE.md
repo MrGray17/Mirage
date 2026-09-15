@@ -1,6 +1,6 @@
 # MIRAGE System Architecture
 
-> **Status:** MIRAGE v1.0.0 release architecture
+> **Status:** MIRAGE v1.0.0 baseline plus current compatibility architecture
 > **Project type:** Transactional security runtime for autonomous AI agents  
 > **Primary thesis:** Agents execute in a speculative shadow environment; only verified, authorized effects are allowed to cross into real systems.
 
@@ -48,7 +48,7 @@ MIRAGE is therefore not merely a sandbox, firewall, prompt guardrail, or agent p
 7. state revalidation,
 8. tamper-evident audit receipts.
 
-## 1.1 MIRAGE v1 implementation status
+## 1.1 MIRAGE v1 baseline and current implementation status
 
 MIRAGE v1 implements a deliberately narrow, end-to-end security path:
 
@@ -68,6 +68,16 @@ trusted host-side Ollama broker. The Qwen process has a constrained
 `list_files`, `read_file`, `patch_file`, and `finish` tool surface; it is not a
 general shell-capable coding environment. Model output and agent action logs
 are untrusted explanatory evidence and never grant commit authority.
+
+The current tree also contains a narrow OpenCode compatibility path. It pins
+OpenCode `1.18.30`, runs it as UID/GID `65532:65532` with `network=none` and a
+fixed 512 MiB memory ceiling, and exposes the same exact local Qwen model only
+through a host-side OpenAI-compatible chat broker. Because this small model can
+serialize tool intent as text instead of a native tool call, an untrusted
+in-sandbox adapter may apply exactly one bounded structured `write` proposal to
+`/workspace/README.md`. That adapter grants no real authority: the frozen-tree
+scan, deterministic verification, and M4.3 commit boundary remain decisive.
+This path does not emit the Qwen-specific v2 receipt or Observatory.
 
 MIRAGE v1 also contains deterministic Git commit construction and create-only
 GitHub branch-publication foundations. GitHub pull-request creation (M5.4),
@@ -916,6 +926,17 @@ perform the bounded rooted tool sequence described in Section 1.1. This proves
 that a real model can propose both authorized and unauthorized disposable
 mutations; the frozen-tree scan and deterministic verifier, not the tool
 transcript, decide what may cross into reality.
+
+The optional OpenCode compatibility path uses the same isolation and trusted
+Ollama boundary but switches the sandbox-facing API to bounded
+`/v1/chat/completions`, which is independently bound into the broker identity.
+The OpenCode image and command are fixed, direct shell/web/plugin/subagent
+surfaces are denied, and current CLI authority is narrowed to
+`MODIFY /workspace/README.md`. The 1.5B-model structured-text adapter lives
+inside the hostile image, accepts one exact `write` object for that path, and
+rejects other paths, tools, fields, duplicates, NULs, and oversized content.
+It is compatibility behavior, not a security oracle or source of commit
+authority.
 
 Inside the trusted `ApplyCommit` phase, M2 prepares the replacement in the real
 file's directory, then re-observes the real file immediately before
@@ -2036,6 +2057,16 @@ The v1 release supports exactly one compelling end-to-end workflow.
 - read-only, evidence-only interactive Observatory,
 - Windows frontend with a commit-bound WSL2 backend,
 - constrained local Qwen execution through a trusted Ollama broker.
+
+## Implemented after the v1 baseline
+
+- pinned OpenCode `1.18.30` execution through the same rootless runtime and a
+  trusted local Ollama chat broker;
+- a constrained, untrusted README-only structured-write adapter for the
+  installed `qwen2.5-coder:1.5b` model;
+- successful authorized OpenCode commit and unauthorized-path fail-closed
+  validation;
+- no OpenCode-specific receipt or Observatory claim.
 
 ## Explicitly not in MVP
 

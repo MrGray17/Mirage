@@ -412,9 +412,26 @@ func (l *AgentLauncher) verifySeedContainer(ctx context.Context) error {
 }
 
 func (l *AgentLauncher) verifyQuotaCapacity(ctx context.Context) error {
-	output, err := l.run(ctx, "exec", l.seedID, "/bin/sh", "-c", "df -Pk /workspace | tail -n 1")
-	if err != nil {
-		return fmt.Errorf("%w: measure mounted workspace capacity: %w", ErrQuota, err)
+	var output []byte
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		output, err = l.run(ctx, "exec", l.seedID, "/bin/sh", "-c", "df -Pk /workspace | tail -n 1")
+		if err == nil {
+			break
+		}
+		if attempt == 2 {
+			return fmt.Errorf("%w: measure mounted workspace capacity: %w", ErrQuota, err)
+		}
+		// Docker can report its keeper RUNNING a few milliseconds before the
+		// first exec is ready. Retry only that failed read-only observation;
+		// a successfully observed mismatch below still fails immediately.
+		timer := time.NewTimer(time.Duration(attempt+1) * 25 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return errors.Join(fmt.Errorf("%w: measure mounted workspace capacity", ErrQuota), ctx.Err(), err)
+		case <-timer.C:
+		}
 	}
 	fields := strings.Fields(string(output))
 	if len(fields) != 6 || fields[5] != containerWorkspacePath {

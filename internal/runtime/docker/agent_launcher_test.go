@@ -142,6 +142,35 @@ func TestMountedQuotaCapacityMustMatchManifest(t *testing.T) {
 	}
 }
 
+func TestMountedQuotaCapacityRetriesOnlyExecReadinessFailure(t *testing.T) {
+	launcher, err := NewAgent(agentTestConfig(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	launcher.seedID = "0123456789ab"
+	runner := &fakeRunner{responses: []fakeResponse{
+		{err: errors.New("container exec is not ready")},
+		{err: errors.New("container exec is not ready")},
+		{output: []byte("tmpfs 65536 0 65536 0% /workspace\n")},
+	}}
+	launcher.runner = runner
+	if err := launcher.verifyQuotaCapacity(context.Background()); err != nil {
+		t.Fatalf("transient readiness error was not recovered: %v", err)
+	}
+	if len(runner.calls) != 3 {
+		t.Fatalf("capacity reads=%d, want 3", len(runner.calls))
+	}
+
+	runner = &fakeRunner{responses: []fakeResponse{{output: []byte("tmpfs 131072 0 131072 0% /workspace\n")}}}
+	launcher.runner = runner
+	if err := launcher.verifyQuotaCapacity(context.Background()); !errors.Is(err, ErrQuota) {
+		t.Fatalf("observed capacity mismatch error = %v", err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("capacity mismatch reads=%d, want no retry", len(runner.calls))
+	}
+}
+
 func TestSeedMarkerReadinessRetriesOnlyTransportFailure(t *testing.T) {
 	launcher, err := NewAgent(agentTestConfig(t))
 	if err != nil {

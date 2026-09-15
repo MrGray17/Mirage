@@ -59,6 +59,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 			return runPublicDemo(args[1], args[2:], stdout, stderr)
 		case "hostile-fixture":
 			return runHostileFixture(args[2:], stdout, stderr)
+		case "opencode":
+			return runOpenCode(args[2:], stdout, stderr)
 		case "agent":
 			return runAgent(args[2:], stdout, stderr)
 		default:
@@ -603,7 +605,7 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 	allowedResource := flags.String("allow", "", "the one existing file the M4.3 boundary may modify (for example /workspace/README.md)")
 	timeout := flags.Duration("timeout", 10*time.Minute, "maximum coding-agent execution time")
 	quota := flags.Int64("workspace-quota-bytes", 64<<20, "hard writable disposable-workspace capacity")
-	agentMode := flags.String("agent", "generic", "coding-agent evidence mode: generic or qwen")
+	agentMode := flags.String("agent", "generic", "coding-agent mode: generic, qwen, or opencode")
 	brokerKind := flags.String("model-broker", "none", "trusted model broker: none, openai, deepseek, or ollama")
 	model := flags.String("model", "", "exact model allowed by the trusted broker")
 	evidenceOut := flags.String("evidence-out", "", "new Qwen receipt path; defaults to the MIRAGE run cache")
@@ -626,8 +628,8 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 	if len(command) == 0 {
 		return errors.New("an absolute coding-agent command is required after --")
 	}
-	if *agentMode != "generic" && *agentMode != "qwen" {
-		return errors.New("--agent must be generic or qwen")
+	if *agentMode != "generic" && *agentMode != "qwen" && *agentMode != "opencode" {
+		return errors.New("--agent must be generic, qwen, or opencode")
 	}
 	if *format != "text" && *format != "json" {
 		return errors.New("--format must be text or json")
@@ -659,6 +661,22 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 		}
 		if *publishGitHub {
 			return errors.New("--agent qwen evidence mode does not authorize GitHub publication")
+		}
+	} else if *agentMode == "opencode" {
+		if *brokerKind != "ollama" || strings.TrimSpace(*model) != modelbroker.Qwen25Coder15B {
+			return fmt.Errorf("--agent opencode requires the trusted Ollama broker and exact model %s", modelbroker.Qwen25Coder15B)
+		}
+		if len(command) != 2 || command[0] != "/usr/local/bin/mirage-opencode" || strings.TrimSpace(command[1]) == "" {
+			return errors.New("--agent opencode requires the fixed driver command and exactly one non-empty task argument")
+		}
+		if *allowedResource != "/workspace/README.md" {
+			return errors.New("--agent opencode currently supports only --allow /workspace/README.md")
+		}
+		if *publishGitHub {
+			return errors.New("--agent opencode does not authorize GitHub publication")
+		}
+		if strings.TrimSpace(*evidenceOut) != "" || strings.TrimSpace(*observatoryOut) != "" || strings.TrimSpace(*outputDir) != "" || *format != "text" || *open {
+			return errors.New("agent evidence output options require --agent qwen")
 		}
 	} else if strings.TrimSpace(*evidenceOut) != "" || strings.TrimSpace(*observatoryOut) != "" || strings.TrimSpace(*outputDir) != "" || *format != "text" || *open {
 		return errors.New("agent evidence output options require --agent qwen")
@@ -721,7 +739,11 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 			brokerConfig.MaxRequestBytes = 1 << 20
 			brokerConfig.MaxResponseBytes = 4 << 20
 			brokerConfig.MaxOutputTokens = 2048
-			broker, err = modelbroker.NewOllama(brokerConfig)
+			if *agentMode == "opencode" {
+				broker, err = modelbroker.NewOllamaChat(brokerConfig)
+			} else {
+				broker, err = modelbroker.NewOllama(brokerConfig)
+			}
 		} else if *brokerKind == "deepseek" {
 			// The live M4.4 acceptance is intentionally tiny. These trusted
 			// caps constrain provider spend as well as sandbox abuse.
@@ -753,6 +775,7 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 	}
 
 	containerName := "mirage-agent-" + disposable.Token()[:16]
+	agentMemoryBytes := agentMemoryProfile(*agentMode)
 	launcher, err := runtimedocker.NewAgent(runtimedocker.AgentConfig{
 		AgentImage:          *agentImage,
 		HelperImage:         *helperImage,
@@ -762,6 +785,7 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 		WorkspaceToken:      disposable.Token(),
 		Command:             command,
 		WorkspaceQuotaBytes: *quota,
+		MemoryBytes:         agentMemoryBytes,
 		BrokerDirectory:     brokerDirectory,
 		BrokerIdentity:      brokerIdentity,
 		BrokerModel:         strings.TrimSpace(*model),
@@ -995,6 +1019,16 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 	}
 	cleanupErr := cleanupAgentRuntime(lifecycle, disposable, closeBroker)
 	return cleanupErr
+}
+
+func agentMemoryProfile(agentMode string) int64 {
+	if agentMode == "opencode" {
+		// The pinned OpenCode/Bun distribution does not start reliably inside
+		// the generic 256 MiB profile. Keep this compatibility allowance fixed
+		// and below AgentLauncher’s independently enforced 1 GiB ceiling.
+		return 512 << 20
+	}
+	return 0
 }
 
 func resolveAgentDiagnostic(agent diagnostics.Record, broker modelbroker.DiagnosticSnapshot) diagnostics.Record {
