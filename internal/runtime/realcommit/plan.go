@@ -125,6 +125,9 @@ func Apply(plan *Plan, beforeReplace func() error) (returnErr error) {
 	if err != nil {
 		return fmt.Errorf("%w: open real workspace: %v", ErrRevalidation, err)
 	}
+	if err := requireNamedWorkspace(root, plan.realWorkspace); err != nil {
+		return err
+	}
 	replaced := false
 	defer func() {
 		closeErr := root.Close()
@@ -183,7 +186,10 @@ func Apply(plan *Plan, beforeReplace func() error) (returnErr error) {
 	if err := beforeReplace(); err != nil {
 		return fmt.Errorf("final commit authority check: %w", err)
 	}
-	if err := os.Rename(filepath.Join(plan.realWorkspace, temporary), filepath.Join(plan.realWorkspace, plan.relative)); err != nil {
+	if err := requireNamedWorkspace(root, plan.realWorkspace); err != nil {
+		return err
+	}
+	if err := root.Rename(temporary, plan.relative); err != nil {
 		return fmt.Errorf("replace real resource: %w", err)
 	}
 	cleanup = false
@@ -191,6 +197,23 @@ func Apply(plan *Plan, beforeReplace func() error) (returnErr error) {
 	return nil
 }
 
+// requireNamedWorkspace prevents a renamed/replaced workspace path from
+// redirecting the final commit. Root-relative operations then remain anchored
+// to the directory already opened by the trusted control plane.
+func requireNamedWorkspace(root *os.Root, workspacePath string) error {
+	opened, err := root.Stat(".")
+	if err != nil {
+		return fmt.Errorf("%w: inspect opened workspace root: %v", ErrRevalidation, err)
+	}
+	named, err := os.Stat(workspacePath)
+	if err != nil {
+		return fmt.Errorf("%w: real workspace path is unavailable: %v", ErrConflict, err)
+	}
+	if !named.IsDir() || !os.SameFile(opened, named) {
+		return fmt.Errorf("%w: real workspace path no longer names the opened directory", ErrConflict)
+	}
+	return nil
+}
 func requireExpected(root *os.Root, plan *Plan) error {
 	digest, mode, err := observeRegular(root, plan.relative)
 	if err != nil {
