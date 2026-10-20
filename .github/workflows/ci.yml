@@ -27,6 +27,9 @@ jobs:
           go-version: '1.27.3'
           cache: false
 
+      - name: Validate live acceptance script syntax
+        run: bash -n scripts/test-live.sh
+
       - name: Verify formatting
         shell: bash
         run: |
