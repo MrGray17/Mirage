@@ -229,7 +229,7 @@ func TestBrokerClassifiesProviderHTTPWithoutForwardingBody(t *testing.T) {
 			}))
 			defer upstream.Close()
 			broker := testBroker(t, upstream.Client(), upstream.URL)
-			response := postBroker(t, broker, `{"model":"allowed"}`)
+			response := postBroker(t, broker, `{"model":"allowed","input":"test request"}`)
 			body, _ := io.ReadAll(response.Body)
 			_ = response.Body.Close()
 			if response.StatusCode != status || strings.Contains(string(body), "provider-body-secret") {
@@ -263,7 +263,7 @@ func TestBrokerClassifiesMalformedAndAcceptsValidResponsesPayloads(t *testing.T)
 			}))
 			defer upstream.Close()
 			broker := testBroker(t, upstream.Client(), upstream.URL)
-			response := postBroker(t, broker, `{"model":"allowed"}`)
+			response := postBroker(t, broker, `{"model":"allowed","input":"test request"}`)
 			_, _ = io.Copy(io.Discard, response.Body)
 			_ = response.Body.Close()
 			if response.StatusCode != test.wantStatus {
@@ -282,7 +282,7 @@ func TestBrokerConnectDiagnosticRedactsSecrets(t *testing.T) {
 		return nil, errors.New("connect failed with sk-transport-secret-123456789 and host-only-secret")
 	})}
 	broker := testBroker(t, client, "https://provider.invalid/responses")
-	response := postBroker(t, broker, `{"model":"allowed"}`)
+	response := postBroker(t, broker, `{"model":"allowed","input":"test request"}`)
 	_ = response.Body.Close()
 	snapshot := broker.Diagnostics()
 	if snapshot.Failure.Class != diagnostics.BrokerConnect || strings.Contains(snapshot.Failure.Message, "transport-secret") || strings.Contains(snapshot.Failure.Message, "host-only-secret") {
@@ -341,4 +341,35 @@ func shortTempRoot(t *testing.T) string {
 		}
 	})
 	return directory
+}
+
+func TestBrokerRejectsUnapprovedRequestCapabilities(t *testing.T) {
+	upstreamCalls := 0
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		upstreamCalls++
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"id":"response-1"}`))
+	}))
+	defer upstream.Close()
+	broker := testBroker(t, upstream.Client(), upstream.URL)
+
+	for _, body := range []string{
+		`{"model":"allowed","input":"test","tools":[{"type":"web_search"}]}`,
+		`{"model":"allowed","input":"test","tool_choice":"required"}`,
+		`{"model":"allowed","input":"test","stream":true}`,
+		`{"model":"allowed","input":"test","temperature":0.7}`,
+		`{"model":"allowed","input":["not","a string"]}`,
+		`{"model":"allowed","input":"test","max_output_tokens":null}`,
+		`{"model":"allowed","input":"test","unexpected_provider_option":true}`,
+	} {
+		response := postBroker(t, broker, body)
+		_, _ = io.Copy(io.Discard, response.Body)
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusForbidden {
+			t.Errorf("request %s returned status %d, want %d", body, response.StatusCode, http.StatusForbidden)
+		}
+	}
+	if upstreamCalls != 0 {
+		t.Fatalf("rejected capability requests reached upstream %d times", upstreamCalls)
+	}
 }
