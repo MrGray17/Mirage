@@ -236,6 +236,10 @@ launcher or M4.3 commit code:
   bytes, and model output tokens, refuse redirects, and inject the provider
   key only in the trusted host process. The agent receives a non-secret dummy
   provider value and cannot read the real key;
+  request bodies are profile-bound and allowlisted: the pinned Codex Responses
+  client may send client-executed function/custom tools only, while provider-hosted
+  tools and unknown fields reject; local Qwen uses a separate narrow non-streaming
+  structured-output profile. Both profiles bind their request policy into broker identity;
 - agent stdout and stderr are retained through a size-rotated Docker `local`
   log, acquired only after stop proof, immediately redacted, and capped at 32
   KiB per stream in trusted memory. Diagnostics classify `BROKER_CONNECT`,

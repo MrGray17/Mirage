@@ -270,3 +270,58 @@ func assertNoStaging(t *testing.T, root string) {
 }
 
 func allowReplace() error { return nil }
+
+func TestApplyRejectsWorkspacePathSwapBeforeReplacement(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "workspace")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, "README.md")
+	before := []byte("before")
+	if err := os.WriteFile(target, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plan := newTestPlan(t, root, before, []byte("authorized"), 0o600)
+	movedRoot := filepath.Join(parent, "moved-workspace")
+	replacementContents := []byte("external replacement workspace")
+
+	var injectedStage string
+	err := Apply(plan, func() error {
+		if err := os.Rename(root, movedRoot); err != nil {
+			return err
+		}
+		if err := os.Mkdir(root, 0o700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(root, "README.md"), replacementContents, 0o600); err != nil {
+			return err
+		}
+		// Recreate the predictable staging filename in the replacement path.
+		// The old absolute-path rename would then replace this workspace's target.
+		stages, err := filepath.Glob(filepath.Join(movedRoot, ".mirage-commit-*.tmp"))
+		if err != nil {
+			return err
+		}
+		if len(stages) != 1 {
+			return fmt.Errorf("staging artifacts = %d, want 1", len(stages))
+		}
+		injectedStage = filepath.Join(root, filepath.Base(stages[0]))
+		return os.Link(stages[0], injectedStage)
+	})
+	if injectedStage != "" {
+		_ = os.Remove(injectedStage)
+	}
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("apply error = %v, want workspace-path conflict", err)
+	}
+	contents, readErr := os.ReadFile(filepath.Join(root, "README.md"))
+	if readErr != nil || string(contents) != string(replacementContents) {
+		t.Fatalf("replacement workspace changed: %q, %v", contents, readErr)
+	}
+	contents, readErr = os.ReadFile(filepath.Join(movedRoot, "README.md"))
+	if readErr != nil || string(contents) != string(before) {
+		t.Fatalf("original workspace changed: %q, %v", contents, readErr)
+	}
+	assertNoStaging(t, movedRoot)
+}

@@ -23,6 +23,9 @@ import (
 )
 
 const (
+	RequestProfileCodex = "codex-responses-v1"
+	RequestProfileQwen  = "qwen-structured-v1"
+
 	SocketName               = "model.sock"
 	DeepSeekV4Flash          = "deepseek-v4-flash"
 	openAIResponsesURL       = "https://api.openai.com/v1/responses"
@@ -47,6 +50,7 @@ var (
 type Config struct {
 	APIKey           string
 	Model            string
+	RequestProfile   string
 	RunID            string
 	TempRoot         string
 	MaxRequests      int
@@ -82,6 +86,7 @@ type DiagnosticSnapshot struct {
 }
 
 func NewOpenAI(config Config) (*Broker, error) {
+	config.RequestProfile = RequestProfileCodex
 	return newResponses(config, "openai-responses", nil, openAIResponsesURL)
 }
 
@@ -91,6 +96,7 @@ func NewDeepSeek(config Config) (*Broker, error) {
 	if strings.TrimSpace(config.Model) != DeepSeekV4Flash {
 		return nil, fmt.Errorf("%w: DeepSeek model must be exactly %s", ErrInvalidConfig, DeepSeekV4Flash)
 	}
+	config.RequestProfile = RequestProfileCodex
 	return newResponses(config, "deepseek-responses", nil, deepSeekResponsesURL)
 }
 
@@ -99,6 +105,12 @@ func newResponses(config Config, provider string, client *http.Client, upstream 
 	config.Model = strings.TrimSpace(config.Model)
 	config.RunID = strings.TrimSpace(config.RunID)
 	provider = strings.TrimSpace(provider)
+	if config.RequestProfile == "" {
+		config.RequestProfile = RequestProfileCodex
+	}
+	if config.RequestProfile != RequestProfileCodex && config.RequestProfile != RequestProfileQwen {
+		return nil, fmt.Errorf("%w: unsupported request profile", ErrInvalidConfig)
+	}
 	if config.APIKey == "" || config.Model == "" || config.RunID == "" || provider == "" || len(config.Model) > 256 || len(config.RunID) > 256 || len(provider) > 256 {
 		return nil, fmt.Errorf("%w: provider, API key, model, and run ID are required", ErrInvalidConfig)
 	}
@@ -154,6 +166,7 @@ func newResponses(config Config, provider string, client *http.Client, upstream 
 		Provider         string `json:"provider"`
 		Endpoint         string `json:"endpoint"`
 		Model            string `json:"model"`
+		RequestProfile   string `json:"request_profile"`
 		RunID            string `json:"run_id"`
 		MaxRequests      int    `json:"max_requests"`
 		MaxConcurrent    int    `json:"max_concurrent"`
@@ -165,6 +178,7 @@ func newResponses(config Config, provider string, client *http.Client, upstream 
 		Provider:         provider,
 		Endpoint:         upstreamURL.String(),
 		Model:            config.Model,
+		RequestProfile:   config.RequestProfile,
 		RunID:            config.RunID,
 		MaxRequests:      config.MaxRequests,
 		MaxConcurrent:    config.MaxConcurrent,
@@ -330,29 +344,9 @@ func (b *Broker) handle(writer http.ResponseWriter, request *http.Request) {
 		http.Error(writer, ErrLimit.Error(), http.StatusRequestEntityTooLarge)
 		return
 	}
-	var envelope map[string]json.RawMessage
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		http.Error(writer, "model broker policy mismatch", http.StatusForbidden)
-		return
-	}
-	var requestedModel string
-	if err := json.Unmarshal(envelope["model"], &requestedModel); err != nil || requestedModel != b.config.Model {
-		http.Error(writer, "model broker policy mismatch", http.StatusForbidden)
-		return
-	}
-	var requestedOutputTokens int
-	if raw, ok := envelope["max_output_tokens"]; ok && string(raw) != "null" {
-		if err := json.Unmarshal(raw, &requestedOutputTokens); err != nil || requestedOutputTokens < 1 {
-			http.Error(writer, "model broker output budget is invalid", http.StatusForbidden)
-			return
-		}
-	}
-	if requestedOutputTokens == 0 || requestedOutputTokens > b.config.MaxOutputTokens {
-		envelope["max_output_tokens"] = json.RawMessage(fmt.Sprintf("%d", b.config.MaxOutputTokens))
-	}
-	boundedBody, err := json.Marshal(envelope)
+	boundedBody, err := sanitizeRequest(body, b.config.Model, b.config.MaxOutputTokens, b.config.RequestProfile, b.config.RunID)
 	if err != nil {
-		http.Error(writer, "model broker request failed", http.StatusBadGateway)
+		http.Error(writer, "model broker policy mismatch", http.StatusForbidden)
 		return
 	}
 	upstreamRequest, err := http.NewRequestWithContext(request.Context(), http.MethodPost, b.upstream.String(), strings.NewReader(string(boundedBody)))
@@ -406,6 +400,382 @@ func (b *Broker) handle(writer http.ResponseWriter, request *http.Request) {
 	writer.Header().Set("Cache-Control", "no-store")
 	writer.WriteHeader(response.StatusCode)
 	_, _ = writer.Write(responseBody)
+}
+
+// sanitizeRequest applies a profile-bound allowlist to the untrusted request.
+// Codex's pinned Responses client is supported, but only client-executed
+// function/custom tools are forwarded. Provider-hosted tools and unknown fields
+// fail closed. The Qwen profile intentionally remains non-streaming and narrow.
+func sanitizeRequest(body []byte, model string, maxOutputTokens int, profile, runID string) ([]byte, error) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(body, &envelope); err != nil || envelope == nil {
+		return nil, errors.New("request must be one JSON object")
+	}
+	allowed := map[string]struct{}{
+		"model": {}, "input": {}, "instructions": {}, "max_output_tokens": {}, "temperature": {}, "text": {},
+	}
+	switch profile {
+	case RequestProfileQwen:
+		allowed["stream"] = struct{}{}
+	case RequestProfileCodex:
+		for _, field := range []string{
+			"tools", "tool_choice", "parallel_tool_calls", "reasoning", "store", "stream",
+			"stream_options", "include", "service_tier", "prompt_cache_key", "client_metadata",
+		} {
+			allowed[field] = struct{}{}
+		}
+	default:
+		return nil, errors.New("unknown request profile")
+	}
+	for field := range envelope {
+		if _, ok := allowed[field]; !ok {
+			return nil, fmt.Errorf("unsupported model request field %q", field)
+		}
+	}
+
+	var requestedModel string
+	if err := json.Unmarshal(envelope["model"], &requestedModel); err != nil || requestedModel != model {
+		return nil, errors.New("model does not match trusted policy")
+	}
+	inputRaw, ok := envelope["input"]
+	if !ok || string(inputRaw) == "null" || strings.TrimSpace(string(inputRaw)) == "" {
+		return nil, errors.New("input is required")
+	}
+	if profile == RequestProfileQwen {
+		var input string
+		if err := json.Unmarshal(inputRaw, &input); err != nil || strings.TrimSpace(input) == "" {
+			return nil, errors.New("Qwen input must be a non-empty string")
+		}
+	} else {
+		var input string
+		if err := json.Unmarshal(inputRaw, &input); err == nil {
+			if strings.TrimSpace(input) == "" {
+				return nil, errors.New("input string is empty")
+			}
+		} else {
+			var items []json.RawMessage
+			if err := json.Unmarshal(inputRaw, &items); err != nil || items == nil || len(items) == 0 || len(items) > 4096 {
+				return nil, errors.New("Codex input must be a non-empty string or bounded item array")
+			}
+			for _, item := range items {
+				var object map[string]json.RawMessage
+				if err := json.Unmarshal(item, &object); err != nil || object == nil {
+					return nil, errors.New("Codex input items must be JSON objects")
+				}
+			}
+		}
+	}
+
+	if raw, ok := envelope["instructions"]; ok {
+		var instructions string
+		if string(raw) == "null" || json.Unmarshal(raw, &instructions) != nil ||
+			(profile == RequestProfileQwen && strings.TrimSpace(instructions) == "") {
+			return nil, errors.New("instructions has an invalid type or value")
+		}
+	} else if profile == RequestProfileQwen {
+		return nil, errors.New("Qwen instructions are required")
+	}
+
+	requestedOutputTokens := 0
+	if raw, ok := envelope["max_output_tokens"]; ok {
+		if string(raw) == "null" || json.Unmarshal(raw, &requestedOutputTokens) != nil || requestedOutputTokens < 1 {
+			return nil, errors.New("output-token budget is invalid")
+		}
+	}
+	if requestedOutputTokens == 0 || requestedOutputTokens > maxOutputTokens {
+		envelope["max_output_tokens"] = json.RawMessage(fmt.Sprintf("%d", maxOutputTokens))
+	}
+	if raw, ok := envelope["temperature"]; ok {
+		var temperature float64
+		if string(raw) == "null" || json.Unmarshal(raw, &temperature) != nil || temperature != 0 {
+			return nil, errors.New("temperature must be the trusted value zero")
+		}
+	}
+	envelope["temperature"] = json.RawMessage("0")
+
+	if raw, ok := envelope["text"]; ok && string(raw) != "null" {
+		if err := validateTextConfig(raw); err != nil {
+			return nil, err
+		}
+	} else if profile == RequestProfileQwen {
+		return nil, errors.New("Qwen structured output format is required")
+	} else {
+		delete(envelope, "text")
+	}
+
+	if profile == RequestProfileQwen {
+		if raw, ok := envelope["stream"]; ok {
+			var stream bool
+			if string(raw) == "null" || json.Unmarshal(raw, &stream) != nil || stream {
+				return nil, errors.New("Qwen streaming is not authorized")
+			}
+		}
+		envelope["stream"] = json.RawMessage("false")
+		return json.Marshal(envelope)
+	}
+
+	if raw, ok := envelope["tools"]; ok && string(raw) != "null" {
+		if err := validateCodexTools(raw); err != nil {
+			return nil, err
+		}
+	} else {
+		delete(envelope, "tools")
+	}
+	if raw, ok := envelope["tool_choice"]; ok {
+		var choice string
+		if json.Unmarshal(raw, &choice) != nil || choice != "auto" {
+			return nil, errors.New("only automatic client-side tool selection is authorized")
+		}
+	} else {
+		envelope["tool_choice"] = json.RawMessage("\"auto\"")
+	}
+	if raw, ok := envelope["parallel_tool_calls"]; ok {
+		var parallel bool
+		if string(raw) == "null" || json.Unmarshal(raw, &parallel) != nil {
+			return nil, errors.New("parallel_tool_calls must be boolean")
+		}
+	}
+	if raw, ok := envelope["reasoning"]; ok && string(raw) != "null" {
+		if err := validateCodexReasoning(raw); err != nil {
+			return nil, err
+		}
+	} else {
+		delete(envelope, "reasoning")
+	}
+	if raw, ok := envelope["store"]; ok {
+		var store bool
+		if string(raw) == "null" || json.Unmarshal(raw, &store) != nil || store {
+			return nil, errors.New("provider-side response storage is not authorized")
+		}
+	}
+	envelope["store"] = json.RawMessage("false")
+	if raw, ok := envelope["stream"]; ok {
+		var stream bool
+		if string(raw) == "null" || json.Unmarshal(raw, &stream) != nil || !stream {
+			return nil, errors.New("Codex streaming must remain enabled")
+		}
+	}
+	envelope["stream"] = json.RawMessage("true")
+	if raw, ok := envelope["stream_options"]; ok && string(raw) != "null" {
+		if err := validateCodexStreamOptions(raw); err != nil {
+			return nil, err
+		}
+	} else {
+		delete(envelope, "stream_options")
+	}
+	if raw, ok := envelope["include"]; ok && string(raw) != "null" {
+		var includes []string
+		if json.Unmarshal(raw, &includes) != nil || len(includes) > 8 {
+			return nil, errors.New("include must be a bounded string array")
+		}
+		for _, item := range includes {
+			if item != "reasoning.encrypted_content" {
+				return nil, fmt.Errorf("unsupported response include %q", item)
+			}
+		}
+	} else {
+		delete(envelope, "include")
+	}
+	if raw, ok := envelope["service_tier"]; ok && string(raw) != "null" {
+		var tier string
+		if json.Unmarshal(raw, &tier) != nil || (tier != "auto" && tier != "default") {
+			return nil, errors.New("service_tier is outside the trusted budget policy")
+		}
+	} else {
+		delete(envelope, "service_tier")
+	}
+	if raw, ok := envelope["prompt_cache_key"]; ok && string(raw) != "null" {
+		var key string
+		if json.Unmarshal(raw, &key) != nil || strings.TrimSpace(key) == "" {
+			return nil, errors.New("prompt_cache_key must be a non-empty string")
+		}
+		sum := sha256.Sum256([]byte(runID))
+		envelope["prompt_cache_key"] = mustJSON(fmt.Sprintf("mirage-%x", sum[:24]))
+	} else {
+		delete(envelope, "prompt_cache_key")
+	}
+	if raw, ok := envelope["client_metadata"]; ok && string(raw) != "null" {
+		var metadata map[string]string
+		if json.Unmarshal(raw, &metadata) != nil || metadata == nil || len(metadata) > 32 {
+			return nil, errors.New("client_metadata must be a bounded string map")
+		}
+		for key, value := range metadata {
+			if strings.TrimSpace(key) == "" || len(key) > 128 || len(value) > 512 || strings.ContainsAny(key+value, "\x00\r\n") {
+				return nil, errors.New("client_metadata field is invalid")
+			}
+		}
+	} else {
+		delete(envelope, "client_metadata")
+	}
+	return json.Marshal(envelope)
+}
+
+func validateCodexTools(raw json.RawMessage) error {
+	var tools []json.RawMessage
+	if json.Unmarshal(raw, &tools) != nil || tools == nil || len(tools) > 128 {
+		return errors.New("Codex tools must be a bounded array")
+	}
+	names := make(map[string]struct{}, len(tools))
+	for _, rawTool := range tools {
+		var tool map[string]json.RawMessage
+		if json.Unmarshal(rawTool, &tool) != nil || tool == nil {
+			return errors.New("Codex tool must be an object")
+		}
+		var kind, name string
+		if json.Unmarshal(tool["type"], &kind) != nil || json.Unmarshal(tool["name"], &name) != nil || strings.TrimSpace(name) == "" || len(name) > 128 {
+			return errors.New("Codex tool type or name is invalid")
+		}
+		allowed := map[string]struct{}{"type": {}, "name": {}, "description": {}, "defer_loading": {}}
+		switch kind {
+		case "function":
+			allowed["parameters"] = struct{}{}
+			allowed["strict"] = struct{}{}
+		case "custom":
+			allowed["format"] = struct{}{}
+		default:
+			return fmt.Errorf("provider-hosted or unknown tool type %q is not authorized", kind)
+		}
+		for key := range tool {
+			if _, ok := allowed[key]; !ok {
+				return fmt.Errorf("unsupported %s tool field %q", kind, key)
+			}
+		}
+		if rawDescription, exists := tool["description"]; exists {
+			var description string
+			if json.Unmarshal(rawDescription, &description) != nil || len(description) > 16<<10 {
+				return errors.New("tool description is invalid or too long")
+			}
+		}
+		if rawDefer, exists := tool["defer_loading"]; exists {
+			var deferLoading bool
+			if json.Unmarshal(rawDefer, &deferLoading) != nil {
+				return errors.New("defer_loading must be boolean")
+			}
+		}
+		if kind == "function" {
+			if parameters, exists := tool["parameters"]; exists {
+				var schema map[string]json.RawMessage
+				if json.Unmarshal(parameters, &schema) != nil || schema == nil {
+					return errors.New("function parameters must be a JSON schema object")
+				}
+			}
+			if strictRaw, exists := tool["strict"]; exists {
+				var strict bool
+				if json.Unmarshal(strictRaw, &strict) != nil {
+					return errors.New("function strict option must be boolean")
+				}
+			}
+		} else if format, exists := tool["format"]; exists {
+			var textFormat map[string]json.RawMessage
+			if json.Unmarshal(format, &textFormat) != nil || textFormat == nil {
+				return errors.New("custom tool format must be an object")
+			}
+			for key := range textFormat {
+				if key != "type" && key != "syntax" && key != "definition" {
+					return fmt.Errorf("unsupported custom tool format field %q", key)
+				}
+			}
+		}
+		if _, duplicate := names[name]; duplicate {
+			return fmt.Errorf("duplicate Codex tool name %q", name)
+		}
+		names[name] = struct{}{}
+	}
+	return nil
+}
+
+func validateCodexReasoning(raw json.RawMessage) error {
+	var reasoning map[string]json.RawMessage
+	if json.Unmarshal(raw, &reasoning) != nil || reasoning == nil {
+		return errors.New("reasoning must be an object")
+	}
+	for key, rawValue := range reasoning {
+		var value string
+		if json.Unmarshal(rawValue, &value) != nil {
+			return fmt.Errorf("reasoning field %q must be a string", key)
+		}
+		switch key {
+		case "effort":
+			if value != "minimal" && value != "low" && value != "medium" && value != "high" && value != "xhigh" && value != "max" {
+				return errors.New("reasoning effort is outside the supported range")
+			}
+		case "summary":
+			if value != "auto" && value != "concise" && value != "detailed" {
+				return errors.New("reasoning summary is not supported")
+			}
+		case "context":
+			if value != "all_turns" && value != "current_turn" {
+				return errors.New("reasoning context is not supported")
+			}
+		default:
+			return fmt.Errorf("unsupported reasoning field %q", key)
+		}
+	}
+	return nil
+}
+
+func validateCodexStreamOptions(raw json.RawMessage) error {
+	var options map[string]json.RawMessage
+	if json.Unmarshal(raw, &options) != nil || options == nil {
+		return errors.New("stream_options must be an object")
+	}
+	for key, rawValue := range options {
+		switch key {
+		case "reasoning_summary_delivery":
+			var value string
+			if json.Unmarshal(rawValue, &value) != nil || value != "sequential_cutoff" {
+				return errors.New("unsupported reasoning summary delivery mode")
+			}
+		case "include_obfuscation":
+			var value bool
+			if json.Unmarshal(rawValue, &value) != nil {
+				return errors.New("include_obfuscation must be boolean")
+			}
+		default:
+			return fmt.Errorf("unsupported stream option %q", key)
+		}
+	}
+	return nil
+}
+
+func validateTextConfig(raw json.RawMessage) error {
+	var textConfig map[string]json.RawMessage
+	if string(raw) == "null" || json.Unmarshal(raw, &textConfig) != nil || textConfig == nil {
+		return errors.New("text format must be an object")
+	}
+	for key, value := range textConfig {
+		switch key {
+		case "verbosity":
+			var verbosity string
+			if json.Unmarshal(value, &verbosity) != nil || (verbosity != "low" && verbosity != "medium" && verbosity != "high") {
+				return errors.New("text verbosity is invalid")
+			}
+		case "format":
+			var format map[string]json.RawMessage
+			if json.Unmarshal(value, &format) != nil || format == nil {
+				return errors.New("text format descriptor must be an object")
+			}
+			for field := range format {
+				if field != "type" && field != "name" && field != "schema" && field != "strict" && field != "description" {
+					return fmt.Errorf("unsupported text format field %q", field)
+				}
+			}
+			if schema, exists := format["schema"]; exists {
+				var object map[string]json.RawMessage
+				if json.Unmarshal(schema, &object) != nil || object == nil {
+					return errors.New("text schema must be a JSON object")
+				}
+			}
+		default:
+			return fmt.Errorf("unsupported text configuration field %q", key)
+		}
+	}
+	return nil
+}
+
+func mustJSON(value any) json.RawMessage {
+	encoded, _ := json.Marshal(value)
+	return encoded
 }
 
 func (b *Broker) recordFailure(record diagnostics.Record) {
