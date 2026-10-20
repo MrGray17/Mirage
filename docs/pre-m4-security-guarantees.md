@@ -82,4 +82,4 @@ Simply mounting the shadow workspace writable into a container and trusting the 
 
 ## Evidence gate before M4 implementation
 
-The repository must run its Go security suite on Linux with Go 1.24, including race detection and symlink-capable filesystem tests. Windows-local skips are reported as skips and are not treated as evidence that those cases passed. The Linux evidence suite additionally contains a non-skippable capability test so an unsuitable CI filesystem cannot silently masquerade as proof.
+The repository must run its Go security suite on Linux with Go 1.25, including race detection and symlink-capable filesystem tests. Windows-local skips are reported as skips and are not treated as evidence that those cases passed. The Linux evidence suite additionally contains a non-skippable capability test so an unsuitable CI filesystem cannot silently masquerade as proof.

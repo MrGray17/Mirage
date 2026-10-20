@@ -125,9 +125,6 @@ func Apply(plan *Plan, beforeReplace func() error) (returnErr error) {
 	if err != nil {
 		return fmt.Errorf("%w: open real workspace: %v", ErrRevalidation, err)
 	}
-	if err := requireNamedWorkspace(root, plan.realWorkspace); err != nil {
-		return err
-	}
 	replaced := false
 	defer func() {
 		closeErr := root.Close()
@@ -136,6 +133,9 @@ func Apply(plan *Plan, beforeReplace func() error) (returnErr error) {
 		}
 	}()
 
+	if err := requireNamedWorkspace(root, plan.realWorkspace); err != nil {
+		return err
+	}
 	if err := requireExpected(root, plan); err != nil {
 		return err
 	}

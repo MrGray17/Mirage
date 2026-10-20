@@ -1,3 +1,3 @@
 module github.com/MrGray17/Mirage
 
-go 1.24
+go 1.25
