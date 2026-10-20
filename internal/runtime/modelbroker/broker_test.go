@@ -425,7 +425,7 @@ func TestQwenProfileRemainsNarrowAndNonStreaming(t *testing.T) {
 	}))
 	defer upstream.Close()
 	broker := testBrokerWithProfile(t, upstream.Client(), upstream.URL, RequestProfileQwen)
-	allowed := "{\"model\":\"allowed\",\"instructions\":\"select exactly one action\",\"input\":\"edit README\",\"stream\":false,\"temperature\":0,\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"mirage_action\",\"schema\":{\"type\":\"object\",\"properties\":{\"tool\":{\"type\":\"string\"}},\"required\":[\"tool\"],\"additionalProperties\":false},\"strict\":true},\"max_output_tokens\":1024}"
+	allowed := "{\"model\":\"allowed\",\"instructions\":\"select exactly one action\",\"input\":\"edit README\",\"stream\":false,\"temperature\":0,\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"mirage_action\",\"schema\":{\"type\":\"object\",\"properties\":{\"tool\":{\"type\":\"string\"}},\"required\":[\"tool\"],\"additionalProperties\":false},\"strict\":true}},\"max_output_tokens\":1024}"
 	response := postBroker(t, broker, allowed)
 	_, _ = io.Copy(io.Discard, response.Body)
 	_ = response.Body.Close()

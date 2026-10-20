@@ -647,10 +647,12 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 	if *brokerKind == "deepseek" && strings.TrimSpace(*model) != modelbroker.DeepSeekV4Flash {
 		return fmt.Errorf("DeepSeek model must be exactly %s; fallback is disabled", modelbroker.DeepSeekV4Flash)
 	}
+	if *brokerKind == "ollama" && strings.TrimSpace(*model) != modelbroker.Qwen25Coder15B {
+		return fmt.Errorf("Ollama model must be exactly %s; fallback is disabled", modelbroker.Qwen25Coder15B)
+	}
 	if *brokerKind == "ollama" && *agentMode != "qwen" {
 		return errors.New("--model-broker ollama is reserved for the constrained --agent qwen workflow")
 	}
-	if *brokerKind == "ollama" && strings.TrimSpace(*model) != modelbroker.Qwen25Coder15B {
 		return fmt.Errorf("Ollama model must be exactly %s; fallback is disabled", modelbroker.Qwen25Coder15B)
 	}
 	if *agentMode == "qwen" {
