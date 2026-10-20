@@ -30,6 +30,9 @@ jobs:
       - name: Validate live acceptance script syntax
         run: bash -n scripts/test-live.sh
 
+      - name: Validate live acceptance script syntax
+        run: bash -n scripts/test-live.sh
+
       - name: Verify formatting
         shell: bash
         run: |
