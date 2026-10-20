@@ -315,3 +315,5 @@ commit authority.
 - `cmd/mirage`: product CLI
 
 Detailed guarantees, designs, and operator instructions live in [`docs/`](docs/).
+
+The [release acceptance guide](docs/release-acceptance.md) documents the opt-in rootless-Docker integration gate that should pass before cutting a release.
