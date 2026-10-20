@@ -33,6 +33,50 @@ jobs:
           bash -n scripts/test-live.sh
           bash -n scripts/install.sh
 
+      - name: Smoke test native Linux installer and failed-upgrade safety
+        shell: bash
+        run: |
+          set -euo pipefail
+          install_home="$(mktemp -d)"
+          wrapper_dir="$(mktemp -d)"
+          trap 'rm -rf -- "$install_home" "$wrapper_dir"' EXIT
+          real_go="$(command -v go)"
+          go_path="$(go env GOPATH)"
+          go_mod_cache="$(go env GOMODCACHE)"
+
+          HOME="$install_home" GOPATH="$go_path" GOMODCACHE="$go_mod_cache" ./scripts/install.sh
+          installed="$install_home/.local/bin/mirage"
+          expected_commit="$(git rev-parse HEAD)"
+          metadata="$("$installed" version --json)"
+          grep -Fq '"version":"1.0.0"' <<< "$metadata"
+          grep -Fq "\"commit\":\"$expected_commit\"" <<< "$metadata"
+          grep -Fq '"bridge_protocol":1' <<< "$metadata"
+          grep -Fq '"platform":"linux"' <<< "$metadata"
+          test "$(stat -c '%a' "$installed")" = "755"
+
+          cat > "$wrapper_dir/go" <<'FAKE_GO'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          for arg in "$@"; do
+            if [[ "$arg" == "build" && "$MIRAGE_TEST_FAIL_BUILD" == "1" ]]; then
+              echo "simulated Go build failure for installer regression test" >&2
+              exit 42
+            fi
+          done
+          exec "$REAL_GO" "$@"
+          FAKE_GO
+          chmod 0755 "$wrapper_dir/go"
+
+          before="$(sha256sum "$installed" | cut -d ' ' -f 1)"
+          if PATH="$wrapper_dir:$PATH" REAL_GO="$real_go" MIRAGE_TEST_FAIL_BUILD=1 HOME="$install_home" GOPATH="$go_path" GOMODCACHE="$go_mod_cache" ./scripts/install.sh; then
+            echo "installer unexpectedly succeeded with a forced build failure" >&2
+            exit 1
+          fi
+          after="$(sha256sum "$installed" | cut -d ' ' -f 1)"
+          test "$before" = "$after"
+          stage_left="$(find "$install_home/.local/bin" -maxdepth 1 -name '.mirage-stage.*' -print -quit)"
+          test -z "$stage_left"
+
       - name: Verify formatting
         shell: bash
         run: |
