@@ -346,16 +346,24 @@ func TestBrokerAllowsCodexRequestShapeAndCapsCapabilities(t *testing.T) {
 		}
 		var model string
 		_ = json.Unmarshal(envelope["model"], &model)
-		if model != "allowed" { t.Errorf("model = %q", model) }
+		if model != "allowed" {
+			t.Errorf("model = %q", model)
+		}
 		var stream bool
 		_ = json.Unmarshal(envelope["stream"], &stream)
-		if !stream { t.Error("Codex streaming was not preserved") }
+		if !stream {
+			t.Error("Codex streaming was not preserved")
+		}
 		var store bool
 		_ = json.Unmarshal(envelope["store"], &store)
-		if store { t.Error("provider-side storage was enabled") }
+		if store {
+			t.Error("provider-side storage was enabled")
+		}
 		var choice string
 		_ = json.Unmarshal(envelope["tool_choice"], &choice)
-		if choice != "auto" { t.Errorf("tool_choice = %q", choice) }
+		if choice != "auto" {
+			t.Errorf("tool_choice = %q", choice)
+		}
 		var cacheKey string
 		_ = json.Unmarshal(envelope["prompt_cache_key"], &cacheKey)
 		if !strings.HasPrefix(cacheKey, "mirage-") || cacheKey == "caller-controlled-key" {
@@ -363,7 +371,9 @@ func TestBrokerAllowsCodexRequestShapeAndCapsCapabilities(t *testing.T) {
 		}
 		var outputLimit int
 		_ = json.Unmarshal(envelope["max_output_tokens"], &outputLimit)
-		if outputLimit != defaultMaxOutputTokens { t.Errorf("output cap = %d", outputLimit) }
+		if outputLimit != defaultMaxOutputTokens {
+			t.Errorf("output cap = %d", outputLimit)
+		}
 		writer.Header().Set("Content-Type", "application/json")
 		_, _ = writer.Write([]byte("{\"id\":\"response-1\"}"))
 	}))
@@ -376,7 +386,9 @@ func TestBrokerAllowsCodexRequestShapeAndCapsCapabilities(t *testing.T) {
 		encoded, _ := io.ReadAll(response.Body)
 		t.Fatalf("Codex-compatible request returned %d: %s", response.StatusCode, encoded)
 	}
-	if upstreamCalls.Load() != 1 { t.Fatalf("upstream calls = %d", upstreamCalls.Load()) }
+	if upstreamCalls.Load() != 1 {
+		t.Fatalf("upstream calls = %d", upstreamCalls.Load())
+	}
 }
 
 func TestBrokerRejectsProviderHostedToolsAndUnapprovedRequestOptions(t *testing.T) {
@@ -419,7 +431,9 @@ func TestQwenProfileRemainsNarrowAndNonStreaming(t *testing.T) {
 		_ = json.NewDecoder(request.Body).Decode(&envelope)
 		var stream bool
 		_ = json.Unmarshal(envelope["stream"], &stream)
-		if stream { t.Error("Qwen request unexpectedly enabled streaming") }
+		if stream {
+			t.Error("Qwen request unexpectedly enabled streaming")
+		}
 		writer.Header().Set("Content-Type", "application/json")
 		_, _ = writer.Write([]byte("{\"id\":\"response-qwen\"}"))
 	}))
@@ -437,14 +451,20 @@ func TestQwenProfileRemainsNarrowAndNonStreaming(t *testing.T) {
 	if denied.StatusCode != http.StatusForbidden {
 		t.Fatalf("Qwen tool request status = %d, want %d", denied.StatusCode, http.StatusForbidden)
 	}
-	if upstreamCalls.Load() != 1 { t.Fatalf("denied Qwen tool reached provider, calls=%d", upstreamCalls.Load()) }
+	if upstreamCalls.Load() != 1 {
+		t.Fatalf("denied Qwen tool reached provider, calls=%d", upstreamCalls.Load())
+	}
 }
 
 func testBrokerWithProfile(t *testing.T, client *http.Client, upstream, profile string) *Broker {
 	t.Helper()
 	broker, err := newResponses(Config{APIKey: "host-only-secret", Model: "allowed", RequestProfile: profile, RunID: "run", TempRoot: shortTempRoot(t)}, "test-responses", client, upstream)
-	if err != nil { t.Fatal(err) }
-	if err := broker.Start(); err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := broker.Start(); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { _ = broker.Close(context.Background()) })
 	return broker
 }
