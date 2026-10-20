@@ -292,16 +292,7 @@ func TestBrokerConnectDiagnosticRedactsSecrets(t *testing.T) {
 }
 
 func testBroker(t *testing.T, client *http.Client, upstream string) *Broker {
-	t.Helper()
-	broker, err := newResponses(Config{APIKey: "host-only-secret", Model: "allowed", RunID: "run", TempRoot: shortTempRoot(t)}, "test-responses", client, upstream)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := broker.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = broker.Close(context.Background()) })
-	return broker
+	return testBrokerWithProfile(t, client, upstream, RequestProfileCodex)
 }
 
 func postBroker(t *testing.T, broker *Broker, body string) *http.Response {
@@ -344,24 +335,69 @@ func shortTempRoot(t *testing.T) string {
 	return directory
 }
 
-func TestBrokerRejectsUnapprovedRequestCapabilities(t *testing.T) {
+
+func TestBrokerAllowsCodexRequestShapeAndCapsCapabilities(t *testing.T) {
+	var upstreamCalls atomic.Int32
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		upstreamCalls.Add(1)
+		var envelope map[string]json.RawMessage
+		if err := json.NewDecoder(request.Body).Decode(&envelope); err != nil {
+			t.Errorf("decode upstream request: %v", err)
+		}
+		var model string
+		_ = json.Unmarshal(envelope["model"], &model)
+		if model != "allowed" { t.Errorf("model = %q", model) }
+		var stream bool
+		_ = json.Unmarshal(envelope["stream"], &stream)
+		if !stream { t.Error("Codex streaming was not preserved") }
+		var store bool
+		_ = json.Unmarshal(envelope["store"], &store)
+		if store { t.Error("provider-side storage was enabled") }
+		var choice string
+		_ = json.Unmarshal(envelope["tool_choice"], &choice)
+		if choice != "auto" { t.Errorf("tool_choice = %q", choice) }
+		var cacheKey string
+		_ = json.Unmarshal(envelope["prompt_cache_key"], &cacheKey)
+		if !strings.HasPrefix(cacheKey, "mirage-") || cacheKey == "caller-controlled-key" {
+			t.Errorf("prompt cache key was not isolated to Mirage run: %q", cacheKey)
+		}
+		var outputLimit int
+		_ = json.Unmarshal(envelope["max_output_tokens"], &outputLimit)
+		if outputLimit != defaultMaxOutputTokens { t.Errorf("output cap = %d", outputLimit) }
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte("{\"id\":\"response-1\"}"))
+	}))
+	defer upstream.Close()
+	broker := testBroker(t, upstream.Client(), upstream.URL)
+	body := "{\"model\":\"allowed\",\"instructions\":\"\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"edit README\"}]}],\"tools\":[{\"type\":\"function\",\"name\":\"exec_command\",\"description\":\"run a command in the disposable sandbox\",\"parameters\":{\"type\":\"object\",\"properties\":{\"cmd\":{\"type\":\"string\"}},\"required\":[\"cmd\"],\"additionalProperties\":false},\"strict\":true}],\"tool_choice\":\"auto\",\"parallel_tool_calls\":true,\"reasoning\":{\"effort\":\"medium\",\"summary\":\"auto\"},\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"prompt_cache_key\":\"caller-controlled-key\",\"client_metadata\":{\"session_id\":\"test\"}}"
+	response := postBroker(t, broker, body)
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		encoded, _ := io.ReadAll(response.Body)
+		t.Fatalf("Codex-compatible request returned %d: %s", response.StatusCode, encoded)
+	}
+	if upstreamCalls.Load() != 1 { t.Fatalf("upstream calls = %d", upstreamCalls.Load()) }
+}
+
+func TestBrokerRejectsProviderHostedToolsAndUnapprovedRequestOptions(t *testing.T) {
 	var upstreamCalls atomic.Int32
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		upstreamCalls.Add(1)
 		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write([]byte(`{"id":"response-1"}`))
+		_, _ = writer.Write([]byte("{\"id\":\"response-1\"}"))
 	}))
 	defer upstream.Close()
 	broker := testBroker(t, upstream.Client(), upstream.URL)
-
 	for _, body := range []string{
-		`{"model":"allowed","input":"test","tools":[{"type":"web_search"}]}`,
-		`{"model":"allowed","input":"test","tool_choice":"required"}`,
-		`{"model":"allowed","input":"test","stream":true}`,
-		`{"model":"allowed","input":"test","temperature":0.7}`,
-		`{"model":"allowed","input":["not","a string"]}`,
-		`{"model":"allowed","input":"test","max_output_tokens":null}`,
-		`{"model":"allowed","input":"test","unexpected_provider_option":true}`,
+		"{\"model\":\"allowed\",\"input\":\"test\",\"tools\":[{\"type\":\"web_search_preview\",\"name\":\"web_search\"}]}",
+		"{\"model\":\"allowed\",\"input\":\"test\",\"tool_choice\":\"required\"}",
+		"{\"model\":\"allowed\",\"input\":\"test\",\"stream\":false}",
+		"{\"model\":\"allowed\",\"input\":\"test\",\"temperature\":0.7}",
+		"{\"model\":\"allowed\",\"input\":{\"object\":\"not an allowed input\"}}",
+		"{\"model\":\"allowed\",\"input\":\"test\",\"max_output_tokens\":null}",
+		"{\"model\":\"allowed\",\"input\":\"test\",\"store\":true}",
+		"{\"model\":\"allowed\",\"input\":\"test\",\"service_tier\":\"priority\"}",
+		"{\"model\":\"allowed\",\"input\":\"test\",\"unexpected_provider_option\":true}",
 	} {
 		response := postBroker(t, broker, body)
 		_, _ = io.Copy(io.Discard, response.Body)
@@ -371,6 +407,44 @@ func TestBrokerRejectsUnapprovedRequestCapabilities(t *testing.T) {
 		}
 	}
 	if upstreamCalls.Load() != 0 {
-		t.Fatalf("rejected capability requests reached upstream %d times", upstreamCalls.Load())
+		t.Fatalf("rejected requests reached upstream %d times", upstreamCalls.Load())
 	}
+}
+
+func TestQwenProfileRemainsNarrowAndNonStreaming(t *testing.T) {
+	var upstreamCalls atomic.Int32
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		upstreamCalls.Add(1)
+		var envelope map[string]json.RawMessage
+		_ = json.NewDecoder(request.Body).Decode(&envelope)
+		var stream bool
+		_ = json.Unmarshal(envelope["stream"], &stream)
+		if stream { t.Error("Qwen request unexpectedly enabled streaming") }
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte("{\"id\":\"response-qwen\"}"))
+	}))
+	defer upstream.Close()
+	broker := testBrokerWithProfile(t, upstream.Client(), upstream.URL, RequestProfileQwen)
+	allowed := "{\"model\":\"allowed\",\"instructions\":\"select exactly one action\",\"input\":\"edit README\",\"stream\":false,\"temperature\":0,\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"mirage_action\",\"schema\":{\"type\":\"object\",\"properties\":{\"tool\":{\"type\":\"string\"}},\"required\":[\"tool\"],\"additionalProperties\":false},\"strict\":true},\"max_output_tokens\":1024}"
+	response := postBroker(t, broker, allowed)
+	_, _ = io.Copy(io.Discard, response.Body)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK || upstreamCalls.Load() != 1 {
+		t.Fatalf("Qwen request status=%d upstream calls=%d", response.StatusCode, upstreamCalls.Load())
+	}
+	denied := postBroker(t, broker, "{\"model\":\"allowed\",\"instructions\":\"test\",\"input\":\"edit\",\"tools\":[]}")
+	_ = denied.Body.Close()
+	if denied.StatusCode != http.StatusForbidden {
+		t.Fatalf("Qwen tool request status = %d, want %d", denied.StatusCode, http.StatusForbidden)
+	}
+	if upstreamCalls.Load() != 1 { t.Fatalf("denied Qwen tool reached provider, calls=%d", upstreamCalls.Load()) }
+}
+
+func testBrokerWithProfile(t *testing.T, client *http.Client, upstream, profile string) *Broker {
+	t.Helper()
+	broker, err := newResponses(Config{APIKey: "host-only-secret", Model: "allowed", RequestProfile: profile, RunID: "run", TempRoot: shortTempRoot(t)}, "test-responses", client, upstream)
+	if err != nil { t.Fatal(err) }
+	if err := broker.Start(); err != nil { t.Fatal(err) }
+	t.Cleanup(func() { _ = broker.Close(context.Background()) })
+	return broker
 }

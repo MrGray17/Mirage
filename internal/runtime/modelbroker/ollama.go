@@ -22,6 +22,7 @@ const (
 // NewOllama creates the single local-model broker accepted by the Qwen agent
 // proof. The endpoint and model are fixed; the sandbox cannot select either.
 func NewOllama(config Config) (*Broker, error) {
+	config.RequestProfile = RequestProfileQwen
 	if strings.TrimSpace(config.Model) != Qwen25Coder15B {
 		return nil, fmt.Errorf("%w: Ollama model must be exactly %s", ErrInvalidConfig, Qwen25Coder15B)
 	}
