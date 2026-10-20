@@ -270,3 +270,41 @@ func assertNoStaging(t *testing.T, root string) {
 }
 
 func allowReplace() error { return nil }
+
+func TestApplyRejectsWorkspacePathSwapBeforeReplacement(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "workspace")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, "README.md")
+	before := []byte("before")
+	if err := os.WriteFile(target, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plan := newTestPlan(t, root, before, []byte("authorized"), 0o600)
+	movedRoot := filepath.Join(parent, "moved-workspace")
+	replacementContents := []byte("external replacement workspace")
+
+	err := Apply(plan, func() error {
+		if err := os.Rename(root, movedRoot); err != nil {
+			return err
+		}
+		if err := os.Mkdir(root, 0o700); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(root, "README.md"), replacementContents, 0o600)
+	})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("apply error = %v, want workspace-path conflict", err)
+	}
+	contents, readErr := os.ReadFile(filepath.Join(root, "README.md"))
+	if readErr != nil || string(contents) != string(replacementContents) {
+		t.Fatalf("replacement workspace changed: %q, %v", contents, readErr)
+	}
+	contents, readErr = os.ReadFile(filepath.Join(movedRoot, "README.md"))
+	if readErr != nil || string(contents) != string(before) {
+		t.Fatalf("original workspace changed: %q, %v", contents, readErr)
+	}
+	assertNoStaging(t, movedRoot)
+}
