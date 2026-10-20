@@ -171,7 +171,7 @@ func TestBrokerForwardsOnlyBoundedAuthorizedResponsesRequests(t *testing.T) {
 	}
 	_ = response.Body.Close()
 	if response.StatusCode != http.StatusTooManyRequests || upstreamCalls.Load() != 1 {
-		t.Fatalf("limit response = %d, upstream calls = %d", response.StatusCode, upstreamCalls)
+		t.Fatalf("limit response = %d, upstream calls = %d", response.StatusCode, upstreamCalls.Load())
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -184,7 +184,7 @@ func TestBrokerForwardsOnlyBoundedAuthorizedResponsesRequests(t *testing.T) {
 }
 
 func TestBrokerRejectsPathAndModelWithoutUpstreamCall(t *testing.T) {
-	upstreamCalls := 0
+	var upstreamCalls atomic.Int32
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { upstreamCalls.Add(1) }))
 	defer upstream.Close()
 	client := upstream.Client()
@@ -345,7 +345,7 @@ func shortTempRoot(t *testing.T) string {
 }
 
 func TestBrokerRejectsUnapprovedRequestCapabilities(t *testing.T) {
-	upstreamCalls := 0
+	var upstreamCalls atomic.Int32
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		upstreamCalls.Add(1)
 		writer.Header().Set("Content-Type", "application/json")
