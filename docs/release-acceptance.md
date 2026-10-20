@@ -8,16 +8,27 @@ Use this release gate on the Linux filesystem inside WSL2 or on a Linux host tha
 
 1. Install Go 1.27.3 or newer.
 2. Configure rootless Docker with cgroup v2, the systemd cgroup driver, delegated resource controllers, and built-in seccomp.
-3. Build or pull the required fixture/agent images using the reviewed project instructions. Use immutable image digests, never floating tags. Each image must already be present locally before running the gate.
-4. From a clean checkout of the exact commit intended for release, set these environment variables to the corresponding locally available digest-pinned images:
+3. Pull the reviewed BusyBox fixture image used by the public demo, then use that exact immutable reference for the shell-based fixtures:
 
-   - MIRAGE_HOSTILE_IMAGE
-   - MIRAGE_AGENT_IMAGE (optional; defaults to MIRAGE_HOSTILE_IMAGE)
-   - MIRAGE_CODEX_IMAGE
-   - MIRAGE_HELPER_IMAGE
-   - MIRAGE_DEMO_IMAGE
+       export MIRAGE_HOSTILE_IMAGE='busybox@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0'
+       export MIRAGE_AGENT_IMAGE="$MIRAGE_HOSTILE_IMAGE"
+       export MIRAGE_HELPER_IMAGE="$MIRAGE_HOSTILE_IMAGE"
+       export MIRAGE_DEMO_IMAGE="$MIRAGE_HOSTILE_IMAGE"
+       docker pull "$MIRAGE_HOSTILE_IMAGE"
 
-Each image reference must end in @sha256: followed by 64 lowercase hexadecimal characters. The script validates the references and uses docker image inspect to verify that each image is present. It does not pull images or change Docker configuration.
+4. The broker socket acceptance test also needs the real Codex agent image, whose entrypoint requires Node.js and the pinned Codex CLI. Build it from the checked-in Dockerfile and push it to a registry you control:
+
+       docker build -t REGISTRY/OWNER/mirage-codex-agent:acceptance -f build/m44-codex-agent/Dockerfile .
+       docker push REGISTRY/OWNER/mirage-codex-agent:acceptance
+
+   Copy the immutable manifest digest printed by the push or shown by your registry, then set MIRAGE_CODEX_IMAGE to the full REGISTRY/OWNER/mirage-codex-agent@sha256:DIGEST reference and pull that exact reference:
+
+       export MIRAGE_CODEX_IMAGE='REGISTRY/OWNER/mirage-codex-agent@sha256:DIGEST'
+       docker pull "$MIRAGE_CODEX_IMAGE"
+
+   Replace REGISTRY/OWNER and DIGEST with values from your own registry. A local image ID is not a substitute for a repository manifest digest; do not use a mutable tag for the test.
+
+5. From a clean checkout of the exact commit intended for release, run the gate. Each image reference must end in @sha256: followed by 64 lowercase hexadecimal characters. The script validates the references and uses docker image inspect to verify that each image is present. It does not pull images or change Docker configuration.
 
 ## Run the gate
 
