@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -108,9 +109,9 @@ func TestProviderAffectsBrokerPolicyIdentity(t *testing.T) {
 }
 
 func TestBrokerForwardsOnlyBoundedAuthorizedResponsesRequests(t *testing.T) {
-	var upstreamCalls int
+	var upstreamCalls atomic.Int32
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		upstreamCalls++
+		upstreamCalls.Add(1)
 		if got := request.Header.Get("Authorization"); got != "Bearer host-only-secret" {
 			t.Errorf("authorization = %q", got)
 		}
@@ -169,7 +170,7 @@ func TestBrokerForwardsOnlyBoundedAuthorizedResponsesRequests(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = response.Body.Close()
-	if response.StatusCode != http.StatusTooManyRequests || upstreamCalls != 1 {
+	if response.StatusCode != http.StatusTooManyRequests || upstreamCalls.Load() != 1 {
 		t.Fatalf("limit response = %d, upstream calls = %d", response.StatusCode, upstreamCalls)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -184,7 +185,7 @@ func TestBrokerForwardsOnlyBoundedAuthorizedResponsesRequests(t *testing.T) {
 
 func TestBrokerRejectsPathAndModelWithoutUpstreamCall(t *testing.T) {
 	upstreamCalls := 0
-	upstream := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { upstreamCalls++ }))
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { upstreamCalls.Add(1) }))
 	defer upstream.Close()
 	client := upstream.Client()
 	client.Transport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // test server only
@@ -215,8 +216,8 @@ func TestBrokerRejectsPathAndModelWithoutUpstreamCall(t *testing.T) {
 			t.Fatalf("%s status = %d, want %d", request.path, response.StatusCode, request.want)
 		}
 	}
-	if upstreamCalls != 0 {
-		t.Fatalf("denied requests reached upstream %d times", upstreamCalls)
+	if upstreamCalls.Load() != 0 {
+		t.Fatalf("denied requests reached upstream %d times", upstreamCalls.Load())
 	}
 }
 
@@ -346,7 +347,7 @@ func shortTempRoot(t *testing.T) string {
 func TestBrokerRejectsUnapprovedRequestCapabilities(t *testing.T) {
 	upstreamCalls := 0
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		upstreamCalls++
+		upstreamCalls.Add(1)
 		writer.Header().Set("Content-Type", "application/json")
 		_, _ = writer.Write([]byte(`{"id":"response-1"}`))
 	}))
@@ -369,7 +370,7 @@ func TestBrokerRejectsUnapprovedRequestCapabilities(t *testing.T) {
 			t.Errorf("request %s returned status %d, want %d", body, response.StatusCode, http.StatusForbidden)
 		}
 	}
-	if upstreamCalls != 0 {
-		t.Fatalf("rejected capability requests reached upstream %d times", upstreamCalls)
+	if upstreamCalls.Load() != 0 {
+		t.Fatalf("rejected capability requests reached upstream %d times", upstreamCalls.Load())
 	}
 }

@@ -214,6 +214,7 @@ func requireNamedWorkspace(root *os.Root, workspacePath string) error {
 	}
 	return nil
 }
+
 func requireExpected(root *os.Root, plan *Plan) error {
 	digest, mode, err := observeRegular(root, plan.relative)
 	if err != nil {

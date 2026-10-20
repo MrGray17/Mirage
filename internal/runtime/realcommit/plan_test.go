@@ -286,6 +286,7 @@ func TestApplyRejectsWorkspacePathSwapBeforeReplacement(t *testing.T) {
 	movedRoot := filepath.Join(parent, "moved-workspace")
 	replacementContents := []byte("external replacement workspace")
 
+	var injectedStage string
 	err := Apply(plan, func() error {
 		if err := os.Rename(root, movedRoot); err != nil {
 			return err
@@ -293,8 +294,24 @@ func TestApplyRejectsWorkspacePathSwapBeforeReplacement(t *testing.T) {
 		if err := os.Mkdir(root, 0o700); err != nil {
 			return err
 		}
-		return os.WriteFile(filepath.Join(root, "README.md"), replacementContents, 0o600)
+		if err := os.WriteFile(filepath.Join(root, "README.md"), replacementContents, 0o600); err != nil {
+			return err
+		}
+		// Recreate the predictable staging filename in the replacement path.
+		// The old absolute-path rename would then replace this workspace's target.
+		stages, err := filepath.Glob(filepath.Join(movedRoot, ".mirage-commit-*.tmp"))
+		if err != nil {
+			return err
+		}
+		if len(stages) != 1 {
+			return fmt.Errorf("staging artifacts = %d, want 1", len(stages))
+		}
+		injectedStage = filepath.Join(root, filepath.Base(stages[0]))
+		return os.Link(stages[0], injectedStage)
 	})
+	if injectedStage != "" {
+		_ = os.Remove(injectedStage)
+	}
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("apply error = %v, want workspace-path conflict", err)
 	}
