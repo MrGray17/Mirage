@@ -71,7 +71,7 @@ jobs:
             [ref]$errors
           ) | Out-Null
           if ($errors.Count -gt 0) {
-            $errors | Format-List * | Out-String | Write-Error
+            throw ($errors | Format-List * | Out-String)
           }
 
       - name: Test frontend packages
