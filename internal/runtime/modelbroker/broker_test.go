@@ -335,7 +335,6 @@ func shortTempRoot(t *testing.T) string {
 	return directory
 }
 
-
 func TestBrokerAllowsCodexRequestShapeAndCapsCapabilities(t *testing.T) {
 	var upstreamCalls atomic.Int32
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
