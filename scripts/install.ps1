@@ -190,7 +190,7 @@ try {
         $hadConfig = $true
     }
 
-    & wsl.exe -d $Distribution --exec test -L -- $backend
+    & wsl.exe -d $Distribution --exec test -L $backend
     $backendLinkExitCode = $LASTEXITCODE
     if ($backendLinkExitCode -eq 0) {
         throw "The existing Linux backend is a symbolic link; refusing to overwrite it."
@@ -198,10 +198,10 @@ try {
     if ($backendLinkExitCode -ne 1) {
         throw "Could not safely inspect the existing Linux backend path."
     }
-    & wsl.exe -d $Distribution --exec test -e -- $backend
+    & wsl.exe -d $Distribution --exec test -e $backend
     $backendExistsExitCode = $LASTEXITCODE
     if ($backendExistsExitCode -eq 0) {
-        & wsl.exe -d $Distribution --exec test -f -- $backend
+        & wsl.exe -d $Distribution --exec test -f $backend
         $backendFileExitCode = $LASTEXITCODE
         if ($backendFileExitCode -ne 0) {
             throw "The existing Linux backend is not a regular file; refusing to overwrite it."
