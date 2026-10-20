@@ -128,11 +128,14 @@ try {
     New-Item -ItemType Directory -Force -Path $temporaryRoot, $windowsBin, $installRoot | Out-Null
     $ldflags = "-X github.com/MrGray17/Mirage/internal/buildinfo.Version=$Version -X github.com/MrGray17/Mirage/internal/buildinfo.Commit=$commit"
 
-    & go.exe -C $repoRoot build -ldflags $ldflags -o $temporaryWindows ./cmd/mirage
-    if ($LASTEXITCODE -ne 0) { throw "Windows frontend build failed." }
     $oldGOOS = $env:GOOS
     $oldGOARCH = $env:GOARCH
     try {
+        $env:GOOS = "windows"
+        $env:GOARCH = "amd64"
+        & go.exe -C $repoRoot build -ldflags $ldflags -o $temporaryWindows ./cmd/mirage
+        if ($LASTEXITCODE -ne 0) { throw "Windows frontend build failed." }
+
         $env:GOOS = "linux"
         $env:GOARCH = "amd64"
         & go.exe -C $repoRoot build -ldflags $ldflags -o $temporaryLinux ./cmd/mirage
@@ -231,8 +234,8 @@ try {
 
     $parts = @($originalUserPath -split ";" | Where-Object { $_ })
     if ($windowsBin -notin $parts) {
-        [Environment]::SetEnvironmentVariable("Path", (($parts + $windowsBin) -join ";"), "User")
         $pathChanged = $true
+        [Environment]::SetEnvironmentVariable("Path", (($parts + $windowsBin) -join ";"), "User")
     }
     $transactionComplete = $true
 }
