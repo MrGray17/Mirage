@@ -1,3 +1,5 @@
 module github.com/MrGray17/Mirage
 
-go 1.25
+go 1.27
+
+toolchain go1.27.3

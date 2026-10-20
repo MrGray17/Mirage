@@ -7,7 +7,7 @@ temporary_root="$(mktemp -d)"
 trap 'rm -rf -- "$temporary_root"' EXIT
 
 if ! command -v go >/dev/null 2>&1; then
-  echo "MIRAGE requires Go 1.25 or newer to install from source." >&2
+  echo "MIRAGE requires Go 1.27.3 or newer to install from source." >&2
   exit 1
 fi
 if ! command -v git >/dev/null 2>&1; then

@@ -23,7 +23,7 @@ function Invoke-WSLExact {
 
 try {
     if (-not (Get-Command go.exe -ErrorAction SilentlyContinue)) {
-        throw "Go 1.25 or newer is required to install MIRAGE from source."
+        throw "Go 1.27.3 or newer is required to install MIRAGE from source."
     }
     if (-not (Get-Command git.exe -ErrorAction SilentlyContinue)) {
         throw "Git is required to establish MIRAGE's source commit identity. No installed files were changed."
