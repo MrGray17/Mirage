@@ -330,29 +330,9 @@ func (b *Broker) handle(writer http.ResponseWriter, request *http.Request) {
 		http.Error(writer, ErrLimit.Error(), http.StatusRequestEntityTooLarge)
 		return
 	}
-	var envelope map[string]json.RawMessage
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		http.Error(writer, "model broker policy mismatch", http.StatusForbidden)
-		return
-	}
-	var requestedModel string
-	if err := json.Unmarshal(envelope["model"], &requestedModel); err != nil || requestedModel != b.config.Model {
-		http.Error(writer, "model broker policy mismatch", http.StatusForbidden)
-		return
-	}
-	var requestedOutputTokens int
-	if raw, ok := envelope["max_output_tokens"]; ok && string(raw) != "null" {
-		if err := json.Unmarshal(raw, &requestedOutputTokens); err != nil || requestedOutputTokens < 1 {
-			http.Error(writer, "model broker output budget is invalid", http.StatusForbidden)
-			return
-		}
-	}
-	if requestedOutputTokens == 0 || requestedOutputTokens > b.config.MaxOutputTokens {
-		envelope["max_output_tokens"] = json.RawMessage(fmt.Sprintf("%d", b.config.MaxOutputTokens))
-	}
-	boundedBody, err := json.Marshal(envelope)
+	boundedBody, err := sanitizeRequest(body, b.config.Model, b.config.MaxOutputTokens)
 	if err != nil {
-		http.Error(writer, "model broker request failed", http.StatusBadGateway)
+		http.Error(writer, "model broker policy mismatch", http.StatusForbidden)
 		return
 	}
 	upstreamRequest, err := http.NewRequestWithContext(request.Context(), http.MethodPost, b.upstream.String(), strings.NewReader(string(boundedBody)))
@@ -408,6 +388,73 @@ func (b *Broker) handle(writer http.ResponseWriter, request *http.Request) {
 	_, _ = writer.Write(responseBody)
 }
 
+// sanitizeRequest keeps this capability narrower than the provider API. The
+// untrusted sandbox may request a model response, but cannot opt into provider
+// tools, streaming, alternate sampling settings, or other provider features.
+func sanitizeRequest(body []byte, model string, maxOutputTokens int) ([]byte, error) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(body, &envelope); err != nil || envelope == nil {
+		return nil, errors.New("request must be one JSON object")
+	}
+
+	allowed := map[string]struct{}{
+		"model": {}, "input": {}, "instructions": {}, "stream": {},
+		"max_output_tokens": {}, "temperature": {}, "text": {},
+	}
+	for field := range envelope {
+		if _, ok := allowed[field]; !ok {
+			return nil, fmt.Errorf("unsupported model request field %q", field)
+		}
+	}
+
+	var requestedModel string
+	if err := json.Unmarshal(envelope["model"], &requestedModel); err != nil || requestedModel != model {
+		return nil, errors.New("model does not match trusted policy")
+	}
+	var input string
+	if raw, ok := envelope["input"]; !ok || json.Unmarshal(raw, &input) != nil || strings.TrimSpace(input) == "" {
+		return nil, errors.New("input must be a non-empty string")
+	}
+	if raw, ok := envelope["instructions"]; ok {
+		var instructions string
+		if strings.TrimSpace(string(raw)) == "null" || json.Unmarshal(raw, &instructions) != nil || strings.TrimSpace(instructions) == "" {
+			return nil, errors.New("instructions must be a non-empty string")
+		}
+	}
+	if raw, ok := envelope["stream"]; ok {
+		var stream bool
+		if strings.TrimSpace(string(raw)) == "null" || json.Unmarshal(raw, &stream) != nil || stream {
+			return nil, errors.New("streaming is not authorized")
+		}
+	}
+	if raw, ok := envelope["temperature"]; ok {
+		var temperature float64
+		if strings.TrimSpace(string(raw)) == "null" || json.Unmarshal(raw, &temperature) != nil || temperature != 0 {
+			return nil, errors.New("temperature must be the trusted value zero")
+		}
+	}
+	if raw, ok := envelope["text"]; ok {
+		var textConfig map[string]json.RawMessage
+		if strings.TrimSpace(string(raw)) == "null" || json.Unmarshal(raw, &textConfig) != nil || textConfig == nil {
+			return nil, errors.New("text format must be an object")
+		}
+	}
+
+	requestedOutputTokens := 0
+	if raw, ok := envelope["max_output_tokens"]; ok {
+		if strings.TrimSpace(string(raw)) == "null" || json.Unmarshal(raw, &requestedOutputTokens) != nil || requestedOutputTokens < 1 {
+			return nil, errors.New("output-token budget is invalid")
+		}
+	}
+	if requestedOutputTokens == 0 || requestedOutputTokens > maxOutputTokens {
+		envelope["max_output_tokens"] = json.RawMessage(fmt.Sprintf("%d", maxOutputTokens))
+	}
+	// Normalize these settings even when omitted, so upstream behavior cannot
+	// silently depend on provider defaults.
+	envelope["stream"] = json.RawMessage("false")
+	envelope["temperature"] = json.RawMessage("0")
+	return json.Marshal(envelope)
+}
 func (b *Broker) recordFailure(record diagnostics.Record) {
 	record = diagnostics.SanitizeRecord(record, 4<<10, b.config.APIKey)
 	b.mu.Lock()
