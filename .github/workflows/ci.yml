@@ -33,6 +33,17 @@ jobs:
           bash -n scripts/test-live.sh
           bash -n scripts/install.sh
 
+      - name: Check live gate reports missing configuration clearly
+        shell: bash
+        run: |
+          output_file="$(mktemp)"
+          trap 'rm -f -- "$output_file"' EXIT
+          if env -u MIRAGE_HOSTILE_IMAGE -u MIRAGE_AGENT_IMAGE -u MIRAGE_CODEX_IMAGE -u MIRAGE_HELPER_IMAGE -u MIRAGE_DEMO_IMAGE ./scripts/test-live.sh >"$output_file" 2>&1; then
+            echo "live gate unexpectedly passed without required image configuration" >&2
+            exit 1
+          fi
+          grep -Fq "set MIRAGE_HOSTILE_IMAGE" "$output_file"
+
       - name: Smoke test native Linux installer and failed-upgrade safety
         shell: bash
         run: |
