@@ -44,7 +44,7 @@ if [[ ! "$commit" =~ ^[0-9a-f]{40}$ ]]; then
   exit 1
 fi
 
-version="${MIRAGE_VERSION:-1.0.0}"
+version="${MIRAGE_VERSION:-1.0.0-dev}"
 mkdir -p -- "$install_root"
 target="$install_root/mirage"
 if [[ -L "$target" || ( -e "$target" && ! -f "$target" ) ]]; then
