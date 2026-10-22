@@ -36,9 +36,9 @@ and the final image is scratch-based:
 QWEN_REPO="ghcr.io/your-github-username/mirage-qwen-agent"
 QWEN_TAG="validation"
 docker build -t "$QWEN_REPO:$QWEN_TAG" -f build/m44-qwen-agent/Dockerfile .
-PUSH_OUTPUT="$(docker push "$QWEN_REPO:$QWEN_TAG" 2>&1)" || { printf '%s\\n' "$PUSH_OUTPUT" >&2; exit 1; }
-printf '%s\\n' "$PUSH_OUTPUT"
-QWEN_DIGEST="$(printf '%s\\n' "$PUSH_OUTPUT" | sed -nE 's/.*[Dd]igest: (sha256:[0-9a-f]{64})([[:space:]].*)?$/\\1/p' | tail -n 1)"
+PUSH_OUTPUT="$(docker push "$QWEN_REPO:$QWEN_TAG" 2>&1)" || { printf '%s\n' "$PUSH_OUTPUT" >&2; exit 1; }
+printf '%s\n' "$PUSH_OUTPUT"
+QWEN_DIGEST="$(printf '%s\n' "$PUSH_OUTPUT" | sed -nE 's/.*[Dd]igest: (sha256:[0-9a-f]{64})([[:space:]].*)?$/\1/p' | tail -n 1)"
 if [[ ! "$QWEN_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
   echo "Copy the immutable manifest digest from the successful push or registry and set QWEN_DIGEST." >&2
   exit 1
