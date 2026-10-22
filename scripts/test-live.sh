@@ -10,6 +10,17 @@ repo_root="$(cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$repo_root"
 
 [[ "$(uname -s)" == "Linux" ]] || fail "run this script on Linux or inside WSL2, not Windows."
+
+[[ -n "${MIRAGE_HOSTILE_IMAGE:-}" ]] || fail "set MIRAGE_HOSTILE_IMAGE to a preloaded, digest-pinned hostile-fixture image"
+[[ -n "${MIRAGE_CODEX_IMAGE:-}" ]] || fail "set MIRAGE_CODEX_IMAGE to a preloaded, digest-pinned Codex agent image"
+[[ -n "${MIRAGE_HELPER_IMAGE:-}" ]] || fail "set MIRAGE_HELPER_IMAGE to a preloaded, digest-pinned helper image"
+[[ -n "${MIRAGE_DEMO_IMAGE:-}" ]] || fail "set MIRAGE_DEMO_IMAGE to a preloaded, digest-pinned demo fixture image"
+
+if [[ -z "${MIRAGE_AGENT_IMAGE:-}" ]]; then
+  MIRAGE_AGENT_IMAGE="$MIRAGE_HOSTILE_IMAGE"
+fi
+export MIRAGE_AGENT_IMAGE
+
 command -v go >/dev/null 2>&1 || fail "Go 1.27.3 or newer is required."
 command -v docker >/dev/null 2>&1 || fail "Docker CLI is required."
 go_version_output="$(go version 2>&1)" || fail "could not run the Go toolchain."
@@ -17,16 +28,6 @@ go_version="$(sed -nE 's/^go version go([0-9]+\.[0-9]+\.[0-9]+)([[:space:]]|$).*
 [[ -n "$go_version" ]] || fail "could not parse Go version: $go_version_output"
 minimum_version="$(printf '%s\n' "$go_version" "1.27.3" | sort -V | head -n 1)"
 [[ "$minimum_version" == "1.27.3" ]] || fail "Go 1.27.3 or newer is required; found $go_version."
-
-[[ -n "$MIRAGE_HOSTILE_IMAGE" ]] || fail "set MIRAGE_HOSTILE_IMAGE to a preloaded, digest-pinned hostile-fixture image"
-[[ -n "$MIRAGE_CODEX_IMAGE" ]] || fail "set MIRAGE_CODEX_IMAGE to a preloaded, digest-pinned Codex agent image"
-[[ -n "$MIRAGE_HELPER_IMAGE" ]] || fail "set MIRAGE_HELPER_IMAGE to a preloaded, digest-pinned helper image"
-[[ -n "$MIRAGE_DEMO_IMAGE" ]] || fail "set MIRAGE_DEMO_IMAGE to a preloaded, digest-pinned demo fixture image"
-
-if [[ -z "$MIRAGE_AGENT_IMAGE" ]]; then
-  MIRAGE_AGENT_IMAGE="$MIRAGE_HOSTILE_IMAGE"
-fi
-export MIRAGE_AGENT_IMAGE
 
 check_pinned_image() {
   local variable_name="$1"
