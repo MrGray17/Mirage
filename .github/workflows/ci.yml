@@ -59,7 +59,7 @@ jobs:
           installed="$install_home/.local/bin/mirage"
           expected_commit="$(git rev-parse HEAD)"
           metadata="$("$installed" version --json)"
-          grep -Fq '"version":"1.0.0"' <<< "$metadata"
+          grep -Fq '"version":"1.0.0-dev"' <<< "$metadata"
           grep -Fq "\"commit\":\"$expected_commit\"" <<< "$metadata"
           grep -Fq '"bridge_protocol":1' <<< "$metadata"
           grep -Fq '"platform":"linux"' <<< "$metadata"
