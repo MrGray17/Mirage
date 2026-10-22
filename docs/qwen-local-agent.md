@@ -32,13 +32,26 @@ Build the image from the repository root. The builder base is pinned by digest
 and the final image is scratch-based:
 
 ```bash
-docker build -t mirage-qwen-agent:validation \
-  -f build/m44-qwen-agent/Dockerfile .
-docker image inspect mirage-qwen-agent:validation
+# Replace this with a repository in a registry you control (use a lowercase namespace).
+QWEN_REPO="ghcr.io/your-github-username/mirage-qwen-agent"
+QWEN_TAG="validation"
+docker build -t "$QWEN_REPO:$QWEN_TAG" -f build/m44-qwen-agent/Dockerfile .
+PUSH_OUTPUT="$(docker push "$QWEN_REPO:$QWEN_TAG" 2>&1)" || { printf '%s\\n' "$PUSH_OUTPUT" >&2; exit 1; }
+printf '%s\\n' "$PUSH_OUTPUT"
+QWEN_DIGEST="$(printf '%s\\n' "$PUSH_OUTPUT" | sed -nE 's/.*[Dd]igest: (sha256:[0-9a-f]{64})([[:space:]].*)?$/\\1/p' | tail -n 1)"
+if [[ ! "$QWEN_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  echo "Copy the immutable manifest digest from the successful push or registry and set QWEN_DIGEST." >&2
+  exit 1
+fi
+QWEN_IMAGE="$QWEN_REPO@$QWEN_DIGEST"
+docker pull "$QWEN_IMAGE"
 ```
 
-Use the resulting `RepoDigests` value as `--image`; an unpinned tag is rejected
-by the existing agent launcher.
+A locally built tag often has no `RepoDigests` entry until it has been pushed or
+pulled from a registry. Mirage requires a repository-qualified immutable
+`name@sha256:digest` reference, so a plain local tag or image ID is not
+accepted. Keep the registry reference private or public according to your
+needs, and ensure the rootless Docker user can pull it.
 
 ## Run
 
