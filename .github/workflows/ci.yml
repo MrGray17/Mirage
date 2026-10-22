@@ -88,6 +88,30 @@ jobs:
           stage_left="$(find "$install_home/.local/bin" -maxdepth 1 -name '.mirage-stage.*' -print -quit)"
           test -z "$stage_left"
 
+          real_mv="$(command -v mv)"
+          cat > "$wrapper_dir/mv" <<'FAKE_MV'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          target="${!#}"
+          if [[ "${MIRAGE_TEST_FAIL_ACTIVATION:-0}" == "1" && "$target" == "$HOME/.local/bin/mirage" ]]; then
+            echo "simulated atomic activation failure for installer regression test" >&2
+            exit 43
+          fi
+          exec "$REAL_MV" "$@"
+          FAKE_MV
+          chmod 0755 "$wrapper_dir/mv"
+
+          before="$(sha256sum "$installed" | cut -d ' ' -f 1)"
+          if PATH="$wrapper_dir:$PATH" REAL_GO="$real_go" REAL_MV="$real_mv" MIRAGE_TEST_FAIL_ACTIVATION=1 HOME="$install_home" GOPATH="$go_path" GOMODCACHE="$go_mod_cache" ./scripts/install.sh >"$wrapper_dir/activation.out" 2>&1; then
+            echo "installer unexpectedly activated a staged binary after the rename was forced to fail" >&2
+            exit 1
+          fi
+          grep -Fq "could not activate the validated executable" "$wrapper_dir/activation.out"
+          after="$(sha256sum "$installed" | cut -d ' ' -f 1)"
+          test "$before" = "$after"
+          stage_left="$(find "$install_home/.local/bin" -maxdepth 1 -name '.mirage-stage.*' -print -quit)"
+          test -z "$stage_left"
+
       - name: Verify formatting
         shell: bash
         run: |
