@@ -33,6 +33,17 @@ jobs:
           bash -n scripts/test-live.sh
           bash -n scripts/install.sh
 
+      - name: Check live gate reports missing configuration clearly
+        shell: bash
+        run: |
+          output_file="$(mktemp)"
+          trap 'rm -f -- "$output_file"' EXIT
+          if env -u MIRAGE_HOSTILE_IMAGE -u MIRAGE_AGENT_IMAGE -u MIRAGE_CODEX_IMAGE -u MIRAGE_HELPER_IMAGE -u MIRAGE_DEMO_IMAGE ./scripts/test-live.sh >"$output_file" 2>&1; then
+            echo "live gate unexpectedly passed without required image configuration" >&2
+            exit 1
+          fi
+          grep -Fq "set MIRAGE_HOSTILE_IMAGE" "$output_file"
+
       - name: Smoke test native Linux installer and failed-upgrade safety
         shell: bash
         run: |
@@ -58,7 +69,7 @@ jobs:
           #!/usr/bin/env bash
           set -euo pipefail
           for arg in "$@"; do
-            if [[ "$arg" == "build" && "$MIRAGE_TEST_FAIL_BUILD" == "1" ]]; then
+            if [[ "$arg" == "build" && "${MIRAGE_TEST_FAIL_BUILD:-0}" == "1" ]]; then
               echo "simulated Go build failure for installer regression test" >&2
               exit 42
             fi
@@ -72,6 +83,30 @@ jobs:
             echo "installer unexpectedly succeeded with a forced build failure" >&2
             exit 1
           fi
+          after="$(sha256sum "$installed" | cut -d ' ' -f 1)"
+          test "$before" = "$after"
+          stage_left="$(find "$install_home/.local/bin" -maxdepth 1 -name '.mirage-stage.*' -print -quit)"
+          test -z "$stage_left"
+
+          real_mv="$(command -v mv)"
+          cat > "$wrapper_dir/mv" <<'FAKE_MV'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          target="${!#}"
+          if [[ "${MIRAGE_TEST_FAIL_ACTIVATION:-0}" == "1" && "$target" == "$HOME/.local/bin/mirage" ]]; then
+            echo "simulated atomic activation failure for installer regression test" >&2
+            exit 43
+          fi
+          exec "$REAL_MV" "$@"
+          FAKE_MV
+          chmod 0755 "$wrapper_dir/mv"
+
+          before="$(sha256sum "$installed" | cut -d ' ' -f 1)"
+          if PATH="$wrapper_dir:$PATH" REAL_GO="$real_go" REAL_MV="$real_mv" MIRAGE_TEST_FAIL_ACTIVATION=1 HOME="$install_home" GOPATH="$go_path" GOMODCACHE="$go_mod_cache" ./scripts/install.sh >"$wrapper_dir/activation.out" 2>&1; then
+            echo "installer unexpectedly activated a staged binary after the rename was forced to fail" >&2
+            exit 1
+          fi
+          grep -Fq "could not activate the validated executable" "$wrapper_dir/activation.out"
           after="$(sha256sum "$installed" | cut -d ' ' -f 1)"
           test "$before" = "$after"
           stage_left="$(find "$install_home/.local/bin" -maxdepth 1 -name '.mirage-stage.*' -print -quit)"
