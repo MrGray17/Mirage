@@ -72,6 +72,14 @@ MIRAGE installs from a Git checkout and embeds the checkout's complete commit
 identity in the binary. Install only from the commit you intend to run, and
 verify the reported identity afterward.
 
+**Release status:** the published [`v1.0.0` release](https://github.com/MrGray17/Mirage/releases/tag/v1.0.0)
+predates the installer and security hardening on `main` and has no downloadable
+binary assets. Source installs from `main` are deliberately labeled
+`1.0.0-dev` and embed the exact 40-character source commit. They contain
+post-`v1.0.0` changes, but are not a new stable release. The follow-up stable
+release should wait for the documented rootless-Docker live gate and real
+Windows/WSL install/upgrade acceptance to pass.
+
 ### Windows 11 with WSL2
 
 Prerequisites:
@@ -104,7 +112,7 @@ mirage setup
 mirage doctor
 ```
 
-`mirage version` must report `mirage 1.0.0`, a full 40-character lowercase Git
+`mirage version` must report `mirage 1.0.0-dev`, a full 40-character lowercase Git
 commit, bridge protocol 1, and `platform=windows`. `mirage doctor` checks that
 the WSL backend has the same version, commit, and bridge protocol and must finish
 with `READY`; do not run an agent if it reports `NOT READY`.
@@ -129,7 +137,7 @@ mirage doctor
 ```
 
 The status command should print nothing. `mirage version` must report version
-`1.0.0`, the checkout's complete commit identity, and `platform=linux`.
+`1.0.0-dev`, the checkout's complete commit identity, and `platform=linux`.
 
 ## Quick deterministic demo
 

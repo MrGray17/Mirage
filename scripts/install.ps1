@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$Distribution = "Ubuntu",
-    [string]$Version = "1.0.0"
+    [string]$Version = "1.0.0-dev"
 )
 
 $ErrorActionPreference = "Stop"
@@ -224,9 +224,9 @@ try {
 
     Assert-MirageBuildPair -WindowsBinary $frontend -LinuxBinary $backend -TargetDistribution $Distribution -ExpectedVersion $Version -ExpectedCommit $commit
 
-    # doctor --help exercises the installed Windows-to-WSL bridge and protocol
-    # handshake without requiring a configured Docker daemon or provider key.
-    $smokeOutput = & $frontend doctor --help 2>&1
+    # setup --help exercises the installed Windows-to-WSL bridge and the
+    # backend version handshake, then exits before touching Docker or models.
+    $smokeOutput = & $frontend setup --help 2>&1
     $smokeExitCode = $LASTEXITCODE
     if ($smokeExitCode -ne 0) {
         throw "Post-install Windows-to-WSL bridge check failed: $(($smokeOutput -join ' ').Trim())"
