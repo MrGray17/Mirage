@@ -209,10 +209,20 @@ Build the constrained, scratch-based Qwen agent image from the repository root
 and capture its immutable image identity:
 
 ```bash
-docker build -t mirage-qwen-agent:v1 -f build/m44-qwen-agent/Dockerfile .
-QWEN_IMAGE="$(docker image inspect --format '{{index .RepoDigests 0}}' mirage-qwen-agent:v1)"
+# Replace this with a repository in a registry you control (use a lowercase namespace).
+QWEN_REPO="ghcr.io/your-github-username/mirage-qwen-agent"
+QWEN_TAG="validation"
+docker build -t "$QWEN_REPO:$QWEN_TAG" -f build/m44-qwen-agent/Dockerfile .
+PUSH_OUTPUT="$(docker push "$QWEN_REPO:$QWEN_TAG" 2>&1)" || { printf '%s\n' "$PUSH_OUTPUT" >&2; exit 1; }
+printf '%s\n' "$PUSH_OUTPUT"
+QWEN_DIGEST="$(printf '%s\n' "$PUSH_OUTPUT" | sed -nE 's/.*[Dd]igest: (sha256:[0-9a-f]{64})([[:space:]].*)?$/\1/p' | tail -n 1)"
+if [[ ! "$QWEN_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  echo "Copy the immutable manifest digest from the successful push or registry and set QWEN_DIGEST." >&2
+  exit 1
+fi
+QWEN_IMAGE="$QWEN_REPO@$QWEN_DIGEST"
+docker pull "$QWEN_IMAGE"
 HELPER_IMAGE="busybox@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0"
-test -n "$QWEN_IMAGE"
 mkdir -p "$HOME/.cache/mirage"
 DEMO_ROOT="$(mktemp -d "$HOME/.cache/mirage/qwen-v1.XXXXXX")"
 mkdir -p "$DEMO_ROOT/authorized" "$DEMO_ROOT/rejected"
