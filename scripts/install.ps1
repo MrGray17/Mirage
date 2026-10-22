@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$Distribution = "Ubuntu",
-    [string]$Version = "1.0.0"
+    [string]$Version = "1.0.0-dev"
 )
 
 $ErrorActionPreference = "Stop"
