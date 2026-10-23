@@ -1064,6 +1064,11 @@ func cleanupRuntime(lifecycle *hostileruntime.Lifecycle, disposable *workspace.D
 }
 
 func newDurableLifecycle(manifest *hostileruntime.RunManifest) (*hostileruntime.Lifecycle, error) {
+	if runtime.GOOS != "linux" {
+		// Non-Linux invocations are rejected by the lifecycle's runtime preflight.
+		// Production Windows commands are routed to the Linux/WSL backend first.
+		return hostileruntime.NewBoundLifecycle(manifest)
+	}
 	store, err := realcommit.DefaultJournalStore()
 	if err != nil {
 		return nil, fmt.Errorf("prepare durable commit journal: %w", err)
