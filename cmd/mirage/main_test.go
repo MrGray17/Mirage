@@ -148,7 +148,7 @@ func TestEmitDemoResultDoesNotConfuseObservedMutationsWithCommit(t *testing.T) {
 		"? WRITE",
 		"1 trusted final-state mutation",
 		"Commit:\nNOT COMMITTED",
-		"Agent attempted 1 effects. MIRAGE authorized 0, denied 0, and committed 0.",
+		"Agent attempted 1 effect. MIRAGE authorized 0, denied 0, and committed 0.",
 	} {
 		if !strings.Contains(got, expected) {
 			t.Errorf("output missing %q:\n%s", expected, got)
