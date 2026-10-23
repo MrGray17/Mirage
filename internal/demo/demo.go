@@ -18,6 +18,7 @@ import (
 	"github.com/MrGray17/Mirage/internal/runtime/hostilefixture"
 	"github.com/MrGray17/Mirage/internal/runtime/tree"
 	"github.com/MrGray17/Mirage/internal/runtime/workspace"
+	"github.com/MrGray17/Mirage/internal/runtime/realcommit"
 )
 
 const (
@@ -198,7 +199,11 @@ func Run(ctx context.Context, config Config) (result Result, returnErr error) {
 		return result, err
 	}
 	result.ManifestHash = manifest.Identity()
-	lifecycle, err = hostileruntime.NewBoundLifecycle(manifest)
+	journalStore, err := realcommit.DefaultJournalStore()
+	if err != nil {
+		return result, fmt.Errorf("prepare durable commit journal: %w", err)
+	}
+	lifecycle, err = hostileruntime.NewBoundLifecycleWithJournal(manifest, journalStore)
 	if err != nil {
 		return result, err
 	}
