@@ -18,7 +18,7 @@ Use this release gate on the Linux filesystem inside WSL2 or on a Linux host tha
 
 4. The broker socket acceptance test also needs the real Codex agent image, whose entrypoint requires Node.js and the pinned Codex CLI. Build it from the checked-in Dockerfile and push it to a registry you control:
 
-       docker build -t REGISTRY/OWNER/mirage-codex-agent:acceptance -f build/m44-codex-agent/Dockerfile .
+       docker build -t REGISTRY/OWNER/mirage-codex-agent:acceptance -f build/m44-codex-agent/Dockerfile build/m44-codex-agent
        docker push REGISTRY/OWNER/mirage-codex-agent:acceptance
 
    Copy the immutable manifest digest printed by the push or shown by your registry, then set MIRAGE_CODEX_IMAGE to the full REGISTRY/OWNER/mirage-codex-agent@sha256:DIGEST reference and pull that exact reference:
