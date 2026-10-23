@@ -28,13 +28,13 @@ const (
 type JournalState string
 
 const (
-	JournalPrepared             JournalState = "PREPARED"
-	JournalApplying             JournalState = "APPLYING"
-	JournalCommitted            JournalState = "COMMITTED"
-	JournalAborted              JournalState = "ABORTED"
-	JournalBeforeStateObserved  JournalState = "BEFORE_STATE_OBSERVED"
-	JournalAfterStateObserved   JournalState = "AFTER_STATE_OBSERVED"
-	JournalRecoveryRequired     JournalState = "RECOVERY_REQUIRED"
+	JournalPrepared            JournalState = "PREPARED"
+	JournalApplying            JournalState = "APPLYING"
+	JournalCommitted           JournalState = "COMMITTED"
+	JournalAborted             JournalState = "ABORTED"
+	JournalBeforeStateObserved JournalState = "BEFORE_STATE_OBSERVED"
+	JournalAfterStateObserved  JournalState = "AFTER_STATE_OBSERVED"
+	JournalRecoveryRequired    JournalState = "RECOVERY_REQUIRED"
 )
 
 var (
@@ -679,7 +679,6 @@ func unlockAndClose(file *os.File) {
 	_ = unlockJournal(file)
 	_ = file.Close()
 }
-
 
 func validSHA256(value string) bool {
 	if len(value) != len("sha256:")+64 || !strings.HasPrefix(value, "sha256:") {
