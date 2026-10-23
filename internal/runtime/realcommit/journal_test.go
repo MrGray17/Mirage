@@ -125,10 +125,39 @@ func TestRecoverPendingClassifiesAfterStateWithoutClaimingCommitAttribution(t *t
 	}
 }
 
-func TestRecoverPendingMarksBeforeStateNotCommitted(t *testing.T) {
+func TestRecoverPendingMarksPreparedBeforeStateNotCommitted(t *testing.T) {
 	root := t.TempDir()
 	before, after := []byte("before"), []byte("authorized after-state")
 	if err := os.WriteFile(filepath.Join(root, "README.md"), before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewJournalStore(filepath.Join(t.TempDir(), "transactions"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := newTestPlan(t, root, before, after, 0o600)
+	tx, err := store.Begin(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := store.RecoverPending()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].State != JournalAborted || results[0].Outcome != "NOT_COMMITTED" {
+		t.Fatalf("recovery results=%#v", results)
+	}
+}
+
+func TestRecoverPendingDoesNotClaimApplyingBeforeStateWasNeverCommitted(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "README.md")
+	before, after := []byte("before"), []byte("authorized after-state")
+	if err := os.WriteFile(target, before, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	store, err := NewJournalStore(filepath.Join(t.TempDir(), "transactions"))
@@ -152,11 +181,11 @@ func TestRecoverPendingMarksBeforeStateNotCommitted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results) != 1 || results[0].State != JournalAborted || results[0].Outcome != "NOT_COMMITTED" {
+	if len(results) != 1 || results[0].State != JournalBeforeStateObserved ||
+		results[0].Outcome != "BEFORE_STATE_OBSERVED_ATTRIBUTION_UNCERTAIN" {
 		t.Fatalf("recovery results=%#v", results)
 	}
 }
-
 func TestRecoveryRejectsWorkspacePathReplacement(t *testing.T) {
 	parent := t.TempDir()
 	root := filepath.Join(parent, "workspace")
