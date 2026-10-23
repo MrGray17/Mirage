@@ -33,6 +33,18 @@ func TestHelpAndVersionAreStableProductCommands(t *testing.T) {
 		if err := run(args, &stdout, &stderr); err != nil || !strings.Contains(stdout.String(), "Transactional security runtime") {
 			t.Fatalf("args=%v output=%q error=%v", args, stdout.String(), err)
 		}
+		for _, expected := range []string{
+			"First run (deterministic demo; no provider API key or GitHub write):",
+			"mirage setup",
+			"mirage doctor [--json]",
+			"mirage run --open",
+			"mirage receipt verify <receipt.json>",
+			"mirage observatory --out <report.html> <receipt.json>",
+		} {
+			if !strings.Contains(stdout.String(), expected) {
+				t.Errorf("args=%v help missing %q:\n%s", args, expected, stdout.String())
+			}
+		}
 	}
 	var stdout, stderr bytes.Buffer
 	if err := run([]string{"version", "--json"}, &stdout, &stderr); err != nil {
