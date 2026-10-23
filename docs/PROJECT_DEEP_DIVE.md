@@ -2,7 +2,7 @@
 
 > **Purpose:** Explain MIRAGE end to end: the problem it solves, how the current implementation works, its security boundaries, its user-facing workflows, how to test it, and what it does not yet guarantee.
 >
-> **Scope:** This document describes the repository's current main branch. Code is authoritative when details change. Architecture ideas explicitly marked as future work are not current product capabilities.
+> **Scope:** This document describes the implementation on the branch containing this document. Code is authoritative when details change. The crash-safe local commit journal is an incremental capability: it supports durable transaction intent and conservative recovery classification, but does not yet reconstruct a missing receipt after a host crash.
 
 - Project: [MrGray17/Mirage](https://github.com/MrGray17/Mirage)
 - Product overview and quick start: [README.md](../README.md)
@@ -833,9 +833,29 @@ The implementation does not claim complete preservation or transactional handlin
 
 A narrow final revalidation-to-replacement race against a non-cooperating host process remains documented. A broader guarantee would require a stronger host-level coordination/locking model and additional security work.
 
-### 18.4 No crash-durable transaction journal
+### 18.4 Durable local commit journal and recovery
 
-MIRAGE does not currently claim crash-durable intent/evidence journaling and full recovery across arbitrary process or host crashes. A successful real commit followed by an evidence I/O failure must be represented as a committed outcome, not falsely described as an unchanged workspace; however, full durable post-crash recovery is future work.
+The local filesystem commit path now uses a metadata-only durable transaction journal when invoked through the product CLI and the competition demo. It stores the immutable plan, manifest and authority identities, workspace path and filesystem identity, target path, before/after content digests, permission mode, timestamps, state, and a canonical checksum. It does not store file contents, secrets, or a full receipt.
+
+The journal state flow is:
+
+~~~text
+PREPARED
+  -> APPLYING
+  -> COMMITTED
+~~~ 
+
+An operation that fails before the durable APPLYING intent is established is marked ABORTED when that transition can be persisted. APPLYING is durably recorded immediately before the trusted atomic replacement. After the replacement, MIRAGE syncs the containing target directory before persisting COMMITTED.
+
+Use `mirage recover` from the Linux/WSL backend to inspect incomplete journal records. Recovery never retries a mutation and never overwrites the real workspace. It verifies the journal checksum and workspace identity, then classifies the currently observed target:
+
+- the recorded before-state is present: the operation can be classified as NOT_COMMITTED;
+- the recorded after-state is present after an APPLYING interruption: MIRAGE reports AFTER_STATE_OBSERVED_ATTRIBUTION_UNCERTAIN rather than claiming that the transaction definitely produced it;
+- the workspace identity, target mode, or digest cannot be safely matched: MIRAGE reports RECOVERY_REQUIRED.
+
+An uncertain recovery outcome requires operator inspection. The journal checksum detects record inconsistency; it is not a signature or protection against a compromised trusted host. This first increment does not reconstruct a full receipt if the host crashes after commit but before receipt persistence, does not implement general multi-file transactions, and does not eliminate the documented race against a non-cooperating host process. A record whose recovery classification remains uncertain is retained for future inspection.
+
+
 
 ### 18.5 Not syscall-perfect observability
 
@@ -880,7 +900,7 @@ The following is a practical entry point into the current Go codebase. It is foc
 - **internal/runtime/hostilefixture:** deterministic hostile, positive single-modification, and competition-demo workloads.
 - **internal/runtime/tree:** bounded scan, snapshot identity, canonical mutation diff and mutation types.
 - **internal/runtime/reconcile:** deterministic contract verification of the frozen final state.
-- **internal/runtime/realcommit:** immutable single-file real-commit plan, revalidation, staging and atomic replacement.
+- **internal/runtime/realcommit:** immutable single-file commit plan, rooted revalidation, staging, atomic replacement, durable transaction journal and conservative crash recovery.
 - **internal/limits:** shared file, tree, event and mutation budgets.
 
 ### Evidence and model execution
