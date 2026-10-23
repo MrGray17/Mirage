@@ -32,9 +32,9 @@ jobs:
       - name: Check out the release target
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          # For the bootstrap PR, test the exact current base SHA rather than
-          # accidentally testing only the workflow-changing PR merge commit.
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || inputs.target_ref || github.sha }}
+          # This workflow PR bootstraps the gate by testing the current base
+          # application SHA. For every other PR, test the incoming head commit.
+          ref: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.ref == 'ci/rootless-live-acceptance' && github.event.pull_request.base.sha || github.event.pull_request.head.sha) || inputs.target_ref || github.sha }}
           fetch-depth: 1
 
       - name: Set up Go 1.27.3
