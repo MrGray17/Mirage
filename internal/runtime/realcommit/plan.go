@@ -117,7 +117,48 @@ func (p *Plan) Contents() []byte             { return append([]byte(nil), p.cont
 // trusted commit phase begins, revalidates again, requires lifecycle-owned
 // authority at the last point before replacement, and atomically replaces the
 // one named file while preserving the real baseline permission mode.
-func Apply(plan *Plan, beforeReplace func() error) (returnErr error) {
+func Apply(plan *Plan, beforeReplace func() error) error {
+	return apply(plan, beforeReplace, nil)
+}
+
+// ApplyWithJournal persists transaction intent before the rename and records a
+// durable terminal state only after the target directory has been synced.
+// A failed operation after the APPLYING record is durable must be reconciled;
+// it is never automatically retried.
+func ApplyWithJournal(plan *Plan, beforeReplace func() error, store *JournalStore) (returnErr error) {
+	if store == nil {
+		return ErrJournalInvalid
+	}
+	tx, err := store.Begin(plan)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Close() }()
+
+	intentPersisted := false
+	err = apply(plan, beforeReplace, func() error {
+		if err := tx.MarkApplying(); err != nil {
+			return err
+		}
+		intentPersisted = true
+		return nil
+	})
+	if err != nil {
+		if !intentPersisted {
+			if abortErr := tx.MarkAborted("commit_failed_before_replace_intent"); abortErr != nil {
+				return errors.Join(err, abortErr)
+			}
+			return err
+		}
+		return fmt.Errorf("%w: %v", ErrOutcomeUncertain, err)
+	}
+	if err := tx.MarkCommitted(); err != nil {
+		return fmt.Errorf("%w: persist committed outcome: %v", ErrOutcomeUncertain, err)
+	}
+	return nil
+}
+
+func apply(plan *Plan, beforeReplace func() error, beforeRename func() error) (returnErr error) {
 	if plan == nil || plan.hash == "" || beforeReplace == nil {
 		return ErrInvalidPlan
 	}
@@ -189,11 +230,19 @@ func Apply(plan *Plan, beforeReplace func() error) (returnErr error) {
 	if err := requireNamedWorkspace(root, plan.realWorkspace); err != nil {
 		return err
 	}
+	if beforeRename != nil {
+		if err := beforeRename(); err != nil {
+			return fmt.Errorf("persist commit intent: %w", err)
+		}
+	}
 	if err := root.Rename(temporary, plan.relative); err != nil {
 		return fmt.Errorf("replace real resource: %w", err)
 	}
 	cleanup = false
 	replaced = true
+	if err := syncRootDirectory(root, filepath.Dir(plan.relative)); err != nil {
+		return fmt.Errorf("%w: sync target directory after replacement: %v", ErrOutcomeUncertain, err)
+	}
 	return nil
 }
 
@@ -321,4 +370,18 @@ func temporaryRelative(target string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(filepath.Dir(target), workspace.CommitStagingPrefix+hex.EncodeToString(bytes)+".tmp"), nil
+}
+
+
+// syncRootDirectory flushes the directory entry replacement through the
+// already-open workspace root. It deliberately avoids reopening the workspace
+// by an absolute path after the commit operation began.
+func syncRootDirectory(root *os.Root, relativeDirectory string) error {
+	directory, err := root.Open(relativeDirectory)
+	if err != nil {
+		return err
+	}
+	syncErr := directory.Sync()
+	closeErr := directory.Close()
+	return errors.Join(syncErr, closeErr)
 }
