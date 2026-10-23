@@ -524,13 +524,7 @@ func runHostileFixture(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return errors.Join(err, disposable.Cleanup())
 	}
-	lifecycle, err := hostileruntime.NewBoundLifecycleWithJournal(manifest, func() *realcommit.JournalStore {
-			store, storeErr := realcommit.DefaultJournalStore()
-			if storeErr != nil {
-				err = storeErr
-			}
-			return store
-		}())
+	lifecycle, err := newDurableLifecycle(manifest)
 	if err != nil {
 		return errors.Join(err, disposable.Cleanup())
 	}
@@ -813,13 +807,7 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return errors.Join(err, closeBroker())
 	}
-	lifecycle, err := hostileruntime.NewBoundLifecycleWithJournal(manifest, func() *realcommit.JournalStore {
-			store, storeErr := realcommit.DefaultJournalStore()
-			if storeErr != nil {
-				err = storeErr
-			}
-			return store
-		}())
+	lifecycle, err := newDurableLifecycle(manifest)
 	if err != nil {
 		return errors.Join(err, closeBroker())
 	}
@@ -1071,4 +1059,13 @@ func cleanupRuntime(lifecycle *hostileruntime.Lifecycle, disposable *workspace.D
 		return err
 	}
 	return nil
+}
+
+
+func newDurableLifecycle(manifest *hostileruntime.RunManifest) (*hostileruntime.Lifecycle, error) {
+	store, err := realcommit.DefaultJournalStore()
+	if err != nil {
+		return nil, fmt.Errorf("prepare durable commit journal: %w", err)
+	}
+	return hostileruntime.NewBoundLifecycleWithJournal(manifest, store)
 }
