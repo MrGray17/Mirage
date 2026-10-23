@@ -16,9 +16,9 @@ import (
 	"github.com/MrGray17/Mirage/internal/runtime/diagnostics"
 	runtimedocker "github.com/MrGray17/Mirage/internal/runtime/docker"
 	"github.com/MrGray17/Mirage/internal/runtime/hostilefixture"
+	"github.com/MrGray17/Mirage/internal/runtime/realcommit"
 	"github.com/MrGray17/Mirage/internal/runtime/tree"
 	"github.com/MrGray17/Mirage/internal/runtime/workspace"
-	"github.com/MrGray17/Mirage/internal/runtime/realcommit"
 )
 
 const (
