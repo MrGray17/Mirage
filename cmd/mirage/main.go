@@ -325,7 +325,11 @@ func emitDemoResult(writer io.Writer, result demo.Result, graphHash, receiptHash
 	fmt.Fprintf(writer, "effect_graph=%s\nreceipt=%s\nreceipt_file=%s\n", graphHash, receiptHash, receiptPath)
 	fmt.Fprintf(writer, "observatory=%s\n", observatoryPath)
 	fmt.Fprintf(writer, "real_workspace=%s\n\n", result.RealWorkspace)
-	fmt.Fprintf(writer, "RESULT:\nAgent attempted %d effects. MIRAGE authorized %d, denied %d, and committed %d.\n", len(result.Attempts), authorized, denied, committed)
+	effectWord := "effects"
+	if len(result.Attempts) == 1 {
+		effectWord = "effect"
+	}
+	fmt.Fprintf(writer, "RESULT:\nAgent attempted %d %s. MIRAGE authorized %d, denied %d, and committed %d.\n", len(result.Attempts), effectWord, authorized, denied, committed)
 }
 
 func buildDemoEvidence(result demo.Result) (*effectgraph.Graph, *receipt.Receipt, error) {
