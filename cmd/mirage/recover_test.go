@@ -15,7 +15,7 @@ import (
 	"github.com/MrGray17/Mirage/internal/runtime/realcommit"
 )
 
-func TestRecoverCommandClassifiesInterruptedPreRenameTransaction(t *testing.T) {
+func TestRecoverCommandClassifiesApplyingBeforeStateAsUncertain(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "README.md")
 	before, after := []byte("before"), []byte("after")
@@ -40,10 +40,11 @@ func TestRecoverCommandClassifiesInterruptedPreRenameTransaction(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if err := runRecover([]string{"--journal-dir", store.Directory()}, &stdout, &stderr); err != nil {
-		t.Fatalf("recover: %v; stdout=%s stderr=%s", err, stdout.String(), stderr.String())
+	err = runRecover([]string{"--journal-dir", store.Directory()}, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "remain unresolved") {
+		t.Fatalf("error = %v; output=%s", err, stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "outcome=NOT_COMMITTED") {
+	if !strings.Contains(stdout.String(), "BEFORE_STATE_OBSERVED_ATTRIBUTION_UNCERTAIN") {
 		t.Fatalf("recovery output=%q", stdout.String())
 	}
 	got, err := os.ReadFile(target)
