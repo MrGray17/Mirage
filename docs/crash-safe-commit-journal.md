@@ -77,7 +77,8 @@ The command reads and validates pending records, verifies the workspace still ha
 
 | Current journal state | Observed condition | Recovery classification |
 |---|---|---|
-| `PREPARED` or `APPLYING` | Target matches recorded before digest and mode; workspace identity matches | `ABORTED`, outcome `NOT_COMMITTED` |
+| `PREPARED` | Target matches recorded before digest and mode; workspace identity matches | `ABORTED`, outcome `NOT_COMMITTED` |
+| `APPLYING` | Target matches recorded before digest and mode; workspace identity matches | `BEFORE_STATE_OBSERVED`, outcome `BEFORE_STATE_OBSERVED_ATTRIBUTION_UNCERTAIN` |
 | `APPLYING` | Target matches recorded after digest and mode; workspace identity matches | `AFTER_STATE_OBSERVED`, outcome `AFTER_STATE_OBSERVED_ATTRIBUTION_UNCERTAIN` |
 | Any pending state | Workspace identity, target mode, target type, or digest cannot be safely matched | `RECOVERY_REQUIRED` |
 | `COMMITTED` or `ABORTED` | Terminal record with valid checksum | Not a pending transaction |
