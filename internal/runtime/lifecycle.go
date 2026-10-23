@@ -268,10 +268,10 @@ func NewBoundLifecycleWithJournal(manifest *RunManifest, journal *realcommit.Jou
 		return nil, fmt.Errorf("%w: %w", ErrInvalidRuntime, err)
 	}
 	return &Lifecycle{
-		sandbox:      manifest.sandbox,
-		clock:        manifest.clock,
-		state:        StateCreated,
-		manifest:     manifest,
+		sandbox:       manifest.sandbox,
+		clock:         manifest.clock,
+		state:         StateCreated,
+		manifest:      manifest,
 		commitJournal: journal,
 	}, nil
 }
