@@ -843,14 +843,19 @@ The journal state flow is:
 PREPARED
   -> APPLYING
   -> COMMITTED
-~~~ 
+
+Interrupted APPLYING may recover to ABORTED only when the before-state is
+provably untouched under the protocol; otherwise the old or new bytes alone do
+not establish attribution. This implementation records observed-before and
+observed-after states as uncertain.
+~~~
 
 An operation that fails before the durable APPLYING intent is established is marked ABORTED when that transition can be persisted. APPLYING is durably recorded immediately before the trusted atomic replacement. After the replacement, MIRAGE syncs the containing target directory before persisting COMMITTED.
 
 Use `mirage recover` from the Linux/WSL backend to inspect incomplete journal records. Recovery never retries a mutation and never overwrites the real workspace. It verifies the journal checksum and workspace identity, then classifies the currently observed target:
 
-- the recorded before-state is present: the operation can be classified as NOT_COMMITTED;
-- the recorded after-state is present after an APPLYING interruption: MIRAGE reports AFTER_STATE_OBSERVED_ATTRIBUTION_UNCERTAIN rather than claiming that the transaction definitely produced it;
+- a PREPARED record exists and the recorded before-state is present: the commit intent was never durably issued, so the operation is classified as NOT_COMMITTED;
+- after an APPLYING interruption, either the recorded before-state or after-state is present: MIRAGE reports BEFORE_STATE_OBSERVED_ATTRIBUTION_UNCERTAIN or AFTER_STATE_OBSERVED_ATTRIBUTION_UNCERTAIN. A non-cooperating host writer could have restored the before-state or independently produced the after-state, so neither observation alone proves the commit outcome;
 - the workspace identity, target mode, or digest cannot be safely matched: MIRAGE reports RECOVERY_REQUIRED.
 
 An uncertain recovery outcome requires operator inspection. The journal checksum detects record inconsistency; it is not a signature or protection against a compromised trusted host. This first increment does not reconstruct a full receipt if the host crashes after commit but before receipt persistence, does not implement general multi-file transactions, and does not eliminate the documented race against a non-cooperating host process. A record whose recovery classification remains uncertain is retained for future inspection.
