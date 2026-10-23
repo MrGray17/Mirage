@@ -332,6 +332,6 @@ commit authority.
 - `internal/observatory`: read-only evidence visualization
 - `cmd/mirage`: product CLI
 
-Detailed guarantees, designs, and operator instructions live in [`docs/`](docs/).
+For a full end-to-end explanation of the implementation, security model, lifecycle, evidence, CLI, testing strategy, and current limits, read the [MIRAGE Project Deep Dive](docs/PROJECT_DEEP_DIVE.md). Detailed guarantees, designs, and operator instructions live in [`docs/`](docs/).
 
 The [release acceptance guide](docs/release-acceptance.md) documents the opt-in rootless-Docker integration gate that should pass before cutting a release.
