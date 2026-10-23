@@ -658,7 +658,8 @@ const pageTemplateSource = `<!doctype html>
     summary { width: fit-content; padding: 11px 0; color: var(--muted); cursor: pointer; font-size: 13px; font-weight: 600; }
     summary::marker { color: var(--orange); }
     summary:focus-visible { outline: 2px solid var(--orange); outline-offset: 4px; border-radius: 2px; }
-    .proof-note { max-width: 780px; margin: 0; padding: 0 0 14px; color: var(--muted); font-size: 12px; line-height: 1.5; }\n    .proof-groups { padding: 6px 0 19px; display: grid; grid-template-columns: 1.2fr .9fr 1.1fr; gap: 34px; }
+    .proof-note { max-width: 780px; margin: 0; padding: 0 0 14px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .proof-groups { padding: 6px 0 19px; display: grid; grid-template-columns: 1.2fr .9fr 1.1fr; gap: 34px; }
     .proof-group { min-width: 0; }
     .proof-group h3 { margin: 0 0 10px; color: var(--ink); font-size: 12px; font-weight: 680; }
     .proof-grid { margin: 0; display: grid; grid-template-columns: 116px minmax(0, 1fr); gap: 9px 14px; }
