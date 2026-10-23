@@ -2,11 +2,14 @@
 
 package realcommit
 
-import "os"
+import (
+	"errors"
+	"os"
+)
 
 // MIRAGE's security backend and its durable transaction journal run inside
 // Linux/WSL. The native Windows frontend must route recovery to that backend.
-var errJournalLockBusy = ErrJournalUnsupportedPlatform
+var errJournalLockBusy = errors.New("journal lock is already held")
 
 func lockJournal(file *os.File) error {
 	return ErrJournalUnsupportedPlatform
