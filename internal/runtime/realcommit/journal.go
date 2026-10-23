@@ -31,8 +31,9 @@ const (
 	JournalPrepared           JournalState = "PREPARED"
 	JournalApplying           JournalState = "APPLYING"
 	JournalCommitted          JournalState = "COMMITTED"
-	JournalAborted             JournalState = "ABORTED"
-	JournalAfterStateObserved JournalState = "AFTER_STATE_OBSERVED"
+	JournalAborted                   JournalState = "ABORTED"
+	JournalBeforeStateObserved       JournalState = "BEFORE_STATE_OBSERVED"
+	JournalAfterStateObserved        JournalState = "AFTER_STATE_OBSERVED"
 	JournalRecoveryRequired   JournalState = "RECOVERY_REQUIRED"
 )
 
@@ -360,7 +361,7 @@ func (s *JournalStore) RecoverPending() ([]RecoveryResult, error) {
 		if err != nil {
 			return results, err
 		}
-		if record.State == JournalAfterStateObserved {
+		if record.State == JournalBeforeStateObserved || record.State == JournalAfterStateObserved {
 			results = append(results, RecoveryResult{
 				TransactionID: record.TransactionID, PlanHash: record.PlanHash,
 				Workspace: record.Workspace, Resource: record.Resource,
@@ -421,10 +422,16 @@ func (s *JournalStore) reconcileRecord(record journalRecord) RecoveryResult {
 		result.Reason = "target_mode_differs_from_recorded_mode"
 		return result
 	}
-	if digest == record.BeforeDigest {
+	if digest == record.BeforeDigest && record.State == JournalPrepared {
 		result.State = JournalAborted
 		result.Outcome = "NOT_COMMITTED"
-		result.Reason = "the bound workspace target still matches the pre-commit digest"
+		result.Reason = "the durable journal never recorded commit intent and the target still matches the pre-commit digest"
+		return result
+	}
+	if digest == record.BeforeDigest && record.State == JournalApplying {
+		result.State = JournalBeforeStateObserved
+		result.Outcome = "BEFORE_STATE_OBSERVED_ATTRIBUTION_UNCERTAIN"
+		result.Reason = "the before-state is present, but an external writer could have restored it after replacement"
 		return result
 	}
 	if digest == record.AfterDigest && record.State == JournalApplying {
@@ -588,6 +595,10 @@ func validateJournalRecord(record journalRecord) error {
 		if record.Outcome != "NOT_COMMITTED" {
 			return fmt.Errorf("%w: aborted state has invalid outcome", ErrJournalCorrupt)
 		}
+	case JournalBeforeStateObserved:
+		if record.Outcome != "BEFORE_STATE_OBSERVED_ATTRIBUTION_UNCERTAIN" {
+			return fmt.Errorf("%w: observed-before state has invalid outcome", ErrJournalCorrupt)
+		}
 	case JournalAfterStateObserved:
 		if record.Outcome != "AFTER_STATE_OBSERVED_ATTRIBUTION_UNCERTAIN" {
 			return fmt.Errorf("%w: observed-after state has invalid outcome", ErrJournalCorrupt)
@@ -603,7 +614,7 @@ func validateJournalRecord(record journalRecord) error {
 		return fmt.Errorf("%w: invalid resource binding", ErrJournalCorrupt)
 	}
 	switch record.State {
-	case JournalPrepared, JournalApplying, JournalCommitted, JournalAborted, JournalAfterStateObserved, JournalRecoveryRequired:
+	case JournalPrepared, JournalApplying, JournalCommitted, JournalAborted, JournalBeforeStateObserved, JournalAfterStateObserved, JournalRecoveryRequired:
 	default:
 		return fmt.Errorf("%w: unknown journal state %q", ErrJournalCorrupt, record.State)
 	}
