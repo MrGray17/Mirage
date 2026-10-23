@@ -83,7 +83,7 @@ The command reads and validates pending records, verifies the workspace still ha
 | Any pending state | Workspace identity, target mode, target type, or digest cannot be safely matched | `RECOVERY_REQUIRED` |
 | `COMMITTED` or `ABORTED` | Terminal record with valid checksum | Not a pending transaction |
 
-`AFTER_STATE_OBSERVED` remains visible on subsequent recovery runs rather than disappearing from the unresolved list. The operator must inspect this outcome. The fact that the target currently has the planned after digest does not by itself prove who produced that state.
+`BEFORE_STATE_OBSERVED` and `AFTER_STATE_OBSERVED` remain visible on subsequent recovery runs rather than disappearing from the unresolved list. The operator must inspect this outcome. The fact that the target currently has the planned after digest does not by itself prove who produced that state.
 
 A matching before-state is sufficient to classify a PREPARED transaction as not committed because durable commit intent was never recorded. After APPLYING is durable, however, a matching before-state is reported as BEFORE_STATE_OBSERVED_ATTRIBUTION_UNCERTAIN: a non-cooperating host writer might have restored those bytes after the commit rename. Likewise, an observed after-state does not prove MIRAGE produced it. If the target diverges from both recorded states, or the workspace path now resolves to a different directory, MIRAGE refuses to infer an outcome.
 
@@ -99,7 +99,7 @@ Recovery observes the real target. A matching recorded before-state is classifie
 
 ### Crash after durable `APPLYING` but before target rename
 
-A matching before-state is classified as `NOT_COMMITTED`. The recovery logic does not attempt the rename again.
+A matching before-state is classified as `BEFORE_STATE_OBSERVED_ATTRIBUTION_UNCERTAIN`, not `NOT_COMMITTED`. MIRAGE cannot prove that a non-cooperating host writer did not allow the rename and then restore the earlier bytes. Recovery does not attempt the rename again.
 
 ### Crash after target rename but before directory sync or `COMMITTED`
 
