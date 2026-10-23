@@ -23,15 +23,23 @@ func printHelp(writer io.Writer) {
 	fmt.Fprintln(writer, `MIRAGE
 Transactional security runtime for AI agents
 
+First run (deterministic demo; no provider API key or GitHub write):
+  mirage setup
+  mirage doctor
+  mirage run --open
+
 Usage:
   mirage run [malicious|benign] [--open] [--json]
-  mirage doctor
   mirage setup
+  mirage doctor [--json]
   mirage verify <receipt.json>
-  mirage version
+  mirage receipt verify <receipt.json>
+  mirage observatory --out <report.html> <receipt.json>
+  mirage version [--json]
 
-Run the verified security demo:
-  mirage run --open
+After a run:
+  mirage verify <receipt_file>
+  # Open the printed Observatory path to inspect the verified evidence.
 
 Advanced compatibility commands:
   mirage demo malicious|benign [options]
