@@ -31,7 +31,7 @@ const (
 	JournalPrepared           JournalState = "PREPARED"
 	JournalApplying           JournalState = "APPLYING"
 	JournalCommitted          JournalState = "COMMITTED"
-	JournalAborted            JournalState = "ABORTED"
+	JournalAborted             JournalState = "ABORTED"
 	JournalAfterStateObserved JournalState = "AFTER_STATE_OBSERVED"
 	JournalRecoveryRequired   JournalState = "RECOVERY_REQUIRED"
 )
