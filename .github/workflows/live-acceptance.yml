@@ -43,6 +43,31 @@ jobs:
           go-version: '1.27.3'
           cache: false
 
+      - name: Prepare the rootless systemd user session and delegate resource controllers
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          uid="$(id -u)"
+          user="$(id -un)"
+
+          # Hosted runners do not always have an active user manager for the
+          # non-interactive runner account. Rootless Docker's systemd cgroup
+          # driver needs that manager and explicit resource-controller delegation.
+          sudo mkdir -p /etc/systemd/system/user@.service.d
+          sudo tee /etc/systemd/system/user@.service.d/delegate.conf >/dev/null <<'EOF'
+          [Service]
+          Delegate=cpu cpuset io memory pids
+          EOF
+          sudo systemctl daemon-reload
+          sudo loginctl enable-linger "$user"
+          sudo systemctl start "user@${uid}.service"
+
+          runtime_dir="/run/user/${uid}"
+          test -S "$runtime_dir/bus"
+          printf 'XDG_RUNTIME_DIR=%s\n' "$runtime_dir" >> "$GITHUB_ENV"
+          printf 'DBUS_SESSION_BUS_ADDRESS=unix:path=%s/bus\n' "$runtime_dir" >> "$GITHUB_ENV"
+          systemctl show "user@${uid}.service" --property=ActiveState --property=Delegate
+
       - name: Set up rootless Docker
         uses: docker/setup-docker-action@7ec28a010822b4626af4874f9448a4b05ac6f3e5
         with:
