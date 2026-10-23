@@ -325,6 +325,14 @@ func (s *JournalStore) RecoverPending() ([]RecoveryResult, error) {
 		if err != nil {
 			return results, err
 		}
+		if record.State == JournalAfterStateObserved {
+			results = append(results, RecoveryResult{
+				TransactionID: record.TransactionID, PlanHash: record.PlanHash,
+				Workspace: record.Workspace, Resource: record.Resource,
+				PreviousState: record.State, State: record.State, Outcome: record.Outcome, Reason: record.Reason,
+			})
+			continue
+		}
 		if record.State != JournalPrepared && record.State != JournalApplying && record.State != JournalRecoveryRequired {
 			continue
 		}
