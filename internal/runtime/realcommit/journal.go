@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -30,7 +31,7 @@ const (
 	JournalPrepared           JournalState = "PREPARED"
 	JournalApplying           JournalState = "APPLYING"
 	JournalCommitted          JournalState = "COMMITTED"
-	JournalAborted             JournalState = "ABORTED"
+	JournalAborted            JournalState = "ABORTED"
 	JournalAfterStateObserved JournalState = "AFTER_STATE_OBSERVED"
 	JournalRecoveryRequired   JournalState = "RECOVERY_REQUIRED"
 )
@@ -111,6 +112,9 @@ type RecoveryResult struct {
 }
 
 func NewJournalStore(dir string) (*JournalStore, error) {
+	if runtime.GOOS == "windows" {
+		return nil, ErrJournalUnsupportedPlatform
+	}
 	if strings.TrimSpace(dir) == "" {
 		return nil, fmt.Errorf("%w: journal directory is empty", ErrJournalInvalid)
 	}
@@ -125,6 +129,9 @@ func NewJournalStore(dir string) (*JournalStore, error) {
 }
 
 func DefaultJournalStore() (*JournalStore, error) {
+	if runtime.GOOS == "windows" {
+		return nil, ErrJournalUnsupportedPlatform
+	}
 	configDir, err := os.UserConfigDir()
 	if err != nil {
 		return nil, fmt.Errorf("locate MIRAGE transaction state: %w", err)
