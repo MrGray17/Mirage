@@ -150,7 +150,7 @@ func ApplyWithJournal(plan *Plan, beforeReplace func() error, store *JournalStor
 			}
 			return err
 		}
-		return fmt.Errorf("%w: %v", ErrOutcomeUncertain, err)
+		return fmt.Errorf("%w: %w", ErrOutcomeUncertain, err)
 	}
 	if err := tx.MarkCommitted(); err != nil {
 		return fmt.Errorf("%w: persist committed outcome: %v", ErrOutcomeUncertain, err)
@@ -371,7 +371,6 @@ func temporaryRelative(target string) (string, error) {
 	}
 	return filepath.Join(filepath.Dir(target), workspace.CommitStagingPrefix+hex.EncodeToString(bytes)+".tmp"), nil
 }
-
 
 // syncRootDirectory flushes the directory entry replacement through the
 // already-open workspace root. It deliberately avoids reopening the workspace
