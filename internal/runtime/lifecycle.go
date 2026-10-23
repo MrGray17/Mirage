@@ -58,6 +58,7 @@ const (
 	StateConflicted
 	StateRejected
 	StateFailed
+	StateRecoveryRequired
 )
 
 func (s State) String() string {
@@ -96,6 +97,8 @@ func (s State) String() string {
 		return "REJECTED"
 	case StateFailed:
 		return "FAILED"
+	case StateRecoveryRequired:
+		return "RECOVERY_REQUIRED"
 	default:
 		return "UNKNOWN"
 	}
@@ -128,6 +131,7 @@ type Lifecycle struct {
 	decision             reconcile.Decision
 	manifest             *RunManifest
 	commitPlan           *realcommit.Plan
+	commitJournal        *realcommit.JournalStore
 	gitBinding           *gitbinding.Binding
 	gitPlan              *gitplan.Plan
 	gitArtifact          *gitcommit.Artifact
@@ -250,6 +254,13 @@ func NewLifecycleWithClock(sandbox Sandbox, now func() time.Time) (*Lifecycle, e
 // NewBoundLifecycle creates the authority-bearing M4.3 lifecycle. All later
 // security operations derive their inputs exclusively from the manifest.
 func NewBoundLifecycle(manifest *RunManifest) (*Lifecycle, error) {
+	return NewBoundLifecycleWithJournal(manifest, nil)
+}
+
+// NewBoundLifecycleWithJournal binds an optional durable local-commit journal.
+// Production CLI paths pass a persistent store; tests and historical callers
+// may continue to exercise the non-journaled low-level lifecycle explicitly.
+func NewBoundLifecycleWithJournal(manifest *RunManifest, journal *realcommit.JournalStore) (*Lifecycle, error) {
 	if manifest == nil || manifest.identity == "" || manifest.clock == nil || manifest.sandbox == nil {
 		return nil, fmt.Errorf("%w: complete run manifest is required", ErrInvalidRuntime)
 	}
@@ -257,10 +268,11 @@ func NewBoundLifecycle(manifest *RunManifest) (*Lifecycle, error) {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidRuntime, err)
 	}
 	return &Lifecycle{
-		sandbox:  manifest.sandbox,
-		clock:    manifest.clock,
-		state:    StateCreated,
-		manifest: manifest,
+		sandbox:       manifest.sandbox,
+		clock:         manifest.clock,
+		state:         StateCreated,
+		manifest:      manifest,
+		commitJournal: journal,
 	}, nil
 }
 
@@ -955,9 +967,15 @@ func (l *Lifecycle) Commit() error {
 		l.state = StateRejected
 		return fmt.Errorf("%w: precommit plan identity changed", ErrCommitAuthority)
 	}
-	if err := realcommit.Apply(fresh, func() error { return l.finalCommitAuthority(fresh) }); err != nil {
-		l.state = commitFailureState(err)
-		return fmt.Errorf("apply real commit plan: %w", err)
+	var applyErr error
+	if l.commitJournal != nil {
+		applyErr = realcommit.ApplyWithJournal(fresh, func() error { return l.finalCommitAuthority(fresh) }, l.commitJournal)
+	} else {
+		applyErr = realcommit.Apply(fresh, func() error { return l.finalCommitAuthority(fresh) })
+	}
+	if applyErr != nil {
+		l.state = commitFailureState(applyErr)
+		return fmt.Errorf("apply real commit plan: %w", applyErr)
 	}
 	l.state = StateCommitted
 	return nil
@@ -1079,6 +1097,8 @@ func snapshotEntry(snapshot *tree.Snapshot, resource string) (tree.Entry, bool) 
 
 func commitFailureState(err error) State {
 	switch {
+	case errors.Is(err, realcommit.ErrOutcomeUncertain):
+		return StateRecoveryRequired
 	case errors.Is(err, realcommit.ErrCleanup), errors.Is(err, realcommit.ErrRevalidation):
 		return StateFailed
 	case errors.Is(err, ErrRealStateConflict), errors.Is(err, realcommit.ErrConflict):
