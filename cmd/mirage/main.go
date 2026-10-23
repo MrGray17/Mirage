@@ -293,25 +293,43 @@ func emitDemoResult(writer io.Writer, result demo.Result, graphHash, receiptHash
 	fmt.Fprintf(writer, "Task:\n%s\n\n", result.Task)
 	fmt.Fprintf(writer, "Sandbox:\nREADY  uid=%s  network=%s  quota=%d bytes\n\n", result.SandboxUID, result.SandboxNetwork, result.WorkspaceQuotaBytes)
 	fmt.Fprintln(writer, "Agent Effects:")
+	fmt.Fprintln(writer, "Legend: + authorized  x denied  ? unrecognized disposition")
 	authorized, denied := 0, 0
 	for _, attempt := range result.Attempts {
-		marker := "+"
-		if attempt.Disposition == "DENIED" {
+		marker := "?"
+		switch attempt.Disposition {
+		case "DENIED":
 			marker = "x"
 			denied++
-		} else if attempt.Disposition == "AUTHORIZED" {
+		case "AUTHORIZED":
+			marker = "+"
 			authorized++
 		}
 		fmt.Fprintf(writer, "%s %-6s %-31s %s\n", marker, attempt.Operation, attempt.Resource, attempt.Disposition)
 	}
-	fmt.Fprintf(writer, "\nObserved:\n%d trusted final-state mutation\n\n", len(result.Mutations))
+	mutationWord := "mutations"
+	if len(result.Mutations) == 1 {
+		mutationWord = "mutation"
+	}
+	fmt.Fprintf(writer, "\nObserved:\n%d trusted final-state %s\n\n", len(result.Mutations), mutationWord)
 	fmt.Fprintf(writer, "Verification:\n%s  plan=%s\n\n", result.Verification, result.ReconciliationPlan)
-	fmt.Fprintf(writer, "Commit:\n%s  resource=%s  mode=%04o\n\n", result.CommitPlan, result.CommittedResource, result.RealModeAfter)
+	committed := 0
+	if result.Committed {
+		committed = len(result.Mutations)
+		fmt.Fprintf(writer, "Commit:\nCOMMITTED  plan=%s  resource=%s  mode=%04o\n\n", result.CommitPlan, result.CommittedResource, result.RealModeAfter)
+	} else {
+		fmt.Fprintln(writer, "Commit:\nNOT COMMITTED")
+		fmt.Fprintln(writer)
+	}
 	fmt.Fprintf(writer, "Evidence:\nprocess_tree_stopped=%t  secret_preserved=%t  cleanup_complete=%t\n", result.ProcessTreeStopped, result.SecretPreserved, result.DisposableCleaned && result.SandboxArtifactsClean)
 	fmt.Fprintf(writer, "effect_graph=%s\nreceipt=%s\nreceipt_file=%s\n", graphHash, receiptHash, receiptPath)
 	fmt.Fprintf(writer, "observatory=%s\n", observatoryPath)
 	fmt.Fprintf(writer, "real_workspace=%s\n\n", result.RealWorkspace)
-	fmt.Fprintf(writer, "RESULT:\nAgent attempted %d effects. MIRAGE authorized %d, denied %d, and committed %d.\n", len(result.Attempts), authorized, denied, len(result.Mutations))
+	effectWord := "effects"
+	if len(result.Attempts) == 1 {
+		effectWord = "effect"
+	}
+	fmt.Fprintf(writer, "RESULT:\nAgent attempted %d %s. MIRAGE authorized %d, denied %d, and committed %d.\n", len(result.Attempts), effectWord, authorized, denied, committed)
 }
 
 func buildDemoEvidence(result demo.Result) (*effectgraph.Graph, *receipt.Receipt, error) {

@@ -33,7 +33,7 @@ func TestRenderVerifiedMaliciousExecutionInspector(t *testing.T) {
 		"READ", "/workspace/.env", "POST", "http://198.51.100.1/", "/etc/mirage-protected",
 		"Execution history", "Effect 03", "WRITE", "/workspace/README.md", "AUTHORIZED", "Observed", "MODIFY", "PASSED", "COMMITTED",
 		"Trust boundary", "Reality", "README.md", shortDigest(testBeforeDigest), shortDigest(testAfterDigest),
-		"CommittedEffects &sube; AuthorizedEffects", `Receipt <strong>VALID</strong>`, "Cryptographic proof",
+		"CommittedEffects &sube; AuthorizedEffects", `Receipt integrity <strong>VALID</strong>`, "Integrity details", "not a digital signature", "independent attestation against a compromised host",
 		"Integrity", "Run", "Plans", `via <code>snapshot-secret-exclusion</code>`,
 		evidence.SHA256, evidence.EffectGraphHash, evidence.ContractHash, evidence.VerificationPlan, evidence.CommitPlan,
 		testBeforeDigest, testAfterDigest,
@@ -79,7 +79,7 @@ func TestRenderRejectedAgentReceiptShowsObservedButUncommittedTruth(t *testing.T
 		t.Fatal(err)
 	}
 	text := string(page)
-	for _, wanted := range []string{"REJECTED", "ZERO COMMITTED MUTATIONS", "Reality unchanged", "filesystem.default_deny", "Completed agent actions", "read_file", "/workspace/README.md", "Receipt <strong>VALID</strong>"} {
+	for _, wanted := range []string{"REJECTED", "ZERO COMMITTED MUTATIONS", "Reality unchanged", "filesystem.default_deny", "Completed agent actions", "read_file", "/workspace/README.md", "Receipt integrity <strong>VALID</strong>"} {
 		if !strings.Contains(text, wanted) {
 			t.Errorf("page omitted %q", wanted)
 		}
@@ -127,7 +127,7 @@ func TestRenderVerifiedBenignReceipt(t *testing.T) {
 	rendered := string(page)
 	for _, required := range []string{
 		`<strong>1</strong> effects`, `<strong class="blocked">0</strong> blocked`, `<strong class="committed">1</strong> committed`,
-		"Effect 01", "WRITE", "/workspace/README.md", "COMMITTED", "Receipt <strong>VALID</strong>",
+		"Effect 01", "WRITE", "/workspace/README.md", "COMMITTED", "Receipt integrity <strong>VALID</strong>",
 	} {
 		if !strings.Contains(rendered, required) {
 			t.Errorf("rendered page missing %q", required)
@@ -284,7 +284,7 @@ func TestNoJavaScriptFallbackRetainsExecutionEvidence(t *testing.T) {
 		`POST`, `http://198.51.100.1/`, `sandbox-network-none`,
 		`WRITE`, `/etc/mirage-protected`, `read-only-root`,
 		`Observed`, `Verified`, `Trust boundary`, `Committed`, `Reality`,
-		`CommittedEffects &sube; AuthorizedEffects`, `Receipt <strong>VALID</strong>`,
+		`CommittedEffects &sube; AuthorizedEffects`, `Receipt integrity <strong>VALID</strong>`,
 	} {
 		if !strings.Contains(rendered, required) {
 			t.Errorf("no-JavaScript fallback missing %q", required)
