@@ -1,0 +1,134 @@
+name: live-acceptance
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/live-acceptance.yml'
+      - 'scripts/test-live.sh'
+      - 'cmd/mirage/**'
+      - 'internal/runtime/**'
+      - 'internal/demo/**'
+      - 'build/m44-codex-agent/**'
+      - 'go.mod'
+      - 'go.sum'
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: Commit, branch, or tag to run the release gate against
+        required: true
+        default: main
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  rootless-live-acceptance:
+    name: Rootless Docker release gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out the release target
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          # For the bootstrap PR, test the exact current base SHA rather than
+          # accidentally testing only the workflow-changing PR merge commit.
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || inputs.target_ref || github.sha }}
+          fetch-depth: 1
+
+      - name: Set up Go 1.27.3
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: '1.27.3'
+          cache: false
+
+      - name: Set up rootless Docker
+        uses: docker/setup-docker-action@7ec28a010822b4626af4874f9448a4b05ac6f3e5
+        with:
+          rootless: true
+          set-host: true
+
+      - name: Verify the daemon is genuinely rootless and cgroup v2/systemd backed
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(id -u)" -ne 0
+          docker info
+          security_options="$(docker info --format '{{json .SecurityOptions}}')"
+          grep -q 'rootless' <<< "$security_options"
+          grep -q 'seccomp' <<< "$security_options"
+          test "$(docker info --format '{{.CgroupDriver}}')" = "systemd"
+          test "$(docker info --format '{{.CgroupVersion}}')" = "2"
+          printf 'Verified security options: %s\n' "$security_options"
+
+      - name: Pull the immutable hostile fixture
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          image='busybox@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0'
+          docker pull "$image"
+          {
+            printf 'MIRAGE_HOSTILE_IMAGE=%s\n' "$image"
+            printf 'MIRAGE_AGENT_IMAGE=%s\n' "$image"
+            printf 'MIRAGE_HELPER_IMAGE=%s\n' "$image"
+            printf 'MIRAGE_DEMO_IMAGE=%s\n' "$image"
+          } >> "$GITHUB_ENV"
+
+      - name: Build and digest-pin the Codex fixture in a temporary local registry
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          registry_container='mirage-live-acceptance-registry'
+          image_tag='localhost:5000/mirage-codex-agent:acceptance'
+
+          # Host networking keeps the registry reachable from the rootless
+          # daemon itself; the registry exists only for this job.
+          docker run --detach --name "$registry_container" --network host registry:3.1.2
+          docker build --tag "$image_tag" --file build/m44-codex-agent/Dockerfile .
+
+          if ! docker push "$image_tag" > /tmp/mirage-codex-push.log 2>&1; then
+            cat /tmp/mirage-codex-push.log
+            exit 1
+          fi
+          cat /tmp/mirage-codex-push.log
+
+          digest="$(sed -nE 's/.*digest: (sha256:[0-9a-f]{64}).*/\1/p' /tmp/mirage-codex-push.log | tail -n 1)"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo 'Could not extract the immutable Codex image manifest digest.' >&2
+            exit 1
+          }
+          image_ref="localhost:5000/mirage-codex-agent@$digest"
+          docker pull "$image_ref"
+          printf 'MIRAGE_CODEX_IMAGE=%s\n' "$image_ref" >> "$GITHUB_ENV"
+          printf 'Codex acceptance image: %s\n' "$image_ref"
+
+      - name: Run the release acceptance gate and capture evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          {
+            printf 'Tested commit SHA: %s\n' "$(git rev-parse HEAD)"
+            printf 'Git status (must be empty):\n'
+            git status --short
+            printf '\nGo version:\n'
+            go version
+            printf '\nDocker daemon:\n'
+            docker info
+            printf '\nLive acceptance output:\n'
+            ./scripts/test-live.sh
+          } 2>&1 | tee live-acceptance.log
+
+      - name: Upload acceptance transcript
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mirage-live-acceptance-${{ github.run_id }}
+          path: live-acceptance.log
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Remove the temporary registry
+        if: always()
+        shell: bash
+        run: docker rm --force mirage-live-acceptance-registry || true
