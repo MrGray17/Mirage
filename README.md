@@ -172,6 +172,22 @@ receipt independently with:
 mirage verify <receipt_file>
 ```
 
+### Recover an interrupted local commit
+
+The product CLI records local commit intent in a private per-user transaction
+journal. After an interrupted operation, run recovery in the Linux backend
+(or the configured Ubuntu distribution when using Windows + WSL2):
+
+```bash
+mirage recover
+```
+
+Recovery inspects incomplete transactions only. It never replays an agent's
+mutation or modifies the workspace. If the planned after-state is present but
+the durable completion marker is missing, MIRAGE reports an attribution-uncertain
+outcome and exits nonzero for operator inspection. Recovery does not reconstruct
+a receipt that was never persisted. See the [crash-safe commit journal design](docs/crash-safe-commit-journal.md).
+
 See [the competition operator guide](docs/competition-demo.md) for presentation
 details.
 
@@ -306,9 +322,8 @@ MIRAGE v1 intentionally does **not** provide:
   or special-object commits;
 - a general shell-capable Qwen agent or extensible tool framework;
 - complete ACL/xattr/ownership preservation;
-- crash-durable evidence or intent recovery;
-- guaranteed evidence persistence if the process crashes after a successful
-  real commit;
+- a complete signed/hash-chained durable audit log or full receipt
+  reconstruction after a host crash;
 - the M5.4 exact GitHub pull-request effect;
 - a complete signed/hash-chained durable audit log;
 - universal syscall monitoring or syscall-perfect observation.
@@ -324,7 +339,7 @@ commit authority.
 - `internal/contracts`: canonical effect contracts and authorization
 - `internal/runtime/docker`: rootless hostile-process containment
 - `internal/runtime/tree` and `reconcile`: frozen final-state observation
-- `internal/runtime/realcommit`: narrow trusted real-world commit
+- `internal/runtime/realcommit`: narrow trusted real-world commit and durable transaction recovery
 - `internal/runtime/qwenagent`: constrained untrusted local-model driver
 - `internal/runtime/modelbroker`: trusted host-side provider boundary
 - `internal/effectgraph`: deterministic causal evidence
