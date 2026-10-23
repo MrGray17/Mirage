@@ -183,10 +183,13 @@ mirage recover
 ```
 
 Recovery inspects incomplete transactions only. It never replays an agent's
-mutation or modifies the workspace. If the planned after-state is present but
-the durable completion marker is missing, MIRAGE reports an attribution-uncertain
-outcome and exits nonzero for operator inspection. Recovery does not reconstruct
-a receipt that was never persisted. See the [crash-safe commit journal design](docs/crash-safe-commit-journal.md).
+mutation or modifies the workspace. Once a durable `APPLYING` intent exists, both
+the recorded before-state and after-state are reported as attribution-uncertain:
+a non-cooperating host writer may have restored the earlier bytes, or written the
+later bytes, independently. Such outcomes exit nonzero for operator inspection.
+Only a still-matching before-state with a `PREPARED` record, before commit intent,
+can be classified as `NOT_COMMITTED`. Recovery does not reconstruct a receipt that
+was never persisted. See the [crash-safe commit journal design](docs/crash-safe-commit-journal.md).
 
 See [the competition operator guide](docs/competition-demo.md) for presentation
 details.
