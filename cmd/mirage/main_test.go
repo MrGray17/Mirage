@@ -111,13 +111,39 @@ func TestEmitDemoResultCountsActualEvidence(t *testing.T) {
 			{Operation: "READ", Resource: "/workspace/.env", Disposition: "DENIED"},
 			{Operation: "WRITE", Resource: "/workspace/README.md", Disposition: "AUTHORIZED"},
 		},
-		Mutations: []demo.Mutation{{Operation: "MODIFY", Resource: "/workspace/README.md"}}, Verification: "PASSED", ReconciliationPlan: "sha256:plan", CommitPlan: "sha256:commit", CommittedResource: "/workspace/README.md", RealModeAfter: 0o640, ProcessTreeStopped: true, SecretPreserved: true, DisposableCleaned: true, SandboxArtifactsClean: true, RealWorkspace: "/real",
+		Mutations: []demo.Mutation{{Operation: "MODIFY", Resource: "/workspace/README.md"}}, Verification: "PASSED", ReconciliationPlan: "sha256:plan", CommitPlan: "sha256:commit", Committed: true, CommittedResource: "/workspace/README.md", RealModeAfter: 0o640, ProcessTreeStopped: true, SecretPreserved: true, DisposableCleaned: true, SandboxArtifactsClean: true, RealWorkspace: "/real",
 	}, "sha256:graph", "sha256:receipt", "/receipt.json", "/observatory.html")
 	got := output.String()
-	for _, expected := range []string{"Agent attempted 2 effects", "authorized 1", "denied 1", "committed 1", "process_tree_stopped=true", "effect_graph=sha256:graph", "receipt=sha256:receipt", "observatory=/observatory.html"} {
+	for _, expected := range []string{"Agent attempted 2 effects", "Legend: + authorized  x denied  ? unrecognized disposition", "authorized 1", "denied 1", "committed 1", "COMMITTED  plan=sha256:commit", "process_tree_stopped=true", "effect_graph=sha256:graph", "receipt=sha256:receipt", "observatory=/observatory.html"} {
 		if !strings.Contains(got, expected) {
 			t.Errorf("output missing %q:\n%s", expected, got)
 		}
+	}
+}
+
+func TestEmitDemoResultDoesNotConfuseObservedMutationsWithCommit(t *testing.T) {
+	var output bytes.Buffer
+	emitDemoResult(&output, demo.Result{
+		RunID: "demo-rejected", Task: "Reject an unrecognized effect",
+		Attempts: []demo.Attempt{{Operation: "WRITE", Resource: "/workspace/README.md", Disposition: "UNKNOWN"}},
+		Mutations: []demo.Mutation{{Operation: "MODIFY", Resource: "/workspace/README.md"}},
+		Verification: "REJECTED", RealWorkspace: "/real",
+	}, "sha256:graph", "sha256:receipt", "/receipt.json", "/observatory.html")
+
+	got := output.String()
+	for _, expected := range []string{
+		"Legend: + authorized  x denied  ? unrecognized disposition",
+		"? WRITE",
+		"1 trusted final-state mutation",
+		"Commit:\nNOT COMMITTED",
+		"Agent attempted 1 effects. MIRAGE authorized 0, denied 0, and committed 0.",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Errorf("output missing %q:\n%s", expected, got)
+		}
+	}
+	if strings.Contains(got, "committed 1") {
+		t.Fatalf("observed mutation was incorrectly reported as committed:\n%s", got)
 	}
 }
 
