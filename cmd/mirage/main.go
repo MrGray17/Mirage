@@ -28,8 +28,8 @@ import (
 	"github.com/MrGray17/Mirage/internal/runtime/gitpublication"
 	"github.com/MrGray17/Mirage/internal/runtime/modelbroker"
 	"github.com/MrGray17/Mirage/internal/runtime/qwenagent"
-	"github.com/MrGray17/Mirage/internal/runtime/workspace"
 	"github.com/MrGray17/Mirage/internal/runtime/realcommit"
+	"github.com/MrGray17/Mirage/internal/runtime/workspace"
 )
 
 const (
@@ -1062,7 +1062,6 @@ func cleanupRuntime(lifecycle *hostileruntime.Lifecycle, disposable *workspace.D
 	}
 	return nil
 }
-
 
 func newDurableLifecycle(manifest *hostileruntime.RunManifest) (*hostileruntime.Lifecycle, error) {
 	store, err := realcommit.DefaultJournalStore()
