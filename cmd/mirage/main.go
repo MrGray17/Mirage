@@ -29,6 +29,7 @@ import (
 	"github.com/MrGray17/Mirage/internal/runtime/modelbroker"
 	"github.com/MrGray17/Mirage/internal/runtime/qwenagent"
 	"github.com/MrGray17/Mirage/internal/runtime/workspace"
+	"github.com/MrGray17/Mirage/internal/runtime/realcommit"
 )
 
 const (
@@ -523,7 +524,13 @@ func runHostileFixture(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return errors.Join(err, disposable.Cleanup())
 	}
-	lifecycle, err := hostileruntime.NewBoundLifecycle(manifest)
+	lifecycle, err := hostileruntime.NewBoundLifecycleWithJournal(manifest, func() *realcommit.JournalStore {
+			store, storeErr := realcommit.DefaultJournalStore()
+			if storeErr != nil {
+				err = storeErr
+			}
+			return store
+		}())
 	if err != nil {
 		return errors.Join(err, disposable.Cleanup())
 	}
@@ -806,7 +813,13 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return errors.Join(err, closeBroker())
 	}
-	lifecycle, err := hostileruntime.NewBoundLifecycle(manifest)
+	lifecycle, err := hostileruntime.NewBoundLifecycleWithJournal(manifest, func() *realcommit.JournalStore {
+			store, storeErr := realcommit.DefaultJournalStore()
+			if storeErr != nil {
+				err = storeErr
+			}
+			return store
+		}())
 	if err != nil {
 		return errors.Join(err, closeBroker())
 	}
