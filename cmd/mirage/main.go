@@ -88,6 +88,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return runSetup(args[1:], stdout, stderr)
 	case "version":
 		return runVersion(args[1:], stdout, stderr)
+	case "recover":
+		return runRecover(args[1:], stdout, stderr)
 	case "help", "--help", "-h":
 		printHelp(stdout)
 		return nil
@@ -97,7 +99,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 }
 
 func usageError() error {
-	return errors.New("usage: mirage run [malicious|benign] [options]; try 'mirage help'")
+	return errors.New("usage: mirage run [malicious|benign] [options]; mirage recover [--journal-dir DIR]; try 'mirage help'")
 }
 
 func runDemo(scenario string, args []string, stdout, stderr io.Writer) error {
