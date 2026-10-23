@@ -52,7 +52,7 @@ func runRecover(args []string, stdout, stderr io.Writer) error {
 	unresolved := false
 	for _, result := range results {
 		fmt.Fprintf(stdout,
-			"transaction=%s state=%s outcome=%s resource=%s workspace=%s reason=%q\n",
+			"transaction=%s state=%s outcome=%s resource=%q workspace=%q reason=%q\n",
 			result.TransactionID, result.State, result.Outcome, result.Resource, result.Workspace, result.Reason,
 		)
 		if result.State == realcommit.JournalRecoveryRequired || result.State == realcommit.JournalAfterStateObserved {
