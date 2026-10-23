@@ -85,7 +85,7 @@ The command reads and validates pending records, verifies the workspace still ha
 
 `AFTER_STATE_OBSERVED` remains visible on subsequent recovery runs rather than disappearing from the unresolved list. The operator must inspect this outcome. The fact that the target currently has the planned after digest does not by itself prove who produced that state.
 
-If the recorded before-state is still present, MIRAGE can classify the interrupted transaction as not committed because the current target still matches the recorded precondition and the workspace root identity is unchanged. If the target diverges from both recorded states, or the workspace path now resolves to a different directory, MIRAGE refuses to infer an outcome.
+A matching before-state is sufficient to classify a PREPARED transaction as not committed because durable commit intent was never recorded. After APPLYING is durable, however, a matching before-state is reported as BEFORE_STATE_OBSERVED_ATTRIBUTION_UNCERTAIN: a non-cooperating host writer might have restored those bytes after the commit rename. Likewise, an observed after-state does not prove MIRAGE produced it. If the target diverges from both recorded states, or the workspace path now resolves to a different directory, MIRAGE refuses to infer an outcome.
 
 ## Failure semantics
 
