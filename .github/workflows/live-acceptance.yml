@@ -110,7 +110,7 @@ jobs:
           # Host networking keeps the registry reachable from the rootless
           # daemon itself; the registry exists only for this job.
           docker run --detach --name "$registry_container" --network host registry:3.1.2
-          docker build --tag "$image_tag" --file build/m44-codex-agent/Dockerfile .
+          docker build --tag "$image_tag" --file build/m44-codex-agent/Dockerfile build/m44-codex-agent
 
           if ! docker push "$image_tag" > /tmp/mirage-codex-push.log 2>&1; then
             cat /tmp/mirage-codex-push.log
