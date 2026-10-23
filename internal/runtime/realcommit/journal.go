@@ -41,6 +41,7 @@ var (
 	ErrJournalDuplicate           = errors.New("commit transaction already has a journal record")
 	ErrJournalCorrupt             = errors.New("commit journal record is corrupt")
 	ErrJournalUnsupportedPlatform = errors.New("durable commit journal locking is unsupported on this platform")
+	ErrJournalFull                = errors.New("commit journal record limit reached")
 	ErrOutcomeUncertain           = errors.New("real commit outcome requires recovery")
 )
 
@@ -163,6 +164,15 @@ func ensurePrivateDirectory(path string) error {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
 		return fmt.Errorf("directory permissions could not be restricted")
 	}
+	// Persist both the directory metadata and its name in the parent directory.
+	// A journal must not claim durability while its containing directory entry
+	// itself is still only in cache.
+	if err := syncDirectory(path); err != nil {
+		return fmt.Errorf("sync private directory: %w", err)
+	}
+	if err := syncDirectory(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("sync parent directory: %w", err)
+	}
 	return nil
 }
 
@@ -177,6 +187,24 @@ func (s *JournalStore) Begin(plan *Plan) (*JournalTransaction, error) {
 	if err != nil {
 		return nil, err
 	}
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		_ = unlockJournal(lockFile)
+		_ = lockFile.Close()
+		return nil, fmt.Errorf("%w: inspect journal capacity: %v", ErrJournalInvalid, err)
+	}
+	journalRecords := 0
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".json") {
+			journalRecords++
+		}
+	}
+	if journalRecords >= maxJournalFiles {
+		_ = unlockJournal(lockFile)
+		_ = lockFile.Close()
+		return nil, fmt.Errorf("%w: found %d records; inspect and archive records before starting more journaled commits", ErrJournalFull, journalRecords)
+	}
+
 	recordPath := s.recordPath(plan.hash)
 	if _, err := os.Lstat(recordPath); err == nil {
 		_ = unlockJournal(lockFile)
@@ -509,6 +537,9 @@ func (s *JournalStore) readRecord(path string) (journalRecord, error) {
 	if err := validateJournalRecord(record); err != nil {
 		return record, err
 	}
+	if filepath.Base(path) != record.TransactionID+".json" {
+		return record, fmt.Errorf("%w: record filename does not match transaction identity", ErrJournalCorrupt)
+	}
 	return record, nil
 }
 
@@ -524,13 +555,42 @@ func ensureJSONEOF(decoder *json.Decoder) error {
 }
 
 func validateJournalRecord(record journalRecord) error {
-	if record.Version != journalVersion || record.TransactionID == "" || record.PlanHash == "" ||
-		record.TransactionID != transactionID(record.PlanHash) ||
+	if record.Version != journalVersion || !validSHA256(record.PlanHash) ||
+		record.TransactionID != transactionID(record.PlanHash) || len(record.TransactionID) != 64 ||
 		record.ManifestHash == "" || record.AuthorityHash == "" || record.RealBaselineIdentity == "" ||
-		!filepath.IsAbs(record.Workspace) || record.WorkspaceIdentity == "" ||
-		record.BeforeDigest == "" || record.AfterDigest == "" || record.RealMode > 0o777 ||
+		!filepath.IsAbs(record.Workspace) || filepath.Clean(record.Workspace) != record.Workspace || record.WorkspaceIdentity == "" ||
+		!validSHA256(record.BeforeDigest) || !validSHA256(record.AfterDigest) || record.RealMode > 0o777 ||
 		record.CreatedAt == "" || record.UpdatedAt == "" {
 		return fmt.Errorf("%w: required field or identity is invalid", ErrJournalCorrupt)
+	}
+	createdAt, createdErr := time.Parse(time.RFC3339Nano, record.CreatedAt)
+	updatedAt, updatedErr := time.Parse(time.RFC3339Nano, record.UpdatedAt)
+	if createdErr != nil || updatedErr != nil || updatedAt.Before(createdAt) {
+		return fmt.Errorf("%w: transaction timestamps are invalid", ErrJournalCorrupt)
+	}
+	switch record.State {
+	case JournalPrepared, JournalApplying:
+		if record.Outcome != "PENDING" {
+			return fmt.Errorf("%w: non-terminal state has outcome %q", ErrJournalCorrupt, record.Outcome)
+		}
+	case JournalCommitted:
+		if record.Outcome != "COMMITTED" {
+			return fmt.Errorf("%w: committed state has invalid outcome", ErrJournalCorrupt)
+		}
+	case JournalAborted:
+		if record.Outcome != "NOT_COMMITTED" {
+			return fmt.Errorf("%w: aborted state has invalid outcome", ErrJournalCorrupt)
+		}
+	case JournalAfterStateObserved:
+		if record.Outcome != "AFTER_STATE_OBSERVED_ATTRIBUTION_UNCERTAIN" {
+			return fmt.Errorf("%w: observed-after state has invalid outcome", ErrJournalCorrupt)
+		}
+	case JournalRecoveryRequired:
+		if record.Outcome != "RECOVERY_REQUIRED" {
+			return fmt.Errorf("%w: recovery-required state has invalid outcome", ErrJournalCorrupt)
+		}
+	default:
+		return fmt.Errorf("%w: unknown journal state %q", ErrJournalCorrupt, record.State)
 	}
 	if _, err := canonicalRelative(record.Resource); err != nil {
 		return fmt.Errorf("%w: invalid resource binding", ErrJournalCorrupt)
@@ -600,4 +660,17 @@ func unlockAndClose(file *os.File) {
 	}
 	_ = unlockJournal(file)
 	_ = file.Close()
+}
+
+
+func validSHA256(value string) bool {
+	if len(value) != len("sha256:")+64 || !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	digest := strings.TrimPrefix(value, "sha256:")
+	if strings.ToLower(digest) != digest {
+		return false
+	}
+	decoded, err := hex.DecodeString(digest)
+	return err == nil && len(decoded) == sha256.Size
 }
