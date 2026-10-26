@@ -223,6 +223,33 @@ func TestQwenPatchFileRequiresOneExactMatch(t *testing.T) {
 	}
 }
 
+func TestQwenPatchFileReplacementRejectsNonUTF8(t *testing.T) {
+	t.Parallel()
+	workspace := t.TempDir()
+	file := filepath.Join(workspace, "README.md")
+	before := []byte{0xff, 'a'}
+	if err := os.WriteFile(file, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	selected, err := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"README.md","append":null,"search":"a","replace":"b"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = execute(root, selected, defaults(Config{}))
+	if !errors.Is(err, ErrPolicy) {
+		t.Fatalf("execute error = %v, want ErrPolicy", err)
+	}
+	after, err := os.ReadFile(file)
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("failed patch changed non-UTF-8 file: bytes=%v error=%v", after, err)
+	}
+}
+
 func TestQwenPatchFileReplacementRespectsWriteLimit(t *testing.T) {
 	t.Parallel()
 	workspace := t.TempDir()
