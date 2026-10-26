@@ -11,18 +11,25 @@ only model actions are a bounded sequence:
 ```text
 list_files
 → read_file (one rooted regular file)
-→ patch_file (append to that same rooted file)
+→ patch_file (append or exact search/replace in that same rooted file)
 → finish
 ```
 
-Qwen chooses the file and appended text. The driver applies those choices only
-inside `/workspace`. Go's rooted filesystem API rejects absolute paths,
+Qwen chooses the file and proposed edit. The driver applies those choices only
+inside `/workspace`. Replacement requires a non-empty literal search string
+that matches exactly once in the previously read UTF-8 text. Missing, duplicate,
+overlapping, non-UTF-8, and no-op replacements fail closed; search is not a
+regular expression. Append remains available for end-of-file insertions. Go's
+rooted filesystem API rejects absolute paths,
 traversal, and symlink escapes. `.env` and `.git` are unavailable through the
 driver, file and transcript sizes are bounded, and malformed or repeated
 actions fail closed.
 
-This sequence is intentionally not a general coding environment. It is the
-smallest reproducible agent loop needed to demonstrate a real local model edit.
+This sequence is intentionally not a general coding environment. It is a
+bounded local coding loop: Qwen can append or perform one exact, unique
+search/replace in one previously read existing file. Creating files, editing
+multiple files, shell access, and arbitrary tool use remain outside this v1
+integration's scope.
 MIRAGE's trusted frozen-tree scan, canonical diff, contract verifier, freshness
 checks, and real commit engine remain the only authority over reality.
 

@@ -21,6 +21,7 @@ func TestStrictActionProtocol(t *testing.T) {
 		`{"tool":"list_files","arguments":{}}`,
 		`{"tool":"read_file","arguments":{"path":"README.md"}}`,
 		`{"tool":"patch_file","arguments":{"path":"README.md","append":"changed"}}`,
+		`{"tool":"patch_file","arguments":{"path":"README.md","append":null,"search":"before","replace":"after"}}`,
 		`{"tool":"finish","arguments":{}}`,
 	}
 	for _, encoded := range valid {
@@ -173,6 +174,81 @@ func TestRootedFileOperationsAndLimits(t *testing.T) {
 	}
 }
 
+func TestQwenPatchFileRequiresOneExactMatch(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		before      string
+		search      string
+		replacement string
+	}{
+		{name: "missing", before: "alpha beta", search: "missing", replacement: "gamma"},
+		{name: "duplicate", before: "alpha alpha", search: "alpha", replacement: "gamma"},
+		{name: "overlapping", before: "aaa", search: "aa", replacement: "b"},
+		{name: "empty-search", before: "alpha", search: "", replacement: "beta"},
+		{name: "no-op", before: "alpha", search: "alpha", replacement: "alpha"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			file := filepath.Join(workspace, "README.md")
+			if err := os.WriteFile(file, []byte(test.before), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			root, err := os.OpenRoot(workspace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			encoded := fmt.Sprintf(
+				`{"tool":"patch_file","arguments":{"path":"README.md","append":null,"search":%q,"replace":%q}}`,
+				test.search, test.replacement,
+			)
+			selected, err := parseAction([]byte(encoded))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _, err = execute(root, selected, defaults(Config{}))
+			if !errors.Is(err, ErrProtocol) {
+				t.Fatalf("execute error = %v, want ErrProtocol", err)
+			}
+			after, err := os.ReadFile(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(after) != test.before {
+				t.Fatalf("failed patch changed file: got %q want %q", after, test.before)
+			}
+		})
+	}
+}
+
+func TestQwenPatchFileReplacementRespectsWriteLimit(t *testing.T) {
+	t.Parallel()
+	workspace := t.TempDir()
+	file := filepath.Join(workspace, "README.md")
+	if err := os.WriteFile(file, []byte("one"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	selected, err := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"README.md","append":null,"search":"one","replace":"a much longer replacement"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = execute(root, selected, Config{MaxReadBytes: 1024, MaxWriteBytes: 4})
+	if !errors.Is(err, ErrLimit) {
+		t.Fatalf("execute error = %v, want ErrLimit", err)
+	}
+	content, err := os.ReadFile(file)
+	if err != nil || string(content) != "one" {
+		t.Fatalf("content = %q, error = %v", content, err)
+	}
+}
+
 func TestRootedFileOperationsRejectDirectorySymlinkEscape(t *testing.T) {
 	t.Parallel()
 	workspace := t.TempDir()
@@ -213,7 +289,7 @@ func TestRunExecutesStructuredModelLoop(t *testing.T) {
 	responses := []string{
 		`{"tool":"list_files","arguments":{}}`,
 		`{"tool":"read_file","arguments":{"path":"README.md"}}`,
-		`{"tool":"patch_file","arguments":{"path":"README.md","append":"verified by Qwen\n"}}`,
+		`{"tool":"patch_file","arguments":{"path":"README.md","append":null,"search":"before\n","replace":"before\nverified by Qwen\n"}}`,
 		`{"tool":"finish","arguments":{}}`,
 	}
 	socket, closeServer := responseServer(t, responses)
