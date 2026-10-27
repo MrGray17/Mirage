@@ -110,10 +110,11 @@ func Run(ctx context.Context, config Config) error {
 	recordRejection := func(encoded []byte, rejection error) error {
 		lastRejection = rejection
 		current := string(encoded)
-		if current == lastRejectedOutput {
+		key := rejectedActionKey(encoded)
+		if repeatedRejectedOutput > 0 && key == lastRejectedOutput {
 			repeatedRejectedOutput++
 		} else {
-			lastRejectedOutput = current
+			lastRejectedOutput = key
 			repeatedRejectedOutput = 1
 		}
 		history = append(history, exchange{Action: current, Result: "ACTION REJECTED: " + rejection.Error()})
@@ -220,6 +221,18 @@ func buildPrompt(task string, history []exchange) (string, error) {
 		return "", fmt.Errorf("%w: model transcript is too large", ErrLimit)
 	}
 	return string(encoded), nil
+}
+
+// rejectedActionKey makes repetition detection insensitive to JSON key ordering
+// and insignificant whitespace. Malformed model output falls back to exact bytes.
+func rejectedActionKey(encoded []byte) string {
+	var value any
+	if err := json.Unmarshal(encoded, &value); err == nil {
+		if canonical, err := json.Marshal(value); err == nil {
+			return string(canonical)
+		}
+	}
+	return string(encoded)
 }
 
 func requestModel(ctx context.Context, client *http.Client, model, prompt string, state sequenceState) ([]byte, error) {
