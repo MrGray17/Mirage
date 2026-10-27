@@ -733,10 +733,11 @@ func TestRunStopsAfterThreeIdenticalRejectedActions(t *testing.T) {
 		t.Fatal(err)
 	}
 	bad := `{"tool":"patch_file","arguments":{"path":"README.md","mode":"batch","append":null,"search":null,"replace":null,"edits":null}}`
+	badReordered := `{"arguments":{"edits":null,"replace":null,"search":null,"append":null,"mode":"batch","path":"README.md"},"tool":"patch_file"}`
 	responses := []string{
 		`{"tool":"list_files","arguments":{}}`,
 		`{"tool":"read_file","arguments":{"path":"README.md"}}`,
-		bad, bad, bad,
+		bad, badReordered, bad,
 	}
 	socket, closeServer := responseServer(t, responses)
 	defer closeServer()
