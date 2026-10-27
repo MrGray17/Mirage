@@ -724,7 +724,6 @@ func TestRunRetriesRejectedPatchWithoutExecutingIt(t *testing.T) {
 	}
 }
 
-
 func TestRunStopsAfterThreeIdenticalRejectedActions(t *testing.T) {
 	workspace := t.TempDir()
 	file := filepath.Join(workspace, "README.md")
