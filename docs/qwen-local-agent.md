@@ -28,9 +28,11 @@ intermediate result remains within the existing write bound. A batch that
 returns the file to its original contents is rejected. If a proposed action
 fails local protocol validation, it is not executed; the model receives bounded
 validation feedback and may try a corrected action within the existing step
-limit. This recovery never bypasses validation and does not retry filesystem
-execution failures. This all-or-nothing guarantee applies to validation and
-size failures; it does not make the underlying filesystem write crash-atomic.
+limit. Three identical rejected model actions stop the run early with the last
+validation reason. This recovery never bypasses validation and does not retry
+filesystem execution failures. This all-or-nothing guarantee applies to
+validation and size failures; it does not make the underlying filesystem write
+crash-atomic.
 Append remains available for end-of-file insertions. Go's
 rooted filesystem API rejects absolute paths,
 traversal, and symlink escapes. `.env` and `.git` are unavailable through the
