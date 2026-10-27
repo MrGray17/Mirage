@@ -256,6 +256,32 @@ func TestQwenBatchEditFailureDoesNotWritePartialResult(t *testing.T) {
 	}
 }
 
+func TestQwenBatchEditWriteLimitDoesNotWritePartialResult(t *testing.T) {
+	t.Parallel()
+	workspace := t.TempDir()
+	file := filepath.Join(workspace, "config.txt")
+	before := "a b"
+	if err := os.WriteFile(file, []byte(before), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	selected, err := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"config.txt","append":null,"search":null,"replace":null,"edits":[{"search":"a","replace":"aa"},{"search":"b","replace":"bb"}]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := execute(root, selected, Config{MaxReadBytes: 1024, MaxWriteBytes: 4}); !errors.Is(err, ErrLimit) {
+		t.Fatalf("execute error = %v, want ErrLimit", err)
+	}
+	after, err := os.ReadFile(file)
+	if err != nil || string(after) != before {
+		t.Fatalf("write-limited batch changed file: content=%q error=%v", after, err)
+	}
+}
+
 func TestQwenBatchEditRejectsTooManyOperations(t *testing.T) {
 	t.Parallel()
 	edits := make([]textEdit, maxFileEdits+1)

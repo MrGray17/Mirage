@@ -512,9 +512,11 @@ func validatePatchArguments(arguments patchArguments, original string) error {
 	if arguments.Append != nil {
 		return nil
 	}
-	edits := []textEdit{{Search: *arguments.Search, Replace: *arguments.Replace}}
+	var edits []textEdit
 	if arguments.Edits != nil {
 		edits = *arguments.Edits
+	} else {
+		edits = []textEdit{{Search: *arguments.Search, Replace: *arguments.Replace}}
 	}
 	working := []byte(original)
 	for _, edit := range edits {
@@ -544,9 +546,11 @@ func applyPatch(original []byte, arguments patchArguments, maxWriteBytes int64) 
 		content = append(content, *arguments.Append...)
 		return content, fmt.Sprintf("appended %d bytes", len(*arguments.Append)), nil
 	}
-	edits := []textEdit{{Search: *arguments.Search, Replace: *arguments.Replace}}
+	var edits []textEdit
 	if arguments.Edits != nil {
 		edits = *arguments.Edits
+	} else {
+		edits = []textEdit{{Search: *arguments.Search, Replace: *arguments.Replace}}
 	}
 	working := append([]byte(nil), original...)
 	for _, edit := range edits {
