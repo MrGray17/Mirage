@@ -125,6 +125,7 @@ func Run(ctx context.Context, config Config) error {
 		if err := state.validate(selected); err != nil {
 			// State validation is pure: rejected actions never reach execute or the
 			// filesystem. Retrying is bounded by MaxSteps and cannot grant authority.
+			lastRejection = err
 			history = append(history, exchange{Action: string(encoded), Result: "ACTION REJECTED: " + err.Error()})
 			continue
 		}
