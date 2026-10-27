@@ -666,3 +666,87 @@ func TestListFilesHidesNestedProtectedMetadata(t *testing.T) {
 		t.Fatalf("listed protected metadata: %#v", files)
 	}
 }
+
+
+func TestActionFormatPatchModesAreDisjoint(t *testing.T) {
+	state := sequenceState{
+		listed:      true,
+		readContent: map[string]string{"README.md": "Status: draft\nOwner: local-agent\n"},
+	}
+	encoded, err := json.Marshal(actionFormat(state))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response map[string]any
+	if err := json.Unmarshal(encoded, &response); err != nil {
+		t.Fatal(err)
+	}
+	format := response["format"].(map[string]any)
+	schema := format["schema"].(map[string]any)
+	variants := schema["oneOf"].([]any)
+	if len(variants) != 3 {
+		t.Fatalf("patch action schema has %d variants, want append, replace, batch", len(variants))
+	}
+	want := [][4]string{
+		{"string", "null", "null", "null"},
+		{"null", "string", "string", "null"},
+		{"null", "null", "null", "array"},
+	}
+	for index, variantValue := range variants {
+		variant := variantValue.(map[string]any)
+		properties := variant["properties"].(map[string]any)
+		if got := properties["tool"].(map[string]any)["const"]; got != "patch_file" {
+			t.Fatalf("variant %d tool = %v, want patch_file", index, got)
+		}
+		arguments := properties["arguments"].(map[string]any)
+		argumentProperties := arguments["properties"].(map[string]any)
+		names := []string{"append", "search", "replace", "edits"}
+		for propertyIndex, name := range names {
+			got := argumentProperties[name].(map[string]any)["type"]
+			if got != want[index][propertyIndex] {
+				t.Errorf("variant %d %s type = %v, want %q", index, name, got, want[index][propertyIndex])
+			}
+		}
+	}
+}
+
+func TestRunRetriesRejectedPatchWithoutExecutingIt(t *testing.T) {
+	t.Parallel()
+	workspace := t.TempDir()
+	file := filepath.Join(workspace, "README.md")
+	before := "Project: MIRAGE-QWEN-SMOKE\nStatus: draft\nOwner: local-agent\n"
+	if err := os.WriteFile(file, []byte(before), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	responses := []string{
+		"{\"tool\":\"list_files\",\"arguments\":{}}",
+		"{\"tool\":\"read_file\",\"arguments\":{\"path\":\"README.md\"}}",
+		"{\"tool\":\"patch_file\",\"arguments\":{\"path\":\"README.md\",\"append\":null,\"search\":null,\"replace\":null,\"edits\":null}}",
+		"{\"tool\":\"patch_file\",\"arguments\":{\"path\":\"README.md\",\"append\":null,\"search\":null,\"replace\":null,\"edits\":[{\"search\":\"Status: draft\",\"replace\":\"Status: verified\"},{\"search\":\"Owner: local-agent\",\"replace\":\"Owner: qwen-agent\"}]}}",
+		"{\"tool\":\"finish\",\"arguments\":{}}",
+	}
+	socket, closeServer := responseServer(t, responses)
+	defer closeServer()
+	var output strings.Builder
+	err := Run(context.Background(), Config{
+		Workspace: workspace, BrokerSocket: socket, Model: "qwen2.5-coder:1.5b",
+		Task: "replace status and owner in README", Output: &output,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "Project: MIRAGE-QWEN-SMOKE\nStatus: verified\nOwner: qwen-agent\n"
+	if string(content) != want {
+		t.Fatalf("content = %q, want %q", content, want)
+	}
+	if !strings.Contains(output.String(), "step=4 tool=patch_file") {
+		t.Fatalf("corrected patch action wasn't logged at the fourth model step: %q", output.String())
+	}
+	if strings.Contains(output.String(), "step=3 tool=patch_file") {
+		t.Fatalf("rejected patch was logged as an executed action: %q", output.String())
+	}
+}
