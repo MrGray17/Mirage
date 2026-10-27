@@ -185,36 +185,33 @@ func TestActionFormatDeclaresBoundedEditBatch(t *testing.T) {
 	}
 	arguments := variants[0].(map[string]any)["properties"].(map[string]any)["arguments"].(map[string]any)
 	properties := arguments["properties"].(map[string]any)
-	edits := properties["edits"].(map[string]any)
 	mode := properties["mode"].(map[string]any)
-	if mode["enum"] == nil {
-		t.Fatal("patch mode schema is missing allowed modes")
+	allowed, ok := mode["enum"].([]string)
+	if !ok || strings.Join(allowed, ",") != "append,replace,batch" {
+		t.Fatalf("mode enum = %#v, want append,replace,batch", mode["enum"])
 	}
-	required := arguments["required"].([]string)
-	foundMode := false
-	for _, field := range required {
-		if field == "mode" {
-			foundMode = true
-		}
-	}
-	if !foundMode {
-		t.Fatal("mode must be required in strict schema")
-	}
+	edits := properties["edits"].(map[string]any)
 	if edits["maxItems"] != maxFileEdits {
 		t.Fatalf("edits maxItems = %v, want %d", edits["maxItems"], maxFileEdits)
 	}
 	if _, ok := edits["items"].(map[string]any); !ok {
 		t.Fatal("edits schema is missing item shape")
 	}
-	required := arguments["required"].([]string)
-	found := false
-	for _, field := range required {
-		if field == "edits" {
-			found = true
-		}
+	required, ok := arguments["required"].([]string)
+	if !ok {
+		t.Fatalf("required schema has unexpected type %T", arguments["required"])
 	}
-	if !found {
-		t.Fatal("edits must be required in strict schema")
+	for _, field := range []string{"path", "mode", "append", "search", "replace", "edits"} {
+		found := false
+		for _, candidate := range required {
+			if candidate == field {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("%s must be required in strict schema", field)
+		}
 	}
 }
 
@@ -683,49 +680,6 @@ func TestListFilesHidesNestedProtectedMetadata(t *testing.T) {
 	}
 	if len(files) != 1 || files[0] != "README.md" {
 		t.Fatalf("listed protected metadata: %#v", files)
-	}
-}
-
-func TestActionFormatPatchModeIsExplicit(t *testing.T) {
-	state := sequenceState{
-		listed:      true,
-		readContent: map[string]string{"README.md": "Status: draft\nOwner: local-agent\n"},
-	}
-	encoded, err := json.Marshal(actionFormat(state))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var response map[string]any
-	if err := json.Unmarshal(encoded, &response); err != nil {
-		t.Fatal(err)
-	}
-	format := response["format"].(map[string]any)
-	schema := format["schema"].(map[string]any)
-	variants := schema["oneOf"].([]any)
-	if len(variants) != 1 {
-		t.Fatalf("patch action schema has %d alternatives, want one simple patch schema", len(variants))
-	}
-	properties := variants[0].(map[string]any)["properties"].(map[string]any)
-	if got := properties["tool"].(map[string]any)["const"]; got != "patch_file" {
-		t.Fatalf("tool = %v, want patch_file", got)
-	}
-	arguments := properties["arguments"].(map[string]any)
-	argumentProperties := arguments["properties"].(map[string]any)
-	mode := argumentProperties["mode"].(map[string]any)
-	allowed, ok := mode["enum"].([]string)
-	if !ok || strings.Join(allowed, ",") != "append,replace,batch" {
-		t.Fatalf("mode enum = %#v, want append,replace,batch", mode["enum"])
-	}
-	for _, field := range []string{"mode", "append", "search", "replace", "edits"} {
-		found := false
-		for _, required := range arguments["required"].([]string) {
-			if required == field {
-				found = true
-			}
-		}
-		if !found {
-			t.Errorf("%s must be required in strict schema", field)
-		}
 	}
 }
 
