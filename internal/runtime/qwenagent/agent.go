@@ -460,26 +460,8 @@ func execute(root *os.Root, selected action, config Config) (string, bool, error
 
 func validatePatchShape(arguments patchArguments) error {
 	mode := arguments.Mode
-	// Mode-less actions are accepted only for internal backward-compatibility
-	// tests and callers; the model's strict schema always requires the mode.
-	// Even in this path, the active operation is inferred only when unambiguous.
 	if mode == "" {
-		modes := 0
-		if arguments.Append != nil {
-			modes++
-			mode = "append"
-		}
-		if arguments.Search != nil || arguments.Replace != nil {
-			modes++
-			mode = "replace"
-		}
-		if arguments.Edits != nil {
-			modes++
-			mode = "batch"
-		}
-		if modes != 1 {
-			return fmt.Errorf("%w: patch_file must use exactly one of append, search/replace, or edits", ErrProtocol)
-		}
+		return fmt.Errorf("%w: patch_file mode is required", ErrProtocol)
 	}
 	switch mode {
 	case "append":
