@@ -23,10 +23,13 @@ UTF-8 content. Missing, duplicate, overlapping, non-UTF-8, and no-op
 replacements fail closed; search is not a regular expression. Batch edits run
 in order in memory and are written only after every edit succeeds and each
 intermediate result remains within the existing write bound. A batch that
-returns the file to its original contents is rejected. This all-or-nothing
-guarantee applies to validation and size failures; it does not make the
-underlying filesystem write crash-atomic. Append remains available for
-end-of-file insertions. Go's
+returns the file to its original contents is rejected. If a proposed action
+fails local protocol validation, it is not executed; the model receives bounded
+validation feedback and may try a corrected action within the existing step
+limit. This recovery never bypasses validation and does not retry filesystem
+execution failures. This all-or-nothing guarantee applies to validation and
+size failures; it does not make the underlying filesystem write crash-atomic.
+Append remains available for end-of-file insertions. Go's
 rooted filesystem API rejects absolute paths,
 traversal, and symlink escapes. `.env` and `.git` are unavailable through the
 driver, file and transcript sizes are bounded, and malformed or repeated
