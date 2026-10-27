@@ -16,10 +16,12 @@ list_files
 ```
 
 Qwen chooses the file and proposed edit. The driver applies those choices only
-inside `/workspace`. An action may append, perform one exact replacement, or
-apply up to 16 exact replacements to that same file. Each replacement requires
-a non-empty literal search string that matches exactly once in the current
-UTF-8 content. Missing, duplicate, overlapping, non-UTF-8, and no-op
+inside `/workspace`. Every `patch_file` action declares an explicit `mode`:
+`append`, `replace`, or `batch`. Those modes have disjoint argument shapes,
+and the driver rejects a mode/field mismatch. An action may append, perform one
+exact replacement, or apply up to 16 exact replacements to that same file.
+Each replacement requires a non-empty literal search string that matches
+exactly once in the current UTF-8 content. Missing, duplicate, overlapping, non-UTF-8, and no-op
 replacements fail closed; search is not a regular expression. Batch edits run
 in order in memory and are written only after every edit succeeds and each
 intermediate result remains within the existing write bound. A batch that
