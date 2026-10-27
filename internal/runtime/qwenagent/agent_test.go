@@ -335,6 +335,7 @@ func TestQwenPatchShapeRejectsConflictingModes(t *testing.T) {
 		want      error
 	}{
 		{name: "missing-mode", arguments: patchArguments{}, want: ErrProtocol},
+		{name: "unknown-mode", arguments: patchArguments{Mode: "overwrite", Append: &appendText}, want: ErrProtocol},
 		{name: "append-and-replace", arguments: patchArguments{Mode: "append", Append: &appendText, Search: &searchText, Replace: &replaceText}, want: ErrProtocol},
 		{name: "append-and-batch", arguments: patchArguments{Mode: "append", Append: &appendText, Edits: &validEdits}, want: ErrProtocol},
 		{name: "replace-and-batch", arguments: patchArguments{Mode: "replace", Search: &searchText, Replace: &replaceText, Edits: &validEdits}, want: ErrProtocol},
