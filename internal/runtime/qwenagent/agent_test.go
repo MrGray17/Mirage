@@ -743,8 +743,10 @@ func TestRunStopsAfterThreeIdenticalRejectedActions(t *testing.T) {
 		Workspace: workspace, BrokerSocket: socket, Model: "qwen2.5-coder:1.5b",
 		Task: "edit README", MaxSteps: 10,
 	})
-	if !errors.Is(err, ErrProtocol) || !strings.Contains(err.Error(), "repeated the same rejected action 3 times") {
-		t.Fatalf("Run error = %v, want early repeated-action protocol error", err)
+	if !errors.Is(err, ErrProtocol) ||
+		!strings.Contains(err.Error(), "repeated the same rejected action 3 times") ||
+		!strings.Contains(err.Error(), "batch mode requires only an edits array") {
+		t.Fatalf("Run error = %v, want early repeated-action error with final validation reason", err)
 	}
 	after, readErr := os.ReadFile(file)
 	if readErr != nil {
