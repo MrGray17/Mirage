@@ -667,7 +667,6 @@ func TestListFilesHidesNestedProtectedMetadata(t *testing.T) {
 	}
 }
 
-
 func TestActionFormatPatchModesAreDisjoint(t *testing.T) {
 	state := sequenceState{
 		listed:      true,
