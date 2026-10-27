@@ -105,6 +105,23 @@ func Run(ctx context.Context, config Config) error {
 	history := make([]exchange, 0, config.MaxSteps)
 	state := sequenceState{readContent: make(map[string]string)}
 	var lastRejection error
+	lastRejectedOutput := ""
+	repeatedRejectedOutput := 0
+	recordRejection := func(encoded []byte, rejection error) error {
+		lastRejection = rejection
+		current := string(encoded)
+		if current == lastRejectedOutput {
+			repeatedRejectedOutput++
+		} else {
+			lastRejectedOutput = current
+			repeatedRejectedOutput = 1
+		}
+		history = append(history, exchange{Action: current, Result: "ACTION REJECTED: " + rejection.Error()})
+		if repeatedRejectedOutput >= 3 {
+			return fmt.Errorf("%w: model repeated the same rejected action %d times; last rejection: %v", ErrProtocol, repeatedRejectedOutput, rejection)
+		}
+		return nil
+	}
 	for step := 1; step <= config.MaxSteps; step++ {
 		prompt, err := buildPrompt(config.Task, history)
 		if err != nil {
@@ -118,15 +135,17 @@ func Run(ctx context.Context, config Config) error {
 		if err != nil {
 			// Malformed model output has not touched the workspace. Return bounded
 			// validation feedback to the model instead of aborting the whole run.
-			lastRejection = err
-			history = append(history, exchange{Action: string(encoded), Result: "ACTION REJECTED: " + err.Error()})
+			if rejectionErr := recordRejection(encoded, err); rejectionErr != nil {
+				return rejectionErr
+			}
 			continue
 		}
 		if err := state.validate(selected); err != nil {
 			// State validation is pure: rejected actions never reach execute or the
-			// filesystem. Retrying is bounded by MaxSteps and cannot grant authority.
-			lastRejection = err
-			history = append(history, exchange{Action: string(encoded), Result: "ACTION REJECTED: " + err.Error()})
+			// filesystem. Retrying is bounded and identical failures stop early.
+			if rejectionErr := recordRejection(encoded, err); rejectionErr != nil {
+				return rejectionErr
+			}
 			continue
 		}
 		result, finished, err := execute(root, selected, config)
@@ -134,6 +153,8 @@ func Run(ctx context.Context, config Config) error {
 			return err
 		}
 		lastRejection = nil
+		lastRejectedOutput = ""
+		repeatedRejectedOutput = 0
 		logAction(config.Output, step, selected)
 		if finished {
 			return nil
