@@ -45,6 +45,8 @@ On **2026-10-23**, `scripts/test-live.sh` passed on a hosted Linux runner with G
 
 The accepted run passed the rootless preflight, standard formatting/vet/race-enabled tests, rootless coding-agent containment/quota/process-tree and narrow-commit scenarios, broker-directory permissions, hostile fixture containment, verified one-file commit, and both real-runtime demo variants (`malicious` and `benign`). The acceptance workflow and documentation fix do not change runtime code; the tested application SHA is the mainline code snapshot immediately before those tooling/documentation-only changes.
 
+On **2026-10-27**, [hosted live acceptance run #33](https://github.com/MrGray17/Mirage/actions/runs/40500190945) also passed the rootless Docker release gate, associated with PR snapshot commit `7b3f98434670a0afb72b6079d5166cd21ee15aec`. The recorded steps include rootless/cgroup preflight, the hostile fixture, the release acceptance gate, transcript upload, and temporary registry cleanup. This is hosted Linux runtime evidence, not WSL2-specific acceptance and not a provider-backed local Qwen/Ollama test.
+
 ## Explicit gaps and limits
 
 - **WSL2-specific acceptance remains unverified.** The recorded live run is hosted Linux rootless Docker, not the user's own Windows/WSL2 installation.
