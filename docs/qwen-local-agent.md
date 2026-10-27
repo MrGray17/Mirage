@@ -21,9 +21,12 @@ apply up to 16 exact replacements to that same file. Each replacement requires
 a non-empty literal search string that matches exactly once in the current
 UTF-8 content. Missing, duplicate, overlapping, non-UTF-8, and no-op
 replacements fail closed; search is not a regular expression. Batch edits run
-in order in memory and produce one file write only after every edit succeeds
-and each intermediate result remains within the existing write bound. Append
-remains available for end-of-file insertions. Go's
+in order in memory and are written only after every edit succeeds and each
+intermediate result remains within the existing write bound. A batch that
+returns the file to its original contents is rejected. This all-or-nothing
+guarantee applies to validation and size failures; it does not make the
+underlying filesystem write crash-atomic. Append remains available for
+end-of-file insertions. Go's
 rooted filesystem API rejects absolute paths,
 traversal, and symlink escapes. `.env` and `.git` are unavailable through the
 driver, file and transcript sizes are bounded, and malformed or repeated

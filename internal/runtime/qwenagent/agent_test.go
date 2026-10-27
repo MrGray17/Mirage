@@ -201,7 +201,7 @@ func TestActionFormatDeclaresBoundedEditBatch(t *testing.T) {
 	}
 }
 
-func TestQwenBatchEditsApplyAtomicallyToOneFile(t *testing.T) {
+func TestQwenBatchEditsApplyAsSinglePreparedUpdate(t *testing.T) {
 	t.Parallel()
 	workspace := t.TempDir()
 	file := filepath.Join(workspace, "config.txt")
@@ -279,6 +279,87 @@ func TestQwenBatchEditWriteLimitDoesNotWritePartialResult(t *testing.T) {
 	after, err := os.ReadFile(file)
 	if err != nil || string(after) != before {
 		t.Fatalf("write-limited batch changed file: content=%q error=%v", after, err)
+	}
+}
+
+func TestQwenBatchEditRejectsNetNoOpWithoutWriting(t *testing.T) {
+	t.Parallel()
+	workspace := t.TempDir()
+	file := filepath.Join(workspace, "config.txt")
+	before := "alpha beta"
+	if err := os.WriteFile(file, []byte(before), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	selected, err := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"config.txt","append":null,"search":null,"replace":null,"edits":[{"search":"alpha","replace":"gamma"},{"search":"gamma","replace":"alpha"}]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := execute(root, selected, defaults(Config{})); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("execute error = %v, want ErrProtocol", err)
+	}
+	after, err := os.ReadFile(file)
+	if err != nil || string(after) != before {
+		t.Fatalf("net-no-op batch changed file: content=%q error=%v", after, err)
+	}
+}
+
+func TestQwenPatchShapeRejectsConflictingModes(t *testing.T) {
+	t.Parallel()
+	appendText := "tail"
+	searchText := "before"
+	replaceText := "after"
+	validEdits := []textEdit{{Search: "before", Replace: "after"}}
+	emptyEdits := []textEdit{}
+	tests := []struct {
+		name      string
+		arguments patchArguments
+		want      error
+	}{
+		{name: "missing-mode", arguments: patchArguments{}, want: ErrProtocol},
+		{name: "append-and-replace", arguments: patchArguments{Append: &appendText, Search: &searchText, Replace: &replaceText}, want: ErrProtocol},
+		{name: "append-and-batch", arguments: patchArguments{Append: &appendText, Edits: &validEdits}, want: ErrProtocol},
+		{name: "replace-and-batch", arguments: patchArguments{Search: &searchText, Replace: &replaceText, Edits: &validEdits}, want: ErrProtocol},
+		{name: "incomplete-replacement", arguments: patchArguments{Search: &searchText}, want: ErrProtocol},
+		{name: "empty-batch", arguments: patchArguments{Edits: &emptyEdits}, want: ErrLimit},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if err := validatePatchShape(test.arguments); !errors.Is(err, test.want) {
+				t.Fatalf("validatePatchShape error = %v, want %v", err, test.want)
+			}
+		})
+	}
+}
+
+func TestQwenBatchEditRejectsAmbiguousLaterMatchWithoutWriting(t *testing.T) {
+	t.Parallel()
+	workspace := t.TempDir()
+	file := filepath.Join(workspace, "config.txt")
+	before := "alpha beta beta"
+	if err := os.WriteFile(file, []byte(before), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	selected, err := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"config.txt","append":null,"search":null,"replace":null,"edits":[{"search":"alpha","replace":"gamma"},{"search":"beta","replace":"delta"}]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := execute(root, selected, defaults(Config{})); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("execute error = %v, want ErrProtocol", err)
+	}
+	after, err := os.ReadFile(file)
+	if err != nil || string(after) != before {
+		t.Fatalf("ambiguous batch changed file: content=%q error=%v", after, err)
 	}
 }
 

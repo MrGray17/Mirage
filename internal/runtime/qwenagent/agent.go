@@ -560,6 +560,9 @@ func applyPatch(original []byte, arguments patchArguments, maxWriteBytes int64) 
 		}
 		working = next
 	}
+	if bytes.Equal(working, original) {
+		return nil, "", fmt.Errorf("%w: edit operation produces no net file change", ErrProtocol)
+	}
 	if len(edits) == 1 {
 		return working, fmt.Sprintf("replaced one exact match (%d bytes with %d bytes)", len(edits[0].Search), len(edits[0].Replace)), nil
 	}
