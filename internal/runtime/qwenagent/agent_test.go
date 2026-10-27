@@ -694,8 +694,8 @@ func TestRunRetriesRejectedPatchWithoutExecutingIt(t *testing.T) {
 	responses := []string{
 		"{\"tool\":\"list_files\",\"arguments\":{}}",
 		"{\"tool\":\"read_file\",\"arguments\":{\"path\":\"README.md\"}}",
-		"{\"tool\":\"patch_file\",\"arguments\":{\"path\":\"README.md\",\"append\":null,\"search\":null,\"replace\":null,\"edits\":null}}",
-		"{\"tool\":\"patch_file\",\"arguments\":{\"path\":\"README.md\",\"append\":null,\"search\":null,\"replace\":null,\"edits\":[{\"search\":\"Status: draft\",\"replace\":\"Status: verified\"},{\"search\":\"Owner: local-agent\",\"replace\":\"Owner: qwen-agent\"}]}}",
+		"{\"tool\":\"patch_file\",\"arguments\":{\"path\":\"README.md\",\"mode\":\"batch\",\"append\":null,\"search\":null,\"replace\":null,\"edits\":null}}",
+		"{\"tool\":\"patch_file\",\"arguments\":{\"path\":\"README.md\",\"mode\":\"batch\",\"append\":null,\"search\":null,\"replace\":null,\"edits\":[{\"search\":\"Status: draft\",\"replace\":\"Status: verified\"},{\"search\":\"Owner: local-agent\",\"replace\":\"Owner: qwen-agent\"}]}}",
 		"{\"tool\":\"finish\",\"arguments\":{}}",
 	}
 	socket, closeServer := responseServer(t, responses)
