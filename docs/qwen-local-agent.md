@@ -11,18 +11,41 @@ only model actions are a bounded sequence:
 ```text
 list_files
 → read_file (one rooted regular file)
-→ patch_file (append to that same rooted file)
+→ patch_file (append, exact search/replace, or bounded edit batch in that same rooted file)
 → finish
 ```
 
-Qwen chooses the file and appended text. The driver applies those choices only
-inside `/workspace`. Go's rooted filesystem API rejects absolute paths,
+Qwen chooses the file and proposed edit. The driver applies those choices only
+inside `/workspace`. Every `patch_file` action declares an explicit `mode`:
+`append`, `replace`, or `batch`. Those modes have disjoint argument shapes,
+and the driver rejects a mode/field mismatch. An action may append, perform one
+exact replacement, or apply up to 16 exact replacements to that same file.
+Each replacement requires a non-empty literal search string that matches
+exactly once in the current UTF-8 content. Missing, duplicate, overlapping, non-UTF-8, and no-op
+replacements fail closed; search is not a regular expression. Batch edits run
+in order in memory and are written only after every edit succeeds and each
+intermediate result remains within the existing write bound. A batch that
+returns the file to its original contents is rejected. If a proposed action
+fails local protocol validation, it is not executed; the model receives bounded
+validation feedback and may try a corrected action within the existing step
+limit. Three semantically identical rejected model actions stop the run early;
+valid JSON actions are compared canonically so key order and whitespace do not
+evade the cutoff. The last validation reason is included in the diagnostic.
+This recovery never bypasses validation and does not retry
+filesystem execution failures. This all-or-nothing guarantee applies to
+validation and size failures; it does not make the underlying filesystem write
+crash-atomic.
+Append remains available for end-of-file insertions. Go's
+rooted filesystem API rejects absolute paths,
 traversal, and symlink escapes. `.env` and `.git` are unavailable through the
 driver, file and transcript sizes are bounded, and malformed or repeated
 actions fail closed.
 
-This sequence is intentionally not a general coding environment. It is the
-smallest reproducible agent loop needed to demonstrate a real local model edit.
+This sequence is intentionally not a general coding environment. It is a
+bounded local coding loop: Qwen can append or make up to 16 exact, unique
+replacements in one previously read existing file. Creating files, editing
+multiple files, shell access, and arbitrary tool use remain outside this v1
+integration's scope.
 MIRAGE's trusted frozen-tree scan, canonical diff, contract verifier, freshness
 checks, and real commit engine remain the only authority over reality.
 

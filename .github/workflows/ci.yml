@@ -33,6 +33,11 @@ jobs:
           bash -n scripts/test-live.sh
           bash -n scripts/install.sh
 
+      - name: Build pinned Qwen agent image
+        shell: bash
+        run: |
+          docker build --pull --tag mirage-qwen-agent:ci --file build/m44-qwen-agent/Dockerfile .
+
       - name: Check live gate reports missing configuration clearly
         shell: bash
         run: |
