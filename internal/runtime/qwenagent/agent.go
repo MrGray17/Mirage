@@ -505,8 +505,33 @@ func applyTextEdit(original []byte, edit textEdit, maxWriteBytes int64) ([]byte,
 	return content, nil
 }
 
-func applyPatch(original []byte, arguments patchArguments, maxWriteBytes int64) ([]byte, string, error) {
+func validatePatchArguments(arguments patchArguments, original string) error {
 	if err := validatePatchShape(arguments); err != nil {
+		return err
+	}
+	if arguments.Append != nil {
+		return nil
+	}
+	edits := []textEdit{{Search: *arguments.Search, Replace: *arguments.Replace}}
+	if arguments.Edits != nil {
+		edits = *arguments.Edits
+	}
+	working := []byte(original)
+	for _, edit := range edits {
+		// State validation checks semantic validity, while the execution path
+		// separately enforces the configured output-size limit.
+		maximum := int64(len(working)) + int64(len(edit.Replace))
+		next, err := applyTextEdit(working, edit, maximum)
+		if err != nil {
+			return err
+		}
+		working = next
+	}
+	return nil
+}
+
+func applyPatch(original []byte, arguments patchArguments, maxWriteBytes int64) ([]byte, string, error) {
+	if err := validatePatchArguments(arguments, string(original)); err != nil {
 		return nil, "", err
 	}
 	if arguments.Append != nil {
