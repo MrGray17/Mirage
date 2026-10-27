@@ -723,3 +723,35 @@ func TestRunRetriesRejectedPatchWithoutExecutingIt(t *testing.T) {
 		t.Fatalf("rejected patch was logged as an executed action: %q", output.String())
 	}
 }
+
+
+func TestRunStopsAfterThreeIdenticalRejectedActions(t *testing.T) {
+	workspace := t.TempDir()
+	file := filepath.Join(workspace, "README.md")
+	before := "Status: draft\n"
+	if err := os.WriteFile(file, []byte(before), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bad := `{"tool":"patch_file","arguments":{"path":"README.md","mode":"batch","append":null,"search":null,"replace":null,"edits":null}}`
+	responses := []string{
+		`{"tool":"list_files","arguments":{}}`,
+		`{"tool":"read_file","arguments":{"path":"README.md"}}`,
+		bad, bad, bad,
+	}
+	socket, closeServer := responseServer(t, responses)
+	defer closeServer()
+	err := Run(context.Background(), Config{
+		Workspace: workspace, BrokerSocket: socket, Model: "qwen2.5-coder:1.5b",
+		Task: "edit README", MaxSteps: 10,
+	})
+	if !errors.Is(err, ErrProtocol) || !strings.Contains(err.Error(), "repeated the same rejected action 3 times") {
+		t.Fatalf("Run error = %v, want early repeated-action protocol error", err)
+	}
+	after, readErr := os.ReadFile(file)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(after) != before {
+		t.Fatalf("rejected actions changed file: got %q want %q", after, before)
+	}
+}
