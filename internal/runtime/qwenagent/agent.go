@@ -362,7 +362,7 @@ func actionFormat(state sequenceState) any {
 				},
 				{
 					"path": pathSchema, "append": nullSchema,
-					"search": map[string]any{"type": "string", "minLength": 1},
+					"search":  map[string]any{"type": "string", "minLength": 1},
 					"replace": map[string]any{"type": "string"}, "edits": nullSchema,
 				},
 				{
