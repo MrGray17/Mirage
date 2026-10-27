@@ -28,8 +28,10 @@ intermediate result remains within the existing write bound. A batch that
 returns the file to its original contents is rejected. If a proposed action
 fails local protocol validation, it is not executed; the model receives bounded
 validation feedback and may try a corrected action within the existing step
-limit. Three identical rejected model actions stop the run early with the last
-validation reason. This recovery never bypasses validation and does not retry
+limit. Three semantically identical rejected model actions stop the run early;
+valid JSON actions are compared canonically so key order and whitespace do not
+evade the cutoff. The last validation reason is included in the diagnostic.
+This recovery never bypasses validation and does not retry
 filesystem execution failures. This all-or-nothing guarantee applies to
 validation and size failures; it does not make the underlying filesystem write
 crash-atomic.
