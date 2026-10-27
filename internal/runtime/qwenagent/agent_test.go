@@ -180,7 +180,11 @@ func TestActionFormatDeclaresBoundedEditBatch(t *testing.T) {
 	format := formatted["format"].(map[string]any)
 	schema := format["schema"].(map[string]any)
 	variants := schema["oneOf"].([]any)
-	arguments := variants[0].(map[string]any)["properties"].(map[string]any)["arguments"].(map[string]any)
+	if len(variants) != 3 {
+		t.Fatalf("patch action schema has %d variants, want 3 distinct modes", len(variants))
+	}
+	// The schema alternatives are append, single replacement, then batch edits.
+	arguments := variants[2].(map[string]any)["properties"].(map[string]any)["arguments"].(map[string]any)
 	properties := arguments["properties"].(map[string]any)
 	edits := properties["edits"].(map[string]any)
 	if edits["maxItems"] != maxFileEdits {
@@ -541,9 +545,11 @@ func TestRunFailsClosedOnProtocolAndStepLimit(t *testing.T) {
 		maxSteps  int
 		want      error
 	}{
-		{"prose", []string{"I will edit it"}, 1, ErrProtocol},
-		{"malformed", []string{`{"tool":`}, 1, ErrProtocol},
-		{"unknown", []string{`{"tool":"exec","arguments":{}}`}, 1, ErrProtocol},
+		// Invalid model actions are rejected, then the bounded loop exhausts its
+		// one-step budget. The lower-level parser tests still assert ErrProtocol.
+		{"prose", []string{"I will edit it"}, 1, ErrLimit},
+		{"malformed", []string{`{"tool":`}, 1, ErrLimit},
+		{"unknown", []string{`{"tool":"exec","arguments":{}}`}, 1, ErrLimit},
 		{"refuses-finish", []string{`{"tool":"list_files","arguments":{}}`, `{"tool":"read_file","arguments":{"path":"README.md"}}`, `{"tool":"patch_file","arguments":{"path":"README.md","append":" changed"}}`}, 3, ErrLimit},
 	} {
 		t.Run(test.name, func(t *testing.T) {
