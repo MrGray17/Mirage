@@ -174,6 +174,100 @@ func TestRootedFileOperationsAndLimits(t *testing.T) {
 	}
 }
 
+func TestActionFormatDeclaresBoundedEditBatch(t *testing.T) {
+	t.Parallel()
+	formatted := actionFormat(sequenceState{readContent: map[string]string{"README.md": "before"}}).(map[string]any)
+	format := formatted["format"].(map[string]any)
+	schema := format["schema"].(map[string]any)
+	variants := schema["oneOf"].([]any)
+	arguments := variants[0].(map[string]any)["properties"].(map[string]any)["arguments"].(map[string]any)
+	properties := arguments["properties"].(map[string]any)
+	edits := properties["edits"].(map[string]any)
+	if edits["maxItems"] != maxFileEdits {
+		t.Fatalf("edits maxItems = %v, want %d", edits["maxItems"], maxFileEdits)
+	}
+	if _, ok := edits["items"].(map[string]any); !ok {
+		t.Fatal("edits schema is missing item shape")
+	}
+	required := arguments["required"].([]string)
+	found := false
+	for _, field := range required {
+		if field == "edits" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("edits must be required in strict schema")
+	}
+}
+
+func TestQwenBatchEditsApplyAtomicallyToOneFile(t *testing.T) {
+	t.Parallel()
+	workspace := t.TempDir()
+	file := filepath.Join(workspace, "config.txt")
+	before := "version = 1\nname = old\n"
+	if err := os.WriteFile(file, []byte(before), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	selected, err := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"config.txt","append":null,"search":null,"replace":null,"edits":[{"search":"version = 1","replace":"version = 2"},{"search":"name = old","replace":"name = new"}]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := execute(root, selected, defaults(Config{})); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != "version = 2\nname = new\n" {
+		t.Fatalf("content = %q", after)
+	}
+}
+
+func TestQwenBatchEditFailureDoesNotWritePartialResult(t *testing.T) {
+	t.Parallel()
+	workspace := t.TempDir()
+	file := filepath.Join(workspace, "config.txt")
+	before := "alpha beta"
+	if err := os.WriteFile(file, []byte(before), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	selected, err := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"config.txt","append":null,"search":null,"replace":null,"edits":[{"search":"alpha","replace":"gamma"},{"search":"missing","replace":"delta"}]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := execute(root, selected, defaults(Config{})); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("execute error = %v, want ErrProtocol", err)
+	}
+	after, err := os.ReadFile(file)
+	if err != nil || string(after) != before {
+		t.Fatalf("failed batch changed file: content=%q error=%v", after, err)
+	}
+}
+
+func TestQwenBatchEditRejectsTooManyOperations(t *testing.T) {
+	t.Parallel()
+	edits := make([]textEdit, maxFileEdits+1)
+	for i := range edits {
+		edits[i] = textEdit{Search: "x", Replace: "y"}
+	}
+	arguments := patchArguments{Edits: &edits}
+	if err := validatePatchShape(arguments); !errors.Is(err, ErrLimit) {
+		t.Fatalf("shape error = %v, want ErrLimit", err)
+	}
+}
+
 func TestQwenPatchFileRequiresOneExactMatch(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -316,7 +410,7 @@ func TestRunExecutesStructuredModelLoop(t *testing.T) {
 	responses := []string{
 		`{"tool":"list_files","arguments":{}}`,
 		`{"tool":"read_file","arguments":{"path":"README.md"}}`,
-		`{"tool":"patch_file","arguments":{"path":"README.md","append":null,"search":"before\n","replace":"before\nverified by Qwen\n"}}`,
+		`{"tool":"patch_file","arguments":{"path":"README.md","append":null,"search":"before\n","replace":"before\nverified by Qwen\n","edits":null}}`,
 		`{"tool":"finish","arguments":{}}`,
 	}
 	socket, closeServer := responseServer(t, responses)
