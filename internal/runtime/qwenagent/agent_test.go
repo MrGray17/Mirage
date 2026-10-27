@@ -20,8 +20,8 @@ func TestStrictActionProtocol(t *testing.T) {
 	valid := []string{
 		`{"tool":"list_files","arguments":{}}`,
 		`{"tool":"read_file","arguments":{"path":"README.md"}}`,
-		`{"tool":"patch_file","arguments":{"path":"README.md","append":"changed"}}`,
-		`{"tool":"patch_file","arguments":{"path":"README.md","append":null,"search":"before","replace":"after"}}`,
+		`{"tool":"patch_file","arguments":{"path":"README.md","mode":"append","append":"changed","search":null,"replace":null,"edits":null}}`,
+		`{"tool":"patch_file","arguments":{"path":"README.md","mode":"replace","append":null,"search":"before","replace":"after","edits":null}}`,
 		`{"tool":"finish","arguments":{}}`,
 	}
 	for _, encoded := range valid {
@@ -64,11 +64,11 @@ func TestSequenceRequiresRootedInspectThenSinglePatchThenFinish(t *testing.T) {
 		t.Fatal(err)
 	}
 	state.observe(read, `"original"`)
-	wrong, _ := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"other.txt","append":"x"}}`))
+	wrong, _ := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"other.txt","mode":"append","append":"x","search":null,"replace":null,"edits":null}}`))
 	if err := state.validate(wrong); !errors.Is(err, ErrProtocol) {
 		t.Fatalf("patch without same-path read returned %v", err)
 	}
-	patch, _ := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"README.md","append":"x"}}`))
+	patch, _ := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"README.md","mode":"append","append":"x","search":null,"replace":null,"edits":null}}`))
 	if err := state.validate(patch); err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestExecuteRejectsHostilePathsAndUnsupportedTools(t *testing.T) {
 		{"traversal", `{"tool":"read_file","arguments":{"path":"../secret"}}`, ErrPolicy},
 		{"absolute", `{"tool":"read_file","arguments":{"path":"/etc/passwd"}}`, ErrPolicy},
 		{"env", `{"tool":"read_file","arguments":{"path":".env"}}`, ErrPolicy},
-		{"git", `{"tool":"patch_file","arguments":{"path":".git/config","append":"x"}}`, ErrPolicy},
+		{"git", `{"tool":"patch_file","arguments":{"path":".git/config","mode":"append","append":"x","search":null,"replace":null,"edits":null}}`, ErrPolicy},
 		{"nested-env", `{"tool":"read_file","arguments":{"path":"docs/.env.local"}}`, ErrPolicy},
 		{"nested-git", `{"tool":"read_file","arguments":{"path":"vendor/repo/.git/config"}}`, ErrPolicy},
 		{"nested-credential-directory", `{"tool":"read_file","arguments":{"path":"vendor/.ssh/id_ed25519"}}`, ErrPolicy},
@@ -161,7 +161,7 @@ func TestRootedFileOperationsAndLimits(t *testing.T) {
 	if _, err := readFile(root, "README.md", 2); !errors.Is(err, ErrLimit) {
 		t.Fatalf("oversized read returned %v", err)
 	}
-	selected, _ := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"README.md","append":"changed"}}`))
+	selected, _ := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"README.md","mode":"append","append":"changed","search":null,"replace":null,"edits":null}}`))
 	if _, _, err := execute(root, selected, Config{MaxWriteBytes: 2}); !errors.Is(err, ErrLimit) {
 		t.Fatalf("oversized write returned %v", err)
 	}
@@ -228,7 +228,7 @@ func TestQwenBatchEditsApplyAsSinglePreparedUpdate(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	selected, err := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"config.txt","append":null,"search":null,"replace":null,"edits":[{"search":"version = 1","replace":"version = 2"},{"search":"name = old","replace":"name = new"}]}}`))
+	selected, err := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"config.txt","mode":"batch","append":null,"search":null,"replace":null,"edits":[{"search":"version = 1","replace":"version = 2"},{"search":"name = old","replace":"name = new"}]}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +257,7 @@ func TestQwenBatchEditFailureDoesNotWritePartialResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	selected, err := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"config.txt","append":null,"search":null,"replace":null,"edits":[{"search":"alpha","replace":"gamma"},{"search":"missing","replace":"delta"}]}}`))
+	selected, err := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"config.txt","mode":"batch","append":null,"search":null,"replace":null,"edits":[{"search":"alpha","replace":"gamma"},{"search":"missing","replace":"delta"}]}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +283,7 @@ func TestQwenBatchEditWriteLimitDoesNotWritePartialResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	selected, err := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"config.txt","append":null,"search":null,"replace":null,"edits":[{"search":"a","replace":"aa"},{"search":"b","replace":"bb"}]}}`))
+	selected, err := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"config.txt","mode":"batch","append":null,"search":null,"replace":null,"edits":[{"search":"a","replace":"aa"},{"search":"b","replace":"bb"}]}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,7 +309,7 @@ func TestQwenBatchEditRejectsNetNoOpWithoutWriting(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	selected, err := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"config.txt","append":null,"search":null,"replace":null,"edits":[{"search":"alpha","replace":"gamma"},{"search":"gamma","replace":"alpha"}]}}`))
+	selected, err := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"config.txt","mode":"batch","append":null,"search":null,"replace":null,"edits":[{"search":"alpha","replace":"gamma"},{"search":"gamma","replace":"alpha"}]}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,11 +335,11 @@ func TestQwenPatchShapeRejectsConflictingModes(t *testing.T) {
 		want      error
 	}{
 		{name: "missing-mode", arguments: patchArguments{}, want: ErrProtocol},
-		{name: "append-and-replace", arguments: patchArguments{Append: &appendText, Search: &searchText, Replace: &replaceText}, want: ErrProtocol},
-		{name: "append-and-batch", arguments: patchArguments{Append: &appendText, Edits: &validEdits}, want: ErrProtocol},
-		{name: "replace-and-batch", arguments: patchArguments{Search: &searchText, Replace: &replaceText, Edits: &validEdits}, want: ErrProtocol},
-		{name: "incomplete-replacement", arguments: patchArguments{Search: &searchText}, want: ErrProtocol},
-		{name: "empty-batch", arguments: patchArguments{Edits: &emptyEdits}, want: ErrLimit},
+		{name: "append-and-replace", arguments: patchArguments{Mode: "append", Append: &appendText, Search: &searchText, Replace: &replaceText}, want: ErrProtocol},
+		{name: "append-and-batch", arguments: patchArguments{Mode: "append", Append: &appendText, Edits: &validEdits}, want: ErrProtocol},
+		{name: "replace-and-batch", arguments: patchArguments{Mode: "replace", Search: &searchText, Replace: &replaceText, Edits: &validEdits}, want: ErrProtocol},
+		{name: "incomplete-replacement", arguments: patchArguments{Mode: "replace", Search: &searchText}, want: ErrProtocol},
+		{name: "empty-batch", arguments: patchArguments{Mode: "batch", Edits: &emptyEdits}, want: ErrLimit},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -364,7 +364,7 @@ func TestQwenBatchEditRejectsAmbiguousLaterMatchWithoutWriting(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	selected, err := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"config.txt","append":null,"search":null,"replace":null,"edits":[{"search":"alpha","replace":"gamma"},{"search":"beta","replace":"delta"}]}}`))
+	selected, err := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"config.txt","mode":"batch","append":null,"search":null,"replace":null,"edits":[{"search":"alpha","replace":"gamma"},{"search":"beta","replace":"delta"}]}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,7 +383,7 @@ func TestQwenBatchEditRejectsTooManyOperations(t *testing.T) {
 	for i := range edits {
 		edits[i] = textEdit{Search: "x", Replace: "y"}
 	}
-	arguments := patchArguments{Edits: &edits}
+	arguments := patchArguments{Mode: "batch", Edits: &edits}
 	if err := validatePatchShape(arguments); !errors.Is(err, ErrLimit) {
 		t.Fatalf("shape error = %v, want ErrLimit", err)
 	}
@@ -416,7 +416,7 @@ func TestQwenPatchFileRequiresOneExactMatch(t *testing.T) {
 			}
 			defer root.Close()
 			encoded := fmt.Sprintf(
-				`{"tool":"patch_file","arguments":{"path":"README.md","append":null,"search":%q,"replace":%q}}`,
+				`{"tool":"patch_file","arguments":{"path":"README.md","mode":"replace","append":null,"search":%q,"replace":%q,"edits":null}}`,
 				test.search, test.replacement,
 			)
 			selected, err := parseAction([]byte(encoded))
@@ -451,7 +451,7 @@ func TestQwenPatchFileReplacementRejectsNonUTF8(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	selected, err := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"README.md","append":null,"search":"a","replace":"b"}}`))
+	selected, err := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"README.md","mode":"replace","append":null,"search":"a","replace":"b","edits":null}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -477,7 +477,7 @@ func TestQwenPatchFileReplacementRespectsWriteLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	selected, err := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"README.md","append":null,"search":"one","replace":"a much longer replacement"}}`))
+	selected, err := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"README.md","mode":"replace","append":null,"search":"one","replace":"a much longer replacement","edits":null}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -531,7 +531,7 @@ func TestRunExecutesStructuredModelLoop(t *testing.T) {
 	responses := []string{
 		`{"tool":"list_files","arguments":{}}`,
 		`{"tool":"read_file","arguments":{"path":"README.md"}}`,
-		`{"tool":"patch_file","arguments":{"path":"README.md","append":null,"search":"before\n","replace":"before\nverified by Qwen\n","edits":null}}`,
+		`{"tool":"patch_file","arguments":{"path":"README.md","mode":"replace","append":null,"search":"before\n","replace":"before\nverified by Qwen\n","edits":null}}`,
 		`{"tool":"finish","arguments":{}}`,
 	}
 	socket, closeServer := responseServer(t, responses)
@@ -560,7 +560,7 @@ func TestRunFailsClosedOnProtocolAndStepLimit(t *testing.T) {
 		{"prose", []string{"I will edit it"}, 1, ErrLimit},
 		{"malformed", []string{`{"tool":`}, 1, ErrLimit},
 		{"unknown", []string{`{"tool":"exec","arguments":{}}`}, 1, ErrLimit},
-		{"refuses-finish", []string{`{"tool":"list_files","arguments":{}}`, `{"tool":"read_file","arguments":{"path":"README.md"}}`, `{"tool":"patch_file","arguments":{"path":"README.md","append":" changed"}}`}, 3, ErrLimit},
+		{"refuses-finish", []string{`{"tool":"list_files","arguments":{}}`, `{"tool":"read_file","arguments":{"path":"README.md"}}`, `{"tool":"patch_file","arguments":{"path":"README.md","mode":"append","append":" changed","search":null,"replace":null,"edits":null}}`}, 3, ErrLimit},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			workspace := t.TempDir()
