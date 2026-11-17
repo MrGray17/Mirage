@@ -76,6 +76,36 @@ pulled from a registry. Mirage requires a repository-qualified immutable
 accepted. Keep the registry reference private or public according to your
 needs, and ensure the rootless Docker user can pull it.
 
+## One-command local acceptance
+
+From a clean Linux or WSL2 checkout, run:
+
+```bash
+./scripts/test-qwen-local.sh
+```
+
+The script uses the `rootless` Docker context and Buildx builder by default.
+It automatically uses `~/.docker-wsl` when that directory exists and no
+`DOCKER_CONFIG` is set. Override the context, builder, or registry repository
+with `MIRAGE_DOCKER_CONTEXT`, `MIRAGE_DOCKER_BUILDER`, or
+`MIRAGE_QWEN_REPO`. It expects an existing GHCR login with package write
+permission; it never prompts for or stores a token.
+
+The acceptance script checks the exact local Ollama model, builds and pushes a
+commit-specific image without provenance attestations, pulls it back by its
+immutable digest, and exercises the **easy CLI** on a disposable workspace.
+It then runs a deliberate unauthorized-edit scenario, checks that both trusted
+files remain byte-for-byte unchanged, and verifies the committed and rejected
+receipts independently. Workspaces, summaries, logs, receipts, and Observatory
+files are preserved under temporary directories in your home so failures can
+be diagnosed rather than erased.
+
+A successful run prints the image digest and the one-time environment
+configuration for Bash and PowerShell. The script tests the Linux/WSL backend;
+the final Windows release gate must still install the matching native
+frontend/backend pair and repeat the short `mirage edit` workflow from
+PowerShell.
+
 ## Easy CLI
 
 For normal use, MIRAGE exposes the constrained Qwen workflow as one short
