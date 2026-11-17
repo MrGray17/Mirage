@@ -16,7 +16,8 @@ done
 if [[ -z "${DOCKER_CONFIG:-}" && -d "$HOME/.docker-wsl" ]]; then
   export DOCKER_CONFIG="$HOME/.docker-wsl"
 fi
-unset DOCKER_HOST DOCKER_CONTEXT || true
+unset DOCKER_HOST || true
+export DOCKER_CONTEXT="${MIRAGE_DOCKER_CONTEXT:-rootless}"
 
 context="${MIRAGE_DOCKER_CONTEXT:-rootless}"
 builder="${MIRAGE_DOCKER_BUILDER:-rootless}"
@@ -24,7 +25,7 @@ qwen_repository="${MIRAGE_QWEN_REPO:-ghcr.io/mrgray17/mirage-qwen-agent}"
 helper_image="${MIRAGE_HELPER_IMAGE:-busybox@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0}"
 model="qwen2.5-coder:1.5b"
 
-[[ "$qwen_repository" =~ ^ghcr\\.io/[a-z0-9._/-]+$ ]] ||
+[[ "$qwen_repository" =~ ^ghcr[.]io/[a-z0-9]+([._-][a-z0-9]+)*/[a-z0-9]+([._-][a-z0-9]+)*$ ]] ||
   fail "MIRAGE_QWEN_REPO must be a lowercase ghcr.io repository path"
 [[ "$helper_image" =~ @sha256:[0-9a-f]{64}$ ]] ||
   fail "MIRAGE_HELPER_IMAGE must be an immutable name@sha256:digest reference"
@@ -52,6 +53,12 @@ docker_context buildx inspect "$builder" --bootstrap >/dev/null 2>&1 ||
 
 printf 'Source commit: %s\n' "$source_commit"
 printf 'Docker context: %s  builder: %s\n' "$context" "$builder"
+printf '\n== Pull immutable helper image ==\n'
+docker_context pull "$helper_image" >/dev/null ||
+  fail "helper image could not be pulled; check its digest and registry access"
+docker_context image inspect "$helper_image" >/dev/null ||
+  fail "helper image could not be inspected by its immutable reference"
+
 printf '\n== MIRAGE runtime preflight ==\n'
 go run ./cmd/mirage doctor
 
@@ -60,13 +67,15 @@ if [[ -n "${WSL_INTEROP:-}" ]]; then
   windows_curl="/mnt/c/Windows/System32/curl.exe"
   [[ -x /init && -x "$windows_curl" ]] ||
     fail "WSL Windows interop is unavailable; restore WSLInterop and Windows curl.exe before testing Ollama"
-  curl_command=(/init "$windows_curl" --silent --show-error --fail --noproxy '*' --proxy '')
+  curl_command=("$windows_curl" --silent --show-error --fail --noproxy '*' --proxy '')
 else
   command -v curl >/dev/null 2>&1 || fail "curl is required for the local Ollama preflight"
   curl_command=(curl --silent --show-error --fail --noproxy '*')
 fi
 
-"${curl_command[@]}" http://127.0.0.1:11434/api/tags |
+tags_json="$("${curl_command[@]}" http://127.0.0.1:11434/api/tags 2>&1)" ||
+  fail "could not reach Ollama at 127.0.0.1:11434; ensure Ollama is running and WSL interop is healthy: $tags_json"
+printf '%s' "$tags_json" |
   python3 -c '
 import json, sys
 required = "qwen2.5-coder:1.5b"
