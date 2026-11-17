@@ -155,6 +155,9 @@ func prepareWindowsEditArguments(config wsl.Config, args []string) ([]string, er
 	rewritten := append([]string(nil), args...)
 	for index := 0; index < len(rewritten); index++ {
 		argument := rewritten[index]
+		if argument == "--" || !strings.HasPrefix(argument, "-") {
+			break
+		}
 		switch {
 		case argument == "--workspace":
 			if workspaceSet || index+1 >= len(rewritten) {
@@ -200,8 +203,18 @@ func prepareWindowsEditArguments(config wsl.Config, args []string) ([]string, er
 			rewritten[index] = "--output-dir=" + translated
 		case argument == "--image" || strings.HasPrefix(argument, "--image="):
 			imageSet = true
+			if argument == "--image" && index+1 < len(rewritten) {
+				index++
+			}
 		case argument == "--helper-image" || strings.HasPrefix(argument, "--helper-image="):
 			helperSet = true
+			if argument == "--helper-image" && index+1 < len(rewritten) {
+				index++
+			}
+		case argument == "--timeout" || argument == "--format":
+			if index+1 < len(rewritten) {
+				index++
+			}
 		}
 	}
 
