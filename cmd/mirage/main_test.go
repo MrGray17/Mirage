@@ -33,7 +33,7 @@ func TestHelpAndVersionAreStableProductCommands(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		if err := run(args, &stdout, &stderr); err != nil ||
 			!strings.Contains(stdout.String(), "Transactional security runtime") ||
-			!strings.Contains(stdout.String(), "mirage edit <file> <task>") {
+			!strings.Contains(stdout.String(), "mirage edit [options] <file> <task>") {
 			t.Fatalf("args=%v output=%q error=%v", args, stdout.String(), err)
 		}
 	}
