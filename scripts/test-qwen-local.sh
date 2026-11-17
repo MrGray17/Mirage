@@ -24,6 +24,11 @@ qwen_repository="${MIRAGE_QWEN_REPO:-ghcr.io/mrgray17/mirage-qwen-agent}"
 helper_image="${MIRAGE_HELPER_IMAGE:-busybox@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0}"
 model="qwen2.5-coder:1.5b"
 
+[[ "$qwen_repository" =~ ^ghcr\\.io/[a-z0-9._/-]+$ ]] ||
+  fail "MIRAGE_QWEN_REPO must be a lowercase ghcr.io repository path"
+[[ "$helper_image" =~ @sha256:[0-9a-f]{64}$ ]] ||
+  fail "MIRAGE_HELPER_IMAGE must be an immutable name@sha256:digest reference"
+
 docker_context() {
   docker --context "$context" "$@"
 }
