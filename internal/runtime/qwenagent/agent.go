@@ -145,7 +145,7 @@ func Run(ctx context.Context, config Config) error {
 		if err := state.validate(selected); err != nil {
 			// State validation is pure: rejected actions never reach execute or the
 			// filesystem. Retrying is bounded and identical failures stop early.
-			if rejectionErr := recordRejection(encoded, err); rejectionErr != nil {
+			if rejectionErr := recordRejection(step, encoded, err); rejectionErr != nil {
 				return rejectionErr
 			}
 			continue
