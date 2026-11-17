@@ -517,12 +517,16 @@ func summarizeRejectedAction(encoded []byte) string {
 }
 
 func logRejectedAction(output io.Writer, step int, encoded []byte, rejection error) {
-	const maxReasonBytes = 256
-	reason := rejection.Error()
-	if len(reason) > maxReasonBytes {
-		reason = reason[:maxReasonBytes]
+	reason := "unknown"
+	switch {
+	case errors.Is(rejection, ErrPolicy):
+		reason = "policy_violation"
+	case errors.Is(rejection, ErrLimit):
+		reason = "limit_exceeded"
+	case errors.Is(rejection, ErrProtocol):
+		reason = "protocol_violation"
 	}
-	fmt.Fprintf(output, "qwen_agent step=%d action_rejected %s reason=%q\n",
+	fmt.Fprintf(output, "qwen_agent step=%d action_rejected %s reason=%s\n",
 		step, summarizeRejectedAction(encoded), reason)
 }
 
