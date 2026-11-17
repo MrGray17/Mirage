@@ -67,7 +67,7 @@ if [[ -n "${WSL_INTEROP:-}" ]]; then
   windows_curl="/mnt/c/Windows/System32/curl.exe"
   [[ -x /init && -x "$windows_curl" ]] ||
     fail "WSL Windows interop is unavailable; restore WSLInterop and Windows curl.exe before testing Ollama"
-  curl_command=("$windows_curl" --silent --show-error --fail --noproxy '*' --proxy '')
+  curl_command=(/init "$windows_curl" --silent --show-error --fail --noproxy '*' --proxy '')
 else
   command -v curl >/dev/null 2>&1 || fail "curl is required for the local Ollama preflight"
   curl_command=(curl --silent --show-error --fail --noproxy '*')
