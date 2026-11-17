@@ -491,7 +491,7 @@ func (l *AgentLauncher) agentCreateArguments() []string {
 	if l.config.BrokerDirectory != "" {
 		brokerMount := "type=bind,src=" + l.config.BrokerDirectory + ",dst=" + agentBrokerMountPath + ",readonly,bind-propagation=rprivate"
 		args = append(args,
-			"--env", "MIRAGE_MODEL_SOCKET="+agentBrokerMountPath + "/" + modelSocketName,
+			"--env", "MIRAGE_MODEL_SOCKET="+agentBrokerMountPath+"/"+modelSocketName,
 			"--env", "MIRAGE_MODEL="+l.config.BrokerModel,
 			"--env", "MIRAGE_BROKER_DUMMY=broker-scoped-no-secret",
 			"--mount", brokerMount,
@@ -525,7 +525,7 @@ func (l *AgentLauncher) verifyAgentContainer(ctx context.Context) error {
 		return fmt.Errorf("%w: coding-agent environment contains a credential-bearing or changed value", ErrIsolation)
 	}
 	if l.config.BrokerDirectory != "" {
-		if environmentValue(inspected.Config.Env, "MIRAGE_MODEL_SOCKET") != agentBrokerMountPath + "/" + modelSocketName || environmentValue(inspected.Config.Env, "MIRAGE_MODEL") != l.config.BrokerModel || environmentValue(inspected.Config.Env, "MIRAGE_BROKER_DUMMY") != "broker-scoped-no-secret" {
+		if environmentValue(inspected.Config.Env, "MIRAGE_MODEL_SOCKET") != agentBrokerMountPath+"/"+modelSocketName || environmentValue(inspected.Config.Env, "MIRAGE_MODEL") != l.config.BrokerModel || environmentValue(inspected.Config.Env, "MIRAGE_BROKER_DUMMY") != "broker-scoped-no-secret" {
 			return fmt.Errorf("%w: coding-agent broker environment changed", ErrIsolation)
 		}
 	}
@@ -746,8 +746,8 @@ func (l *AgentLauncher) findContainerByName(ctx context.Context, name string) (s
 func (l *AgentLauncher) findOwnedContainer(ctx context.Context, name, role string) (string, error) {
 	output, err := l.run(ctx,
 		"ps", "--all", "--no-trunc",
-		"--filter", "label="+workspaceTokenLabel + "=" + hashText(l.config.WorkspaceToken),
-		"--filter", "label="+runtimeRoleLabel + "=" + role,
+		"--filter", "label="+workspaceTokenLabel+"="+hashText(l.config.WorkspaceToken),
+		"--filter", "label="+runtimeRoleLabel+"="+role,
 		"--format", "{{.ID}}",
 	)
 	if err != nil {
