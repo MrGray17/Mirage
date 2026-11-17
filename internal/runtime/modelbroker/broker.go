@@ -61,7 +61,7 @@ type Config struct {
 }
 
 type Broker struct {
-	closeMu              sync.Mutex
+	lifecycleMu          sync.Mutex
 	mu                   sync.Mutex
 	config               Config
 	identity             string
@@ -224,6 +224,8 @@ func (b *Broker) Diagnostics() DiagnosticSnapshot {
 }
 
 func (b *Broker) Start() error {
+	b.lifecycleMu.Lock()
+	defer b.lifecycleMu.Unlock()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.started || b.closed || b.listener != nil || b.directory != "" {
@@ -278,8 +280,8 @@ func (b *Broker) Start() error {
 // later call with a fresh context can finish cleanup after in-flight requests
 // have drained.
 func (b *Broker) Close(ctx context.Context) error {
-	b.closeMu.Lock()
-	defer b.closeMu.Unlock()
+	b.lifecycleMu.Lock()
+	defer b.lifecycleMu.Unlock()
 
 	b.mu.Lock()
 	if b.closed {
