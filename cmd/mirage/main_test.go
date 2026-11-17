@@ -388,7 +388,7 @@ func TestQuickEditRequiresDigestPinnedImage(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("MIRAGE_QWEN_IMAGE", "")
-	t.Setenv("MIRAGE_AGENT_IMAGE", "")
+	t.Setenv("MIRAGE_AGENT_IMAGE", "ghcr.io/example/generic-agent@sha256:"+strings.Repeat("a", 64))
 	_, err := parseQuickEditPlan([]string{"--workspace", workspace, "README.md", "Improve the introduction"})
 	if err == nil || !strings.Contains(err.Error(), "MIRAGE_QWEN_IMAGE") {
 		t.Fatalf("missing image error = %v", err)
