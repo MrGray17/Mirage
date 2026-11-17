@@ -5,8 +5,7 @@ MIRAGE includes a deliberately narrow local-model agent for validating
 does not change filesystem authorization or commit semantics.
 
 The agent image contains one static binary in a scratch filesystem. It has no
-shell, package manager, Git client, network client, or subprocess tool. The
-the model actions are a bounded sequence. The trusted host passes one
+shell, package manager, Git client, network client, or subprocess tool. The model actions are a bounded sequence. The trusted host passes one
 relative `--target` path to the Qwen driver. The model can list and read only
 that configured target; the schema does not offer any other workspace path:
 
@@ -38,9 +37,8 @@ This recovery never bypasses validation and does not retry
 filesystem execution failures. This all-or-nothing guarantee applies to
 validation and size failures; it does not make the underlying filesystem write
 crash-atomic.
-Append remains available for end-of-file insertions. Go's
-rooted filesystem API rejects absolute paths,
-traversal, and symlink escapes. `.env` and `.git` are unavailable through the
+Append remains available for end-of-file insertions. Go's rooted filesystem operations reject absolute paths, traversal, and
+symlink components, including links that resolve elsewhere inside the workspace. `.env` and `.git` are unavailable through the
 driver, file and transcript sizes are bounded, and malformed or repeated
 actions fail closed.
 
