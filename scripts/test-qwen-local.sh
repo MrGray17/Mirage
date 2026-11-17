@@ -217,6 +217,7 @@ expected = {
     "outcome": "REJECTED",
     "authorized": 0,
     "denied": 1,
+    "observed": 1,
     "committed": 0,
     "receipt_valid": True,
     "cleanup_complete": True,
