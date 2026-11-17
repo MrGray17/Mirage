@@ -232,10 +232,10 @@ func TestActionFormatHasExactlyOneToolForEachState(t *testing.T) {
 		state sequenceState
 		tool  string
 	}{
-		{name: "initial", state: sequenceState{readContent: map[string]string{}}, tool: "list_files"},
-		{name: "listed", state: sequenceState{listed: true, readContent: map[string]string{}}, tool: "read_file"},
-		{name: "read", state: sequenceState{listed: true, readContent: map[string]string{"README.md": "text"}}, tool: "patch_file"},
-		{name: "written", state: sequenceState{listed: true, readContent: map[string]string{"README.md": "text"}, wrote: true}, tool: "finish"},
+		{name: "initial", state: sequenceState{targetPath: "README.md", readContent: map[string]string{}}, tool: "list_files"},
+		{name: "listed", state: sequenceState{targetPath: "README.md", listed: true, readContent: map[string]string{}}, tool: "read_file"},
+		{name: "read", state: sequenceState{targetPath: "README.md", listed: true, readContent: map[string]string{"README.md": "text"}}, tool: "patch_file"},
+		{name: "written", state: sequenceState{targetPath: "README.md", listed: true, readContent: map[string]string{"README.md": "text"}, wrote: true}, tool: "finish"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -246,6 +246,14 @@ func TestActionFormatHasExactlyOneToolForEachState(t *testing.T) {
 			}
 			if _, exists := schema["oneOf"]; exists {
 				t.Fatal("state schema must not use redundant oneOf composition")
+			}
+			if test.name == "listed" {
+				arguments := properties["arguments"].(map[string]any)
+				argumentProperties := arguments["properties"].(map[string]any)
+				allowed, ok := argumentProperties["path"].(map[string]any)["enum"].([]string)
+				if !ok || len(allowed) != 1 || allowed[0] != "README.md" {
+					t.Fatalf("read_file path enum = %#v, want only README.md", argumentProperties["path"])
+				}
 			}
 		})
 	}
