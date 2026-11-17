@@ -149,14 +149,23 @@ func TestWindowsEditUsesCurrentDirectoryAndImageSettings(t *testing.T) {
 func TestWindowsEditTranslatesExplicitWorkspaceAndPreservesImageFlags(t *testing.T) {
 	original := translateWindowsBridgePath
 	translateWindowsBridgePath = func(_ wsl.Config, direction, value string) (string, error) {
-		if direction != "-u" || value != filepath.Clean("C:\\Projects\\Mirage") {
-			t.Fatalf("translation direction=%q path=%q", direction, value)
+		if direction != "-u" {
+			t.Fatalf("translation direction=%q", direction)
 		}
-		return "/mnt/c/Projects/Mirage", nil
+		switch filepath.Clean(value) {
+		case filepath.Clean("C:\\Projects\\Mirage"):
+			return "/mnt/c/Projects/Mirage", nil
+		case filepath.Clean("C:\\Projects\\Mirage\\.mirage-evidence"):
+			return "/mnt/c/Projects/Mirage/.mirage-evidence", nil
+		default:
+			t.Fatalf("unexpected Windows path to translate: %q", value)
+			return "", errors.New("unexpected path")
+		}
 	}
 	t.Cleanup(func() { translateWindowsBridgePath = original })
 	args := []string{
 		"--workspace", "C:\\Projects\\Mirage",
+		"--output-dir", ".\\.mirage-evidence",
 		"--image", "registry.example/qwen@sha256:" + strings.Repeat("c", 64),
 		"--helper-image", "busybox@sha256:" + strings.Repeat("d", 64),
 		"README.md", "Fix the introduction",
@@ -167,12 +176,24 @@ func TestWindowsEditTranslatesExplicitWorkspaceAndPreservesImageFlags(t *testing
 	}
 	want := []string{
 		"--workspace", "/mnt/c/Projects/Mirage",
-		"--image", args[3],
-		"--helper-image", args[5],
+		"--output-dir", "/mnt/c/Projects/Mirage/.mirage-evidence",
+		"--image", args[5],
+		"--helper-image", args[7],
 		"README.md", "Fix the introduction",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("edit args = %#v, want %#v", got, want)
+	}
+}
+
+func TestWindowsEditRejectsDuplicateOutputDirectory(t *testing.T) {
+	_, err := prepareWindowsEditArguments(wsl.Config{Distribution: "Ubuntu"}, []string{
+		"--output-dir", "C:\\Temp\\one",
+		"--output-dir=C:\\Temp\\two",
+		"README.md", "Update the file",
+	})
+	if err == nil || !strings.Contains(err.Error(), "supplied only once") {
+		t.Fatalf("duplicate output directory error = %v", err)
 	}
 }
 
