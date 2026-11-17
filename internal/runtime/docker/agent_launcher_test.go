@@ -115,7 +115,7 @@ func TestVerifySeedContainerRejectsCapabilityAndDeviceExtensions(t *testing.T) {
 				Name        string `json:"Name"`
 				Source      string `json:"Source"`
 				Destination string `json:"Destination"`
-				RW          bool `json:"RW"`
+				RW          bool   `json:"RW"`
 				Propagation string `json:"Propagation"`
 			}{Type: "volume", Name: launcher.volumeName, Destination: containerWorkspacePath, RW: true})
 			test.mutate(&inspect)
