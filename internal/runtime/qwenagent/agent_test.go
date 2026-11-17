@@ -54,7 +54,7 @@ func TestStrictJSONRejectsDuplicateMembersAtEveryDepth(t *testing.T) {
 		`{"tool":"finish","tool":"list_files","arguments":{}}`,
 		`{"arguments":{"path":"README.md","path":"other.txt"},"tool":"read_file"}`,
 		`{"arguments":{"edits":[{"search":"one","replace":"two","search":"three"}]},"tool":"patch_file"}`,
-		`{"tool":"finish","\\u0074ool":"list_files","arguments":{}}`,
+		`{"tool":"finish","\u0074ool":"list_files","arguments":{}}`,
 	}
 	for _, encoded := range tests {
 		if _, err := parseAction([]byte(encoded)); !errors.Is(err, ErrProtocol) {
