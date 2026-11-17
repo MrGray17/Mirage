@@ -6,17 +6,20 @@ does not change filesystem authorization or commit semantics.
 
 The agent image contains one static binary in a scratch filesystem. It has no
 shell, package manager, Git client, network client, or subprocess tool. The
-only model actions are a bounded sequence:
+the model actions are a bounded sequence. The trusted host passes one
+relative `--target` path to the Qwen driver. The model can list and read only
+that configured target; the schema does not offer any other workspace path:
 
 ```text
-list_files
-→ read_file (one rooted regular file)
-→ patch_file (append, exact search/replace, or bounded edit batch in that same rooted file)
+list_files (configured target only)
+→ read_file (the exact target)
+→ patch_file (append, exact search/replace, or bounded edit batch)
 → finish
 ```
 
-Qwen chooses the file and proposed edit. The driver applies those choices only
-inside `/workspace`. Every `patch_file` action declares an explicit `mode`:
+Qwen proposes the edit, but it does not choose which file to inspect. The
+driver applies the proposed change only to the preselected target inside
+`/workspace`. Every `patch_file` action declares an explicit `mode`:
 `append`, `replace`, or `batch`. Those modes have disjoint argument shapes,
 and the driver rejects a mode/field mismatch. An action may append, perform one
 exact replacement, or apply up to 16 exact replacements to that same file.
