@@ -168,8 +168,8 @@ func TestWindowsEditTranslatesExplicitWorkspaceAndPreservesImageFlags(t *testing
 	}
 	want := []string{
 		"--workspace", "/mnt/c/Projects/Mirage",
-		"--image", args[2],
-		"--helper-image", args[4],
+		"--image", args[3],
+		"--helper-image", args[5],
 		"README.md", "Fix the introduction",
 	}
 	if !reflect.DeepEqual(got, want) {
