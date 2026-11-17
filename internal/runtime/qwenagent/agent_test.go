@@ -60,6 +60,10 @@ func TestSequenceRequiresRootedInspectThenSinglePatchThenFinish(t *testing.T) {
 		t.Fatal(err)
 	}
 	state.observe(list, `["README.md"]`)
+	unreadPatch, _ := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"README.md","mode":"append","append":"x","search":null,"replace":null,"edits":null}}`))
+	if err := state.validate(unreadPatch); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("patch before target read returned %v, want ErrProtocol", err)
+	}
 	if err := state.validate(read); err != nil {
 		t.Fatal(err)
 	}
@@ -69,8 +73,8 @@ func TestSequenceRequiresRootedInspectThenSinglePatchThenFinish(t *testing.T) {
 	}
 	state.observe(read, `"original"`)
 	wrong, _ := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"other.txt","mode":"append","append":"x","search":null,"replace":null,"edits":null}}`))
-	if err := state.validate(wrong); !errors.Is(err, ErrProtocol) {
-		t.Fatalf("patch without same-path read returned %v", err)
+	if err := state.validate(wrong); !errors.Is(err, ErrPolicy) {
+		t.Fatalf("patch outside configured target returned %v, want ErrPolicy", err)
 	}
 	patch, _ := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"README.md","mode":"append","append":"x","search":null,"replace":null,"edits":null}}`))
 	if err := state.validate(patch); err != nil {
