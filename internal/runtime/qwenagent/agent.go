@@ -466,7 +466,7 @@ func logRejectedAction(output io.Writer, step int, encoded []byte, rejection err
 	if len(reason) > maxReasonBytes {
 		reason = reason[:maxReasonBytes]
 	}
-	fmt.Fprintf(output, "qwen_agent step=%d action_rejected %s reason=%q\\n",
+	fmt.Fprintf(output, "qwen_agent step=%d action_rejected %s reason=%q\n",
 		step, summarizeRejectedAction(encoded), reason)
 }
 
