@@ -138,7 +138,7 @@ func isDigestPinnedImageReference(reference string) bool {
 		return false
 	}
 	name := reference[:index]
-	if name != strings.ToLower(name) || strings.ContainsAny(name, "@ \\t\\r\\n") || strings.HasSuffix(name, "/") {
+	if name != strings.ToLower(name) || strings.ContainsAny(name, "@ \t\r\n") || strings.HasSuffix(name, "/") {
 		return false
 	}
 	for _, character := range reference[index+len(marker):] {
