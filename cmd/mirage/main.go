@@ -176,10 +176,10 @@ func parseQuickEditPlan(args []string) (quickEditPlan, error) {
 		return quickEditPlan{}, errors.New("Qwen image is not configured; pass --image <registry/image@sha256:digest> or set MIRAGE_QWEN_IMAGE once")
 	}
 	if !isDigestPinnedImageReference(*image) {
-		return quickEditPlan{}, errors.New("Qwen image must use name@sha256: followed by 64 lowercase hexadecimal characters")
+		return quickEditPlan{}, errors.New("Qwen image must use an immutable name@sha256: reference with 64 lowercase hexadecimal characters")
 	}
 	if !isDigestPinnedImageReference(*helper) {
-		return quickEditPlan{}, errors.New("helper image must use name@sha256: followed by 64 lowercase hexadecimal characters")
+		return quickEditPlan{}, errors.New("helper image must use an immutable name@sha256: reference with 64 lowercase hexadecimal characters")
 	}
 	if *timeout < time.Second || *timeout > 30*time.Minute {
 		return quickEditPlan{}, errors.New("--timeout must be between 1s and 30m")
