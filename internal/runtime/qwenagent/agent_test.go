@@ -179,18 +179,24 @@ func TestActionFormatDeclaresBoundedEditBatch(t *testing.T) {
 	formatted := actionFormat(sequenceState{readContent: map[string]string{"README.md": "before"}}).(map[string]any)
 	format := formatted["format"].(map[string]any)
 	schema := format["schema"].(map[string]any)
-	variants := schema["oneOf"].([]any)
-	if len(variants) != 1 {
-		t.Fatalf("patch action schema has %d variants, want one explicit-mode schema", len(variants))
+	if schema["type"] != "object" {
+		t.Fatalf("schema type = %v, want object", schema["type"])
 	}
-	arguments := variants[0].(map[string]any)["properties"].(map[string]any)["arguments"].(map[string]any)
-	properties := arguments["properties"].(map[string]any)
-	mode := properties["mode"].(map[string]any)
+	if _, exists := schema["oneOf"]; exists {
+		t.Fatal("single legal action schema should not use oneOf composition")
+	}
+	properties := schema["properties"].(map[string]any)
+	if got := properties["tool"].(map[string]any)["const"]; got != "patch_file" {
+		t.Fatalf("tool const = %v, want patch_file", got)
+	}
+	arguments := properties["arguments"].(map[string]any)
+	argumentProperties := arguments["properties"].(map[string]any)
+	mode := argumentProperties["mode"].(map[string]any)
 	allowed, ok := mode["enum"].([]string)
 	if !ok || strings.Join(allowed, ",") != "append,replace,batch" {
 		t.Fatalf("mode enum = %#v, want append,replace,batch", mode["enum"])
 	}
-	edits := properties["edits"].(map[string]any)
+	edits := argumentProperties["edits"].(map[string]any)
 	if edits["maxItems"] != maxFileEdits {
 		t.Fatalf("edits maxItems = %v, want %d", edits["maxItems"], maxFileEdits)
 	}
@@ -211,6 +217,50 @@ func TestActionFormatDeclaresBoundedEditBatch(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("%s must be required in strict schema", field)
+		}
+	}
+}
+
+func TestActionFormatHasExactlyOneToolForEachState(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		state sequenceState
+		tool  string
+	}{
+		{name: "initial", state: sequenceState{readContent: map[string]string{}}, tool: "list_files"},
+		{name: "listed", state: sequenceState{listed: true, readContent: map[string]string{}}, tool: "read_file"},
+		{name: "read", state: sequenceState{listed: true, readContent: map[string]string{"README.md": "text"}}, tool: "patch_file"},
+		{name: "written", state: sequenceState{listed: true, readContent: map[string]string{"README.md": "text"}, wrote: true}, tool: "finish"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			schema := actionFormat(test.state).(map[string]any)["format"].(map[string]any)["schema"].(map[string]any)
+			properties := schema["properties"].(map[string]any)
+			if got := properties["tool"].(map[string]any)["const"]; got != test.tool {
+				t.Fatalf("tool const = %v, want %s", got, test.tool)
+			}
+			if _, exists := schema["oneOf"]; exists {
+				t.Fatal("state schema must not use redundant oneOf composition")
+			}
+		})
+	}
+}
+
+func TestLogRejectedActionOmitsWorkspaceContent(t *testing.T) {
+	t.Parallel()
+	encoded := []byte(`{"tool":"patch_file","arguments":{"path":"README.md","mode":"batch","append":null,"search":null,"replace":null,"edits":[{"search":"PRIVATE_SEARCH_SENTINEL","replace":"PRIVATE_REPLACE_SENTINEL"}]}}`)
+	var output strings.Builder
+	logRejectedAction(&output, 4, encoded, errors.New("batch mode requires only an edits array"))
+	log := output.String()
+	for _, secret := range []string{"README.md", "PRIVATE_SEARCH_SENTINEL", "PRIVATE_REPLACE_SENTINEL"} {
+		if strings.Contains(log, secret) {
+			t.Fatalf("rejection log leaked %q: %s", secret, log)
+		}
+	}
+	for _, expected := range []string{"step=4", "action_rejected", "tool=patch_file", "mode=batch", "fields=path,mode,append,search,replace,edits"} {
+		if !strings.Contains(log, expected) {
+			t.Errorf("rejection log missing %q: %s", expected, log)
 		}
 	}
 }
