@@ -107,7 +107,7 @@ func Run(ctx context.Context, config Config) error {
 	var lastRejection error
 	lastRejectedOutput := ""
 	repeatedRejectedOutput := 0
-	recordRejection := func(encoded []byte, rejection error) error {
+	recordRejection := func(step int, encoded []byte, rejection error) error {
 		lastRejection = rejection
 		current := string(encoded)
 		key := rejectedActionKey(encoded)
@@ -137,7 +137,7 @@ func Run(ctx context.Context, config Config) error {
 		if err != nil {
 			// Malformed model output has not touched the workspace. Return bounded
 			// validation feedback to the model instead of aborting the whole run.
-			if rejectionErr := recordRejection(encoded, err); rejectionErr != nil {
+			if rejectionErr := recordRejection(step, encoded, err); rejectionErr != nil {
 				return rejectionErr
 			}
 			continue
