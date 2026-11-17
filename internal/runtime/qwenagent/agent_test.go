@@ -595,7 +595,7 @@ func TestQwenPatchFileReplacementRespectsWriteLimit(t *testing.T) {
 	}
 }
 
-func TestRootedFileOperationsRejectDirectorySymlinkEscape(t *testing.T) {
+func TestRootedFileOperationsRejectInRootAndExternalSymlinks(t *testing.T) {
 	t.Parallel()
 	workspace := t.TempDir()
 	outside := t.TempDir()
