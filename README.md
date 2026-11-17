@@ -206,111 +206,67 @@ image are fixed defaults; there is no silent model fallback.
 
 ## Real local-Qwen proof
 
-Ollama must already be serving exactly `qwen2.5-coder:1.5b`; MIRAGE never pulls
-or installs a model. Install Ollama separately on the trusted host, start it,
-and explicitly obtain the required local model:
+Ollama must already be installed and serving exactly `qwen2.5-coder:1.5b`.
+On Windows, leave Ollama running on Windows; MIRAGE reaches its loopback API
+through the trusted WSL interop broker while the agent sandbox remains
+`network=none`.
+
+Prepare the model once:
 
 ```powershell
 ollama pull qwen2.5-coder:1.5b
 ollama list
 ```
 
-On Windows, leave Ollama running on Windows and perform the remaining commands
-inside the configured Ubuntu distribution. The trusted MIRAGE broker uses the
-fixed Windows-loopback interop path; the sandbox itself retains `network=none`.
-
-Select the installed Linux binary. A native Linux install uses the first path;
-the Windows installer uses the second:
+From a clean Linux or WSL2 checkout with Go 1.27.3+, rootless Docker, and an
+existing GHCR login that can publish to the configured package, run:
 
 ```bash
-# Native Linux:
-MIRAGE_BIN="$HOME/.local/bin/mirage"
-
-# Windows installer + WSL2 (use this instead on Windows):
-MIRAGE_BIN="$HOME/.local/share/mirage/bin/mirage"
-
-"$MIRAGE_BIN" version
-"$MIRAGE_BIN" doctor
+./scripts/test-qwen-local.sh
 ```
 
-The reported version and commit must match the frontend/source installation.
-Build the constrained, scratch-based Qwen agent image from the repository root
-and capture its immutable image identity:
+This one-command acceptance performs the full local proof:
+
+1. Checks the rootless Docker environment and exact local Ollama model.
+2. Builds the scratch-based Qwen agent from the current clean source commit,
+   publishes it, and pulls it back by immutable digest.
+3. Uses the easy `mirage edit` CLI to apply a two-operation batch to one
+   disposable README, then checks the exact resulting bytes.
+4. Attempts a deliberately unauthorized README edit under a contract that
+   permits a different file, and verifies both real files remain unchanged.
+5. Verifies both the committed and rejected receipts and preserves the run
+   summaries, logs, receipts, and Observatory files for inspection.
+
+The script reuses the existing rootless Docker configuration and GHCR login;
+it never asks for a token. It prints the immutable `MIRAGE_QWEN_IMAGE` value
+at the end. Set that value once in your trusted shell environment:
 
 ```bash
-# Replace this with a repository in a registry you control (use a lowercase namespace).
-QWEN_REPO="ghcr.io/your-github-username/mirage-qwen-agent"
-QWEN_TAG="validation"
-docker build -t "$QWEN_REPO:$QWEN_TAG" -f build/m44-qwen-agent/Dockerfile .
-PUSH_OUTPUT="$(docker push "$QWEN_REPO:$QWEN_TAG" 2>&1)" || { printf '%s\n' "$PUSH_OUTPUT" >&2; exit 1; }
-printf '%s\n' "$PUSH_OUTPUT"
-QWEN_DIGEST="$(printf '%s\n' "$PUSH_OUTPUT" | sed -nE 's/.*[Dd]igest: (sha256:[0-9a-f]{64})([[:space:]].*)?$/\1/p' | tail -n 1)"
-if [[ ! "$QWEN_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-  echo "Copy the immutable manifest digest from the successful push or registry and set QWEN_DIGEST." >&2
-  exit 1
-fi
-QWEN_IMAGE="$QWEN_REPO@$QWEN_DIGEST"
-docker pull "$QWEN_IMAGE"
-HELPER_IMAGE="busybox@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0"
-mkdir -p "$HOME/.cache/mirage"
-DEMO_ROOT="$(mktemp -d "$HOME/.cache/mirage/qwen-v1.XXXXXX")"
-mkdir -p "$DEMO_ROOT/authorized" "$DEMO_ROOT/rejected"
-cp README.md "$DEMO_ROOT/authorized/README.md"
-cp README.md "$DEMO_ROOT/rejected/README.md"
-cp README.md "$DEMO_ROOT/rejected/protected.txt"
+export MIRAGE_QWEN_IMAGE='ghcr.io/mrgray17/mirage-qwen-agent@sha256:<digest>'
+mirage edit README.md "Add a concise verification section"
 ```
 
-Authorized run—Qwen edits the one contract-authorized file:
+For PowerShell, persist the same value for future sessions:
 
-```bash
-"$MIRAGE_BIN" run agent \
-  --agent qwen \
-  --workspace "$DEMO_ROOT/authorized" \
-  --image "$QWEN_IMAGE" \
-  --helper-image "$HELPER_IMAGE" \
-  --allow /workspace/README.md \
-  --model-broker ollama \
-  --model qwen2.5-coder:1.5b \
-  --output-dir "$DEMO_ROOT/evidence-authorized" \
-  -- /usr/local/bin/mirage-qwen-agent \
-  "Append one short verification line to README.md."
+```powershell
+[Environment]::SetEnvironmentVariable(
+  "MIRAGE_QWEN_IMAGE",
+  "ghcr.io/mrgray17/mirage-qwen-agent@sha256:<digest>",
+  "User"
+)
 ```
 
-Expected terminal path:
+The Windows frontend and WSL backend must be installed from the same source
+commit. After installing or upgrading with `scripts/install.ps1`, open a new
+PowerShell window and run `mirage version` and `mirage doctor`; the latter
+must report `READY` before using `mirage edit` from Windows. The local
+acceptance script validates the Linux/WSL product path; the final platform
+release gate still includes a real PowerShell-to-WSL edit using the installed
+frontend/backend pair.
 
-```text
-Qwen edit → FROZEN → mutations=1 → VERIFIED → COMMITTED → receipt VALID
-```
-
-Rejected run—the contract authorizes `protected.txt`, while the model is asked
-to edit `README.md`:
-
-```bash
-"$MIRAGE_BIN" run agent \
-  --agent qwen \
-  --workspace "$DEMO_ROOT/rejected" \
-  --image "$QWEN_IMAGE" \
-  --helper-image "$HELPER_IMAGE" \
-  --allow /workspace/protected.txt \
-  --model-broker ollama \
-  --model qwen2.5-coder:1.5b \
-  --output-dir "$DEMO_ROOT/evidence-rejected" \
-  -- /usr/local/bin/mirage-qwen-agent \
-  "Append one short verification line to README.md."
-```
-
-This command intentionally exits nonzero after persisting verified rejection
-evidence. Expected terminal path:
-
-```text
-Qwen edit → FROZEN → filesystem.default_deny → REJECTED
-→ committed=0 → real workspace unchanged → receipt VALID
-```
-
-Exact receipt and Observatory paths are printed by both commands. See
-[the local Qwen guide](docs/qwen-local-agent.md) for the security and evidence
-semantics.
-
+See [the local Qwen guide](docs/qwen-local-agent.md) for detailed protocol,
+security, evidence, and troubleshooting information.
+ 
 ## Evidence and Observatory
 
 Receipts bind run and contract identity, trusted time, effect accounting,
