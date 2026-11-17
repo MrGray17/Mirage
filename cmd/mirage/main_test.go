@@ -206,7 +206,7 @@ func TestRunAgentQwenEvidenceModeRequiresFixedCompatibilityBoundary(t *testing.T
 	image := "example.invalid/image@sha256:" + strings.Repeat("0", 64)
 	base := []string{"run", "agent", "--image", image, "--helper-image", image, "--allow", "/workspace/README.md", "--agent", "qwen"}
 	var stdout, stderr bytes.Buffer
-	args := append(append([]string(nil), base...), "--", "/usr/local/bin/mirage-qwen-agent", "task")
+	args := append(append([]string(nil), base...), "--", "/usr/local/bin/mirage-qwen-agent", "--target", "README.md", "task")
 	if err := run(args, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "trusted Ollama broker") {
 		t.Fatalf("missing Ollama boundary error=%v", err)
 	}
@@ -214,7 +214,7 @@ func TestRunAgentQwenEvidenceModeRequiresFixedCompatibilityBoundary(t *testing.T
 	if err := run(args, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "fixed driver command") {
 		t.Fatalf("alternate command error=%v", err)
 	}
-	args = append(append([]string(nil), base...), "--model-broker", "ollama", "--model", modelbroker.Qwen25Coder15B, "--publish-github", "--github-repo", "owner/repo", "--", "/usr/local/bin/mirage-qwen-agent", "task")
+	args = append(append([]string(nil), base...), "--model-broker", "ollama", "--model", modelbroker.Qwen25Coder15B, "--publish-github", "--github-repo", "owner/repo", "--", "/usr/local/bin/mirage-qwen-agent", "--target", "README.md", "task")
 	if err := run(args, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "does not authorize GitHub") {
 		t.Fatalf("publication widening error=%v", err)
 	}
@@ -371,7 +371,7 @@ func TestQuickEditBuildsNarrowQwenInvocation(t *testing.T) {
 	for _, expected := range []string{
 		"--agent qwen", "--model-broker ollama", "--model " + modelbroker.Qwen25Coder15B,
 		"--allow /workspace/src/main.go", image, defaultQwenHelperImage,
-		"/usr/local/bin/mirage-qwen-agent", "Edit only src/main.go. User request: Add input validation",
+		"/usr/local/bin/mirage-qwen-agent", "--target src/main.go", "Edit only src/main.go. User request: Add input validation",
 	} {
 		if !strings.Contains(args, expected) {
 			t.Errorf("agent invocation missing %q: %s", expected, args)
