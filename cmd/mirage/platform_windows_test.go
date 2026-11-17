@@ -112,7 +112,6 @@ func TestWindowsFrontendClassifiesPublicAndAdvancedRuns(t *testing.T) {
 	}
 }
 
-
 func TestWindowsEditUsesCurrentDirectoryAndImageSettings(t *testing.T) {
 	current, err := os.Getwd()
 	if err != nil {
