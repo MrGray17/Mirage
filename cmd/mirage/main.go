@@ -51,6 +51,7 @@ func main() {
 func run(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
 		printHelp(stdout)
+		printQuickEditHelp(stdout)
 		return nil
 	}
 	switch args[0] {
@@ -95,6 +96,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return runVersion(args[1:], stdout, stderr)
 	case "help", "--help", "-h":
 		printHelp(stdout)
+		printQuickEditHelp(stdout)
 		return nil
 	default:
 		return usageError()
@@ -103,6 +105,14 @@ func run(args []string, stdout, stderr io.Writer) error {
 
 func usageError() error {
 	return errors.New("usage: mirage edit <file> <task> | mirage run [malicious|benign] [options]; try 'mirage help'")
+}
+
+func printQuickEditHelp(writer io.Writer) {
+	fmt.Fprintln(writer, "Quick local edit:")
+	fmt.Fprintln(writer, "  mirage edit [options] <file> <task>")
+	fmt.Fprintln(writer, "  MIRAGE_QWEN_IMAGE=<registry/image@sha256:digest> configures the Qwen agent image.")
+	fmt.Fprintln(writer, "  The target must be one existing regular file inside --workspace.")
+	fmt.Fprintln(writer, "  Options: --workspace, --image, --helper-image, --timeout, --format, --output-dir, --open, --yes")
 }
 
 type quickEditPlan struct {
@@ -265,29 +275,41 @@ func runQuickEdit(args []string, stdout, stderr io.Writer) error {
 	plan, err := parseQuickEditPlan(args)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
+			printQuickEditHelp(stderr)
 			return nil
 		}
 		return err
 	}
 	if !plan.Yes {
-		fmt.Fprintf(stderr,
-			"MIRAGE will give local Qwen permission to propose changes to exactly one existing file.\n"+
-				"  Workspace: %s\n  File:      %s\n  Model:     %s (local Ollama)\n  Network:   disabled inside the agent sandbox\n"+
-				"Continue? [y/N] ",
-			plan.Workspace, plan.File, modelbroker.Qwen25Coder15B,
-		)
-		answer, readErr := bufio.NewReader(os.Stdin).ReadString('\n')
-		if readErr != nil && !errors.Is(readErr, io.EOF) {
-			return fmt.Errorf("read confirmation: %w", readErr)
+		confirmed, err := confirmQuickEdit(os.Stdin, stderr, plan)
+		if err != nil {
+			return err
 		}
-		switch strings.ToLower(strings.TrimSpace(answer)) {
-		case "y", "yes":
-		default:
+		if !confirmed {
 			fmt.Fprintln(stderr, "Cancelled. The project workspace was not changed.")
 			return nil
 		}
 	}
 	return runAgent(plan.agentArgs(), stdout, stderr)
+}
+
+func confirmQuickEdit(reader io.Reader, writer io.Writer, plan quickEditPlan) (bool, error) {
+	fmt.Fprintf(writer,
+		"MIRAGE will give local Qwen permission to propose changes to exactly one existing file.\n"+
+			"  Workspace: %s\n  File:      %s\n  Model:     %s (local Ollama)\n  Network:   disabled inside the agent sandbox\n"+
+			"Continue? [y/N] ",
+		plan.Workspace, plan.File, modelbroker.Qwen25Coder15B,
+	)
+	answer, readErr := bufio.NewReader(reader).ReadString('\n')
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return false, fmt.Errorf("read confirmation: %w", readErr)
+	}
+	switch strings.ToLower(strings.TrimSpace(answer)) {
+	case "y", "yes":
+		return true, nil
+	default:
+		return false, nil
+	}
 }
 
 func runDemo(scenario string, args []string, stdout, stderr io.Writer) error {
