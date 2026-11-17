@@ -53,8 +53,8 @@ type Config struct {
 	Workspace     string
 	TargetPath    string
 	BrokerSocket  string
-	Model          string
-	Task           string
+	Model         string
+	Task          string
 	MaxSteps      int
 	MaxReadBytes  int64
 	MaxWriteBytes int64
