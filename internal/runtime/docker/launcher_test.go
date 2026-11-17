@@ -260,7 +260,7 @@ func TestPrepareRemovesContainerWhenEffectiveIsolationDiffers(t *testing.T) {
 		{output: []byte("0123456789ab\n")},
 		{output: mustJSON(t, inspect)},
 		{output: []byte("0123456789ab\n")}, // run/role inventory
-		{output: mustJSON(t, inspect)}, // ownership inspection
+		{output: mustJSON(t, inspect)},     // ownership inspection
 		{output: mustJSON(t, containerState{Status: "created", PID: 0})},
 		{output: nil}, // remove
 	}}
@@ -523,7 +523,7 @@ func TestPrepareRejectsEnabledImageHealthcheck(t *testing.T) {
 func TestDestroyDoesNotRemoveSameNameContainerOwnedByAnotherRun(t *testing.T) {
 	config := dockerTestConfig(t)
 	runner := &fakeRunner{responses: []fakeResponse{
-		{output: nil}, // no container has this run's ownership labels
+		{output: nil},                      // no container has this run's ownership labels
 		{output: []byte("0123456789ab\n")}, // reserved name belongs to another run
 	}}
 	launcher, err := newWithRunner(config, runner)
@@ -541,9 +541,9 @@ func TestDestroyDoesNotRemoveSameNameContainerOwnedByAnotherRun(t *testing.T) {
 	if len(runner.calls) != 2 {
 		t.Fatalf("foreign container received destructive commands: %v", runner.calls)
 	}
-	if !containsSequence(runner.calls[0], []string{"--filter", "label="+workspaceTokenLabel + "=" + hashText(config.WorkspaceToken)}) ||
-		!containsSequence(runner.calls[0], []string{"--filter", "label="+runtimeRoleLabel + "=" + hostileFixtureRole}) ||
-		!containsSequence(runner.calls[1], []string{"--filter", "name=^/"+config.ContainerName+"$"}) {
+	if !containsSequence(runner.calls[0], []string{"--filter", "label=" + workspaceTokenLabel + "=" + hashText(config.WorkspaceToken)}) ||
+		!containsSequence(runner.calls[0], []string{"--filter", "label=" + runtimeRoleLabel + "=" + hostileFixtureRole}) ||
+		!containsSequence(runner.calls[1], []string{"--filter", "name=^/" + config.ContainerName + "$"}) {
 		t.Fatalf("cleanup did not distinguish ownership from name collision: %v", runner.calls)
 	}
 }
@@ -557,8 +557,8 @@ func TestUncertainCreateRemainsDiscoverableForCleanup(t *testing.T) {
 		{output: []byte(`"sha256:image"`)},
 		{output: nil},
 		{err: errors.New("client response lost")},
-		{output: []byte("0123456789ab\n")}, // uncertain create name lookup
-		{output: []byte("0123456789ab\n")}, // run/role inventory
+		{output: []byte("0123456789ab\n")},                       // uncertain create name lookup
+		{output: []byte("0123456789ab\n")},                       // run/role inventory
 		{output: mustJSON(t, secureContainerInspect(t, config))}, // owner inspection
 		{output: mustJSON(t, containerState{Status: "created", PID: 0})},
 		{output: nil}, // remove
@@ -589,9 +589,9 @@ func TestFreezeRequiresDockerStopProof(t *testing.T) {
 		fakeResponse{output: []byte("0123456789ab\n")},
 		fakeResponse{output: []byte("137\n")},
 		fakeResponse{output: mustJSON(t, containerState{Status: "exited", PID: 0})},
-		fakeResponse{output: []byte("0123456789ab\n")}, // run/role inventory
+		fakeResponse{output: []byte("0123456789ab\n")},                       // run/role inventory
 		fakeResponse{output: mustJSON(t, secureContainerInspect(t, config))}, // owner inspection
-		fakeResponse{output: nil}, // remove
+		fakeResponse{output: nil},                                            // remove
 	)
 	launcher, err := newWithRunner(config, runner)
 	if err != nil {
@@ -708,7 +708,7 @@ func secureContainerInspect(t *testing.T, config Config) containerInspect {
 	inspected.Name = "/" + normalized.ContainerName
 	inspected.Config.Labels = map[string]string{
 		workspaceTokenLabel: hashText(normalized.WorkspaceToken),
-		runtimeRoleLabel: hostileFixtureRole,
+		runtimeRoleLabel:    hostileFixtureRole,
 	}
 	inspected.Config.User = normalized.ContainerUser
 	inspected.Config.WorkingDir = containerWorkspacePath
