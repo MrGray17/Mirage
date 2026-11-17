@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/MrGray17/Mirage/internal/buildinfo"
 	"github.com/MrGray17/Mirage/internal/cliapi"
