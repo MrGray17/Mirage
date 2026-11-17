@@ -150,7 +150,7 @@ func validateBackendInfo(backend buildinfo.Info) error {
 }
 
 func prepareWindowsEditArguments(config wsl.Config, args []string) ([]string, error) {
-	workspaceSet, imageSet, helperSet := false, false, false
+	workspaceSet, imageSet, helperSet, outputDirSet := false, false, false, false
 	rewritten := append([]string(nil), args...)
 	for index := 0; index < len(rewritten); index++ {
 		argument := rewritten[index]
@@ -176,6 +176,27 @@ func prepareWindowsEditArguments(config wsl.Config, args []string) ([]string, er
 				return nil, err
 			}
 			rewritten[index] = "--workspace=" + translated
+		case argument == "--output-dir":
+			if outputDirSet || index+1 >= len(rewritten) {
+				return nil, errors.New("--output-dir must be supplied once with a path")
+			}
+			outputDirSet = true
+			translated, err := translateEditWorkspace(config, rewritten[index+1])
+			if err != nil {
+				return nil, err
+			}
+			rewritten[index+1] = translated
+			index++
+		case strings.HasPrefix(argument, "--output-dir="):
+			if outputDirSet {
+				return nil, errors.New("--output-dir must be supplied only once")
+			}
+			outputDirSet = true
+			translated, err := translateEditWorkspace(config, strings.TrimPrefix(argument, "--output-dir="))
+			if err != nil {
+				return nil, err
+			}
+			rewritten[index] = "--output-dir=" + translated
 		case argument == "--image" || strings.HasPrefix(argument, "--image="):
 			imageSet = true
 		case argument == "--helper-image" || strings.HasPrefix(argument, "--helper-image="):
