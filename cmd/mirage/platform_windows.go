@@ -51,8 +51,11 @@ func requiresLinuxBackend(args []string) bool {
 		return false
 	}
 	switch args[0] {
-	case "run", "demo", "doctor", "setup", "edit":
+	case "run", "demo", "doctor", "setup":
 		return true
+	case "edit":
+		// Help is local and must remain available even before WSL is configured.
+		return len(args) < 2 || (args[1] != "--help" && args[1] != "-h")
 	default:
 		return false
 	}
