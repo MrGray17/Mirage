@@ -197,9 +197,6 @@ func prepareWindowsEditArguments(config wsl.Config, args []string) ([]string, er
 	}
 	if !imageSet {
 		image := strings.TrimSpace(os.Getenv("MIRAGE_QWEN_IMAGE"))
-		if image == "" {
-			image = strings.TrimSpace(os.Getenv("MIRAGE_AGENT_IMAGE"))
-		}
 		if image != "" {
 			prefix = append(prefix, "--image", image)
 		}
