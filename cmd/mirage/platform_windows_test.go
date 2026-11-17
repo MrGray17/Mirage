@@ -184,8 +184,8 @@ func TestWindowsEditTranslatesExplicitWorkspaceAndPreservesImageFlags(t *testing
 		"--yes",
 		"--workspace", "/mnt/c/Projects/Mirage",
 		"--output-dir", "/mnt/c/Projects/Mirage/.mirage-evidence",
-		"--image", args[11],
-		"--helper-image", args[13],
+		"--image", args[10],
+		"--helper-image", args[12],
 		"README.md", "Fix the introduction",
 	}
 	if !reflect.DeepEqual(got, want) {
