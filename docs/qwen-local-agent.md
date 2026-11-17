@@ -49,6 +49,13 @@ bounded local coding loop: Qwen can append or make up to 16 exact, unique
 replacements in one previously read existing file. Creating files, editing
 multiple files, shell access, and arbitrary tool use remain outside this v1
 integration's scope.
+
+The fixed CLI limits are 16 model steps, 256 KiB per target-file read, 256 KiB
+for the resulting write, 256 KiB per model response, and 512 KiB for the
+action/history transcript. A batch is limited to 16 replacement operations.
+The trusted host also applies its separate full-project snapshot and
+reconciliation budgets; the one-file tool boundary does not replace that
+whole-workspace integrity check.
 MIRAGE's trusted frozen-tree scan, canonical diff, contract verifier, freshness
 checks, and real commit engine remain the only authority over reality.
 
