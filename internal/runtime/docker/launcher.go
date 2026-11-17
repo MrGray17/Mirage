@@ -426,7 +426,7 @@ func (l *Launcher) verifyContainer(ctx context.Context) error {
 	if host.PidsLimit == nil || *host.PidsLimit != l.config.PIDLimit || host.Memory != l.config.MemoryBytes || host.MemorySwap != l.config.MemoryBytes || host.NanoCPUs != l.config.NanoCPUs {
 		return fmt.Errorf("%w: resource limits changed", ErrIsolation)
 	}
-	if host.Init == nil || !*host.Init || host.AutoRemove || host.ShmSize != 16<<20 || !safeTmpfs(host.Tmpfs["/tmp"]) || !hasNoFileLimit(host.Ulimits) {
+	if host.Init == nil || !*host.Init || host.AutoRemove || host.ShmSize != 16<<20 || len(host.Tmpfs) != 1 || !safeTmpfs(host.Tmpfs["/tmp"]) || !hasNoFileLimit(host.Ulimits) {
 		return fmt.Errorf("%w: init, temporary storage, or descriptor limits changed", ErrIsolation)
 	}
 	if host.RestartPolicy.Name != "no" || host.LogConfig.Type != "none" || len(host.Devices) != 0 || len(host.DeviceRequests) != 0 || host.PublishAllPorts || len(host.PortBindings) != 0 {
@@ -842,12 +842,7 @@ func safeTmpfs(options string) bool {
 }
 
 func hasNoFileLimit(limits []dockerUlimit) bool {
-	for _, limit := range limits {
-		if limit.Name == "nofile" && limit.Soft == 256 && limit.Hard == 256 {
-			return true
-		}
-	}
-	return false
+	return len(limits) == 1 && limits[0].Name == "nofile" && limits[0].Soft == 256 && limits[0].Hard == 256
 }
 
 func formatCPUs(nanoCPUs int64) string {

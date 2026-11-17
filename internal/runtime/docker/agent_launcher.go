@@ -398,7 +398,7 @@ func (l *AgentLauncher) verifySeedContainer(ctx context.Context) error {
 	if host.Privileged || !host.ReadonlyRootfs || host.NetworkMode != "none" || !privatePIDMode(host.PidMode) || host.IpcMode != "private" || host.CgroupnsMode != "private" || !containsFold(host.CapDrop, "ALL") || len(host.CapAdd) != 0 || !safeSecurityOptions(host.SecurityOpt) {
 		return fmt.Errorf("%w: quota-volume keeper isolation changed", ErrIsolation)
 	}
-	if host.PidsLimit == nil || *host.PidsLimit != 8 || host.Memory != 32<<20 || host.MemorySwap != 32<<20 || host.NanoCPUs != 250_000_000 || host.Init == nil || !*host.Init || host.AutoRemove || host.ShmSize != 4<<20 || !safeSizedTmpfs(host.Tmpfs["/tmp"], "size=1048576") || !hasExactNoFileLimit(host.Ulimits, 64) || host.RestartPolicy.Name != "no" || host.LogConfig.Type != "none" || len(host.Devices) != 0 || len(host.DeviceRequests) != 0 || host.PublishAllPorts || len(host.PortBindings) != 0 {
+	if host.PidsLimit == nil || *host.PidsLimit != 8 || host.Memory != 32<<20 || host.MemorySwap != 32<<20 || host.NanoCPUs != 250_000_000 || host.Init == nil || !*host.Init || host.AutoRemove || host.ShmSize != 4<<20 || len(host.Tmpfs) != 1 || !safeSizedTmpfs(host.Tmpfs["/tmp"], "size=1048576") || !hasExactNoFileLimit(host.Ulimits, 64) || host.RestartPolicy.Name != "no" || host.LogConfig.Type != "none" || len(host.Devices) != 0 || len(host.DeviceRequests) != 0 || host.PublishAllPorts || len(host.PortBindings) != 0 {
 		return fmt.Errorf("%w: quota-volume keeper resource policy changed", ErrIsolation)
 	}
 	if len(inspected.Mounts) != 1 {
@@ -514,7 +514,7 @@ func (l *AgentLauncher) verifyAgentContainer(ctx context.Context) error {
 	if host.Privileged || !host.ReadonlyRootfs || host.NetworkMode != "none" || !privatePIDMode(host.PidMode) || host.IpcMode != "private" || host.CgroupnsMode != "private" || !containsFold(host.CapDrop, "ALL") || len(host.CapAdd) != 0 || !safeSecurityOptions(host.SecurityOpt) {
 		return fmt.Errorf("%w: coding-agent isolation changed", ErrIsolation)
 	}
-	if host.PidsLimit == nil || *host.PidsLimit != l.config.PIDLimit || host.Memory != l.config.MemoryBytes || host.MemorySwap != l.config.MemoryBytes || host.NanoCPUs != l.config.NanoCPUs || host.Init == nil || !*host.Init || host.AutoRemove || host.ShmSize != 16<<20 || !safeSizedTmpfs(host.Tmpfs["/tmp"], "size=16777216") || !hasExactNoFileLimit(host.Ulimits, 256) || host.RestartPolicy.Name != "no" || !safeAgentLogConfig(host.LogConfig.Type, host.LogConfig.Config, l.config.DiagnosticBytes) || len(host.Devices) != 0 || len(host.DeviceRequests) != 0 || host.PublishAllPorts || len(host.PortBindings) != 0 {
+	if host.PidsLimit == nil || *host.PidsLimit != l.config.PIDLimit || host.Memory != l.config.MemoryBytes || host.MemorySwap != l.config.MemoryBytes || host.NanoCPUs != l.config.NanoCPUs || host.Init == nil || !*host.Init || host.AutoRemove || host.ShmSize != 16<<20 || len(host.Tmpfs) != 1 || !safeSizedTmpfs(host.Tmpfs["/tmp"], "size=16777216") || !hasExactNoFileLimit(host.Ulimits, 256) || host.RestartPolicy.Name != "no" || !safeAgentLogConfig(host.LogConfig.Type, host.LogConfig.Config, l.config.DiagnosticBytes) || len(host.Devices) != 0 || len(host.DeviceRequests) != 0 || host.PublishAllPorts || len(host.PortBindings) != 0 {
 		return fmt.Errorf("%w: coding-agent resource or device policy changed", ErrIsolation)
 	}
 	expectedMounts := 1
@@ -903,12 +903,7 @@ func safeSizedTmpfs(options, size string) bool {
 }
 
 func hasExactNoFileLimit(limits []dockerUlimit, value int64) bool {
-	for _, limit := range limits {
-		if limit.Name == "nofile" && limit.Soft == value && limit.Hard == value {
-			return true
-		}
-	}
-	return false
+	return len(limits) == 1 && limits[0].Name == "nofile" && limits[0].Soft == value && limits[0].Hard == value
 }
 
 func environmentValue(environment []string, name string) string {

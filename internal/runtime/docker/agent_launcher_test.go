@@ -45,6 +45,12 @@ func TestVerifyAgentContainerRejectsCapabilityAndDeviceExtensions(t *testing.T) 
 		{name: "tmpfs execution permission", mutate: func(inspect *containerInspect) {
 			inspect.HostConfig.Tmpfs["/tmp"] += ",exec"
 		}},
+		{name: "additional tmpfs mount", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Tmpfs["/run"] = "rw,nosuid,nodev,size=1048576,mode=1777"
+		}},
+		{name: "additional ulimit", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Ulimits = append(inspect.HostConfig.Ulimits, dockerUlimit{Name:"core", Soft:0, Hard:0})
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -76,6 +82,12 @@ func TestVerifySeedContainerRejectsCapabilityAndDeviceExtensions(t *testing.T) {
 		}},
 		{name: "extra tmpfs permission", mutate: func(inspect *containerInspect) {
 			inspect.HostConfig.Tmpfs = map[string]string{"/tmp": "rw,noexec,nosuid,nodev,size=1048576,mode=1777,exec"}
+		}},
+		{name: "additional tmpfs mount", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Tmpfs["/run"] = "rw,nosuid,nodev,size=1048576,mode=1777"
+		}},
+		{name: "additional ulimit", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Ulimits = append(inspect.HostConfig.Ulimits, dockerUlimit{Name:"core", Soft:0, Hard:0})
 		}},
 	}
 	for _, test := range tests {
