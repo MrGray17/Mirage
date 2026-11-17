@@ -559,8 +559,8 @@ func (l *Launcher) removeCreated(ctx context.Context) error {
 func (l *Launcher) findOwnedContainer(ctx context.Context) (string, error) {
 	output, err := l.run(ctx,
 		"ps", "--all", "--no-trunc",
-		"--filter", "label="+workspaceTokenLabel + "=" + hashText(l.config.WorkspaceToken),
-		"--filter", "label="+runtimeRoleLabel + "=" + hostileFixtureRole,
+		"--filter", "label="+workspaceTokenLabel+"="+hashText(l.config.WorkspaceToken),
+		"--filter", "label="+runtimeRoleLabel+"="+hostileFixtureRole,
 		"--format", "{{.ID}}",
 	)
 	if err != nil {
@@ -610,16 +610,16 @@ type daemonInfo struct {
 }
 
 type containerInspect struct {
-	ID   string `json:"Id"`
-	Name string `json:"Name"`
+	ID     string `json:"Id"`
+	Name   string `json:"Name"`
 	Config struct {
 		Labels      map[string]string `json:"Labels"`
-		User        string   `json:"User"`
-		WorkingDir  string   `json:"WorkingDir"`
-		Image       string   `json:"Image"`
-		Entrypoint  []string `json:"Entrypoint"`
-		Cmd         []string `json:"Cmd"`
-		Env         []string `json:"Env"`
+		User        string            `json:"User"`
+		WorkingDir  string            `json:"WorkingDir"`
+		Image       string            `json:"Image"`
+		Entrypoint  []string          `json:"Entrypoint"`
+		Cmd         []string          `json:"Cmd"`
+		Env         []string          `json:"Env"`
 		Healthcheck *struct {
 			Test []string `json:"Test"`
 		} `json:"Healthcheck"`
@@ -648,7 +648,7 @@ func verifyContainerOwner(inspected containerInspect, requestedID, expectedName,
 		if !sameContainerID(actualID, requestedID) {
 			return errors.New("Docker inspect returned a different container ID")
 		}
-	} else if inspected.Name != "/" + expectedName {
+	} else if inspected.Name != "/"+expectedName {
 		return errors.New("Docker inspect returned a different container name")
 	}
 	if inspected.Config.Labels[workspaceTokenLabel] != hashText(token) || inspected.Config.Labels[runtimeRoleLabel] != role {
