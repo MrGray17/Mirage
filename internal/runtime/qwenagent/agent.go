@@ -929,6 +929,9 @@ func listFiles(root *os.Root) ([]string, error) {
 }
 
 func decodeStrict(encoded []byte, target any) error {
+	if err := validateUniqueJSONKeys(encoded); err != nil {
+		return err
+	}
 	decoder := json.NewDecoder(bytes.NewReader(encoded))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
@@ -941,12 +944,81 @@ func decodeStrict(encoded []byte, target any) error {
 }
 
 func decodeEnvelope(encoded []byte, target any) error {
+	if err := validateUniqueJSONKeys(encoded); err != nil {
+		return err
+	}
 	decoder := json.NewDecoder(bytes.NewReader(encoded))
 	if err := decoder.Decode(target); err != nil {
 		return err
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return errors.New("trailing JSON value")
+	}
+	return nil
+}
+
+// validateUniqueJSONKeys rejects duplicate object members at every depth.
+// encoding/json otherwise accepts duplicates and silently keeps the last value,
+// which is ambiguous for a strict agent/broker protocol.
+func validateUniqueJSONKeys(encoded []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	var parseValue func() error
+	parseValue = func() error {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		delimiter, ok := token.(json.Delim)
+		if !ok {
+			return nil
+		}
+		switch delimiter {
+		case '{':
+			seen := make(map[string]struct{})
+			for decoder.More() {
+				keyToken, err := decoder.Token()
+				if err != nil {
+					return err
+				}
+				key, ok := keyToken.(string)
+				if !ok {
+					return errors.New("JSON object member name is not a string")
+				}
+				if _, exists := seen[key]; exists {
+					return fmt.Errorf("duplicate JSON object member %q", key)
+				}
+				seen[key] = struct{}{}
+				if err := parseValue(); err != nil {
+					return err
+				}
+			}
+			end, err := decoder.Token()
+			if err != nil || end != json.Delim('}') {
+				return errors.Join(errors.New("unterminated JSON object"), err)
+			}
+		case '[':
+			for decoder.More() {
+				if err := parseValue(); err != nil {
+					return err
+				}
+			}
+			end, err := decoder.Token()
+			if err != nil || end != json.Delim(']') {
+				return errors.Join(errors.New("unterminated JSON array"), err)
+			}
+		default:
+			return fmt.Errorf("unexpected JSON delimiter %q", delimiter)
+		}
+		return nil
+	}
+	if err := parseValue(); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("trailing JSON value")
+		}
+		return err
 	}
 	return nil
 }
