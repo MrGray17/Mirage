@@ -265,7 +265,7 @@ func (plan quickEditPlan) agentArgs() []string {
 		args = append(args, "--open")
 	}
 	task := fmt.Sprintf("Edit only %s. User request: %s", plan.File, plan.Task)
-	return append(args, "--", "/usr/local/bin/mirage-qwen-agent", task)
+	return append(args, "--", "/usr/local/bin/mirage-qwen-agent", "--target", plan.File, task)
 }
 
 func runQuickEdit(args []string, stdout, stderr io.Writer) error {
@@ -867,8 +867,12 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 		if *brokerKind != "ollama" || strings.TrimSpace(*model) != modelbroker.Qwen25Coder15B {
 			return fmt.Errorf("--agent qwen requires the trusted Ollama broker and exact model %s", modelbroker.Qwen25Coder15B)
 		}
-		if len(command) != 2 || command[0] != "/usr/local/bin/mirage-qwen-agent" || strings.TrimSpace(command[1]) == "" {
-			return errors.New("--agent qwen requires the fixed driver command and exactly one non-empty task argument")
+		if len(command) != 4 || command[0] != "/usr/local/bin/mirage-qwen-agent" ||
+			command[1] != "--target" || strings.TrimSpace(command[2]) == "" ||
+			command[2] == "." || command[2] != path.Clean(command[2]) ||
+			!fs.ValidPath(command[2]) || strings.Contains(command[2], "\\") ||
+			strings.TrimSpace(command[3]) == "" {
+			return errors.New("--agent qwen requires the fixed driver command, one relative --target path, and one non-empty task argument")
 		}
 		if *publishGitHub {
 			return errors.New("--agent qwen evidence mode does not authorize GitHub publication")
