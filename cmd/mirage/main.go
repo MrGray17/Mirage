@@ -173,6 +173,9 @@ func parseQuickEditPlan(args []string) (quickEditPlan, error) {
 	if err != nil {
 		return quickEditPlan{}, err
 	}
+	if err := qwenagent.ValidateTargetPath(file); err != nil {
+		return quickEditPlan{}, fmt.Errorf("target file is not supported for Qwen editing: %w", err)
+	}
 	task := strings.TrimSpace(strings.Join(positionals[1:], " "))
 	if task == "" {
 		return quickEditPlan{}, errors.New("edit task must not be empty")
@@ -873,6 +876,9 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 			!fs.ValidPath(command[2]) || strings.Contains(command[2], "\\") ||
 			strings.TrimSpace(command[3]) == "" {
 			return errors.New("--agent qwen requires the fixed driver command, one relative --target path, and one non-empty task argument")
+		}
+		if err := qwenagent.ValidateTargetPath(command[2]); err != nil {
+			return fmt.Errorf("--agent qwen target is not allowed: %w", err)
 		}
 		if *publishGitHub {
 			return errors.New("--agent qwen evidence mode does not authorize GitHub publication")
