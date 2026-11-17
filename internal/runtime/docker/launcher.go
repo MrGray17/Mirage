@@ -347,7 +347,7 @@ func (l *Launcher) Destroy(ctx context.Context) error {
 		l.started = false
 		return nil
 	}
-	if containerIDPattern.MatchString(l.containerID) && !sameContainerID(l.containerID, observedID) {
+	if l.containerID != l.config.ContainerName && containerIDPattern.MatchString(l.containerID) && !sameContainerID(l.containerID, observedID) {
 		return fmt.Errorf("%w: owned hostile container identity changed", ErrIsolation)
 	}
 	l.containerID = observedID
@@ -379,8 +379,8 @@ func (l *Launcher) createArguments() []string {
 	return []string{
 		"create",
 		"--name", l.config.ContainerName,
-		"--label", workspaceTokenLabel+"="+hashText(l.config.WorkspaceToken),
-		"--label", runtimeRoleLabel+"="+hostileFixtureRole,
+		"--label", workspaceTokenLabel + "=" + hashText(l.config.WorkspaceToken),
+		"--label", runtimeRoleLabel + "=" + hostileFixtureRole,
 		"--pull", "never",
 		"--user", l.config.ContainerUser,
 		"--workdir", containerWorkspacePath,
@@ -536,7 +536,7 @@ func (l *Launcher) removeCreated(ctx context.Context) error {
 		l.createTried = false
 		return nil
 	}
-	if containerIDPattern.MatchString(l.containerID) && !sameContainerID(l.containerID, observedID) {
+	if l.containerID != l.config.ContainerName && containerIDPattern.MatchString(l.containerID) && !sameContainerID(l.containerID, observedID) {
 		return fmt.Errorf("%w: rejected hostile container identity changed", ErrIsolation)
 	}
 	l.containerID = observedID
@@ -559,8 +559,8 @@ func (l *Launcher) removeCreated(ctx context.Context) error {
 func (l *Launcher) findOwnedContainer(ctx context.Context) (string, error) {
 	output, err := l.run(ctx,
 		"ps", "--all", "--no-trunc",
-		"--filter", "label="+workspaceTokenLabel+"="+hashText(l.config.WorkspaceToken),
-		"--filter", "label="+runtimeRoleLabel+"="+hostileFixtureRole,
+		"--filter", "label="+workspaceTokenLabel + "=" + hashText(l.config.WorkspaceToken),
+		"--filter", "label="+runtimeRoleLabel + "=" + hostileFixtureRole,
 		"--format", "{{.ID}}",
 	)
 	if err != nil {
@@ -644,11 +644,11 @@ func verifyContainerOwner(inspected containerInspect, requestedID, expectedName,
 	if !containerIDPattern.MatchString(actualID) {
 		return errors.New("Docker inspect did not return a canonical container ID")
 	}
-	if containerIDPattern.MatchString(requestedID) {
+	if requestedID != expectedName && containerIDPattern.MatchString(requestedID) {
 		if !sameContainerID(actualID, requestedID) {
 			return errors.New("Docker inspect returned a different container ID")
 		}
-	} else if inspected.Name != "/"+expectedName {
+	} else if inspected.Name != "/" + expectedName {
 		return errors.New("Docker inspect returned a different container name")
 	}
 	if inspected.Config.Labels[workspaceTokenLabel] != hashText(token) || inspected.Config.Labels[runtimeRoleLabel] != role {

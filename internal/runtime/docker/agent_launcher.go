@@ -455,8 +455,8 @@ func (l *AgentLauncher) seedCreateArguments() []string {
 	mount := "type=volume,src=" + l.volumeName + ",dst=" + containerWorkspacePath + ",volume-nocopy"
 	return []string{
 		"create", "--name", l.seedName,
-		"--label", workspaceTokenLabel+"="+hashText(l.config.WorkspaceToken),
-		"--label", runtimeRoleLabel+"="+quotaKeeperRole,
+		"--label", workspaceTokenLabel + "=" + hashText(l.config.WorkspaceToken),
+		"--label", runtimeRoleLabel + "=" + quotaKeeperRole,
 		"--pull", "never",
 		"--user", "0:0", "--workdir", containerWorkspacePath,
 		"--read-only", "--network", "none", "--ipc", "private", "--cgroupns", "private",
@@ -473,8 +473,8 @@ func (l *AgentLauncher) agentCreateArguments() []string {
 	mount := "type=volume,src=" + l.volumeName + ",dst=" + containerWorkspacePath + ",volume-nocopy"
 	args := []string{
 		"create", "--name", l.config.ContainerName,
-		"--label", workspaceTokenLabel+"="+hashText(l.config.WorkspaceToken),
-		"--label", runtimeRoleLabel+"="+codingAgentRole,
+		"--label", workspaceTokenLabel + "=" + hashText(l.config.WorkspaceToken),
+		"--label", runtimeRoleLabel + "=" + codingAgentRole,
 		"--pull", "never",
 		"--user", l.config.ContainerUser, "--workdir", containerWorkspacePath,
 		"--read-only", "--network", "none", "--ipc", "private", "--cgroupns", "private",
@@ -491,7 +491,7 @@ func (l *AgentLauncher) agentCreateArguments() []string {
 	if l.config.BrokerDirectory != "" {
 		brokerMount := "type=bind,src=" + l.config.BrokerDirectory + ",dst=" + agentBrokerMountPath + ",readonly,bind-propagation=rprivate"
 		args = append(args,
-			"--env", "MIRAGE_MODEL_SOCKET="+agentBrokerMountPath+"/"+modelSocketName,
+			"--env", "MIRAGE_MODEL_SOCKET="+agentBrokerMountPath + "/" + modelSocketName,
 			"--env", "MIRAGE_MODEL="+l.config.BrokerModel,
 			"--env", "MIRAGE_BROKER_DUMMY=broker-scoped-no-secret",
 			"--mount", brokerMount,
@@ -525,7 +525,7 @@ func (l *AgentLauncher) verifyAgentContainer(ctx context.Context) error {
 		return fmt.Errorf("%w: coding-agent environment contains a credential-bearing or changed value", ErrIsolation)
 	}
 	if l.config.BrokerDirectory != "" {
-		if environmentValue(inspected.Config.Env, "MIRAGE_MODEL_SOCKET") != agentBrokerMountPath+"/"+modelSocketName || environmentValue(inspected.Config.Env, "MIRAGE_MODEL") != l.config.BrokerModel || environmentValue(inspected.Config.Env, "MIRAGE_BROKER_DUMMY") != "broker-scoped-no-secret" {
+		if environmentValue(inspected.Config.Env, "MIRAGE_MODEL_SOCKET") != agentBrokerMountPath + "/" + modelSocketName || environmentValue(inspected.Config.Env, "MIRAGE_MODEL") != l.config.BrokerModel || environmentValue(inspected.Config.Env, "MIRAGE_BROKER_DUMMY") != "broker-scoped-no-secret" {
 			return fmt.Errorf("%w: coding-agent broker environment changed", ErrIsolation)
 		}
 	}
@@ -639,7 +639,7 @@ func (l *AgentLauncher) destroyLocked(ctx context.Context) error {
 			*item.id = ""
 			continue
 		}
-		if containerIDPattern.MatchString(*item.id) && !sameContainerID(*item.id, observed) {
+		if *item.id != item.name && containerIDPattern.MatchString(*item.id) && !sameContainerID(*item.id, observed) {
 			result = errors.Join(result, fmt.Errorf("%w: owned container %q identity changed", ErrIsolation, item.name))
 			continue
 		}
@@ -746,8 +746,8 @@ func (l *AgentLauncher) findContainerByName(ctx context.Context, name string) (s
 func (l *AgentLauncher) findOwnedContainer(ctx context.Context, name, role string) (string, error) {
 	output, err := l.run(ctx,
 		"ps", "--all", "--no-trunc",
-		"--filter", "label="+workspaceTokenLabel+"="+hashText(l.config.WorkspaceToken),
-		"--filter", "label="+runtimeRoleLabel+"="+role,
+		"--filter", "label="+workspaceTokenLabel + "=" + hashText(l.config.WorkspaceToken),
+		"--filter", "label="+runtimeRoleLabel + "=" + role,
 		"--format", "{{.ID}}",
 	)
 	if err != nil {

@@ -13,6 +13,20 @@ import (
 	"github.com/MrGray17/Mirage/internal/runtime/diagnostics"
 )
 
+func TestVerifyContainerOwnerTreatsHexOnlyNameAsName(t *testing.T) {
+	const name = "0123456789abcdef"
+	inspected := containerInspect{}
+	inspected.ID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	inspected.Name = "/" + name
+	inspected.Config.Labels = map[string]string{
+		workspaceTokenLabel: hashText("workspace-token"),
+		runtimeRoleLabel: codingAgentRole,
+	}
+	if err := verifyContainerOwner(inspected, name, name, "workspace-token", codingAgentRole); err != nil {
+		t.Fatalf("hex-only Docker name was treated as a container ID: %v", err)
+	}
+}
+
 func TestSameOptionSetRejectsDuplicatesAndConflicts(t *testing.T) {
 	if !sameOptionSet("size=67108864,mode=0777,nosuid,nodev", "size=67108864,mode=0777,nosuid,nodev") {
 		t.Fatal("identical volume options were rejected")
@@ -158,7 +172,7 @@ func TestVerifySeedContainerRejectsCapabilityAndDeviceExtensions(t *testing.T) {
 			}
 			var inspect containerInspect
 			inspect.ID = "0123456789ab"
-			inspect.Name = "/"+launcher.seedName
+			inspect.Name = "/" + launcher.seedName
 			inspect.Config.Labels = map[string]string{
 				workspaceTokenLabel: hashText(launcher.config.WorkspaceToken),
 				runtimeRoleLabel: quotaKeeperRole,
@@ -227,8 +241,8 @@ func TestAgentDestroyDoesNotRemoveSameNameContainerOwnedByAnotherRun(t *testing.
 	if len(runner.calls) != 2 {
 		t.Fatalf("foreign container received destructive commands: %v", runner.calls)
 	}
-	if !containsSequence(runner.calls[0], []string{"--filter", "label="+workspaceTokenLabel+"="+hashText(launcher.config.WorkspaceToken)}) ||
-		!containsSequence(runner.calls[0], []string{"--filter", "label="+runtimeRoleLabel+"="+codingAgentRole}) ||
+	if !containsSequence(runner.calls[0], []string{"--filter", "label="+workspaceTokenLabel + "=" + hashText(launcher.config.WorkspaceToken)}) ||
+		!containsSequence(runner.calls[0], []string{"--filter", "label="+runtimeRoleLabel + "=" + codingAgentRole}) ||
 		!containsSequence(runner.calls[1], []string{"--filter", "name=^/"+launcher.config.ContainerName+"$"}) {
 		t.Fatalf("cleanup did not distinguish ownership from name collision: %v", runner.calls)
 	}
@@ -247,8 +261,8 @@ func TestAgentLauncherUsesQuotaVolumeAndExactArgv(t *testing.T) {
 	}
 	for _, required := range [][]string{
 		{"--network", "none"},
-		{"--label", workspaceTokenLabel+"="+hashText(config.WorkspaceToken)},
-		{"--label", runtimeRoleLabel+"="+codingAgentRole},
+		{"--label", workspaceTokenLabel + "=" + hashText(config.WorkspaceToken)},
+		{"--label", runtimeRoleLabel + "=" + codingAgentRole},
 		{"--read-only"},
 		{"--cap-drop", "ALL"},
 		{"--security-opt", "no-new-privileges=true"},
@@ -263,8 +277,8 @@ func TestAgentLauncherUsesQuotaVolumeAndExactArgv(t *testing.T) {
 		}
 	}
 	seedArgs := launcher.seedCreateArguments()
-	if !containsSequence(seedArgs, []string{"--label", workspaceTokenLabel+"="+hashText(config.WorkspaceToken)}) ||
-		!containsSequence(seedArgs, []string{"--label", runtimeRoleLabel+"="+quotaKeeperRole}) {
+	if !containsSequence(seedArgs, []string{"--label", workspaceTokenLabel + "=" + hashText(config.WorkspaceToken)}) ||
+		!containsSequence(seedArgs, []string{"--label", runtimeRoleLabel + "=" + quotaKeeperRole}) {
 		t.Fatalf("quota keeper create command lacks run/role ownership labels: %v", seedArgs)
 	}
 	if !strings.Contains(joined, "type=volume,src="+launcher.volumeName+",dst=/workspace,volume-nocopy") {
@@ -554,7 +568,7 @@ func secureAgentInspect(t *testing.T, launcher *AgentLauncher) containerInspect 
 	pids := config.PIDLimit
 	var inspected containerInspect
 	inspected.ID = "0123456789ab"
-	inspected.Name = "/"+config.ContainerName
+	inspected.Name = "/" + config.ContainerName
 	inspected.Config.Labels = map[string]string{
 		workspaceTokenLabel: hashText(config.WorkspaceToken),
 		runtimeRoleLabel: codingAgentRole,

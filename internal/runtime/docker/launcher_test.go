@@ -220,8 +220,8 @@ func TestPrepareCreatesAndRevalidatesLockedDownContainer(t *testing.T) {
 		{"--security-opt", "no-new-privileges=true"},
 		{"--security-opt", "seccomp=builtin"},
 		{"--no-healthcheck"},
-		{"--label", workspaceTokenLabel+"="+hashText(config.WorkspaceToken)},
-		{"--label", runtimeRoleLabel+"="+hostileFixtureRole},
+		{"--label", workspaceTokenLabel + "=" + hashText(config.WorkspaceToken)},
+		{"--label", runtimeRoleLabel + "=" + hostileFixtureRole},
 		{"--pids-limit", "64"},
 		{"--memory", "268435456"},
 		{"--memory-swap", "268435456"},
@@ -541,8 +541,8 @@ func TestDestroyDoesNotRemoveSameNameContainerOwnedByAnotherRun(t *testing.T) {
 	if len(runner.calls) != 2 {
 		t.Fatalf("foreign container received destructive commands: %v", runner.calls)
 	}
-	if !containsSequence(runner.calls[0], []string{"--filter", "label="+workspaceTokenLabel+"="+hashText(config.WorkspaceToken)}) ||
-		!containsSequence(runner.calls[0], []string{"--filter", "label="+runtimeRoleLabel+"="+hostileFixtureRole}) ||
+	if !containsSequence(runner.calls[0], []string{"--filter", "label="+workspaceTokenLabel + "=" + hashText(config.WorkspaceToken)}) ||
+		!containsSequence(runner.calls[0], []string{"--filter", "label="+runtimeRoleLabel + "=" + hostileFixtureRole}) ||
 		!containsSequence(runner.calls[1], []string{"--filter", "name=^/"+config.ContainerName+"$"}) {
 		t.Fatalf("cleanup did not distinguish ownership from name collision: %v", runner.calls)
 	}
@@ -705,7 +705,7 @@ func secureContainerInspect(t *testing.T, config Config) containerInspect {
 	pids := normalized.PIDLimit
 	var inspected containerInspect
 	inspected.ID = "0123456789ab"
-	inspected.Name = "/"+normalized.ContainerName
+	inspected.Name = "/" + normalized.ContainerName
 	inspected.Config.Labels = map[string]string{
 		workspaceTokenLabel: hashText(normalized.WorkspaceToken),
 		runtimeRoleLabel: hostileFixtureRole,
