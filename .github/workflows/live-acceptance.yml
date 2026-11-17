@@ -71,7 +71,7 @@ jobs:
       - name: Set up rootless Docker
         uses: docker/setup-docker-action@7ec28a010822b4626af4874f9448a4b05ac6f3e5
         with:
-          version: v29.9.2
+          version: v29.9.3
           rootless: true
           set-host: true
 
