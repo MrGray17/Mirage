@@ -20,7 +20,7 @@ func TestVerifyContainerOwnerTreatsHexOnlyNameAsName(t *testing.T) {
 	inspected.Name = "/" + name
 	inspected.Config.Labels = map[string]string{
 		workspaceTokenLabel: hashText("workspace-token"),
-		runtimeRoleLabel: codingAgentRole,
+		runtimeRoleLabel:    codingAgentRole,
 	}
 	if err := verifyContainerOwner(inspected, name, name, "workspace-token", codingAgentRole); err != nil {
 		t.Fatalf("hex-only Docker name was treated as a container ID: %v", err)
@@ -175,7 +175,7 @@ func TestVerifySeedContainerRejectsCapabilityAndDeviceExtensions(t *testing.T) {
 			inspect.Name = "/" + launcher.seedName
 			inspect.Config.Labels = map[string]string{
 				workspaceTokenLabel: hashText(launcher.config.WorkspaceToken),
-				runtimeRoleLabel: quotaKeeperRole,
+				runtimeRoleLabel:    quotaKeeperRole,
 			}
 			inspect.Config.User = "0:0"
 			inspect.Config.WorkingDir = containerWorkspacePath
@@ -226,7 +226,7 @@ func TestAgentDestroyDoesNotRemoveSameNameContainerOwnedByAnotherRun(t *testing.
 		t.Fatal(err)
 	}
 	runner := &fakeRunner{responses: []fakeResponse{
-		{output: nil}, // no agent container has this run's labels
+		{output: nil},                      // no agent container has this run's labels
 		{output: []byte("0123456789ab\n")}, // same agent name belongs to another run
 	}}
 	launcher.runner = runner
@@ -241,9 +241,9 @@ func TestAgentDestroyDoesNotRemoveSameNameContainerOwnedByAnotherRun(t *testing.
 	if len(runner.calls) != 2 {
 		t.Fatalf("foreign container received destructive commands: %v", runner.calls)
 	}
-	if !containsSequence(runner.calls[0], []string{"--filter", "label="+workspaceTokenLabel + "=" + hashText(launcher.config.WorkspaceToken)}) ||
-		!containsSequence(runner.calls[0], []string{"--filter", "label="+runtimeRoleLabel + "=" + codingAgentRole}) ||
-		!containsSequence(runner.calls[1], []string{"--filter", "name=^/"+launcher.config.ContainerName+"$"}) {
+	if !containsSequence(runner.calls[0], []string{"--filter", "label=" + workspaceTokenLabel + "=" + hashText(launcher.config.WorkspaceToken)}) ||
+		!containsSequence(runner.calls[0], []string{"--filter", "label=" + runtimeRoleLabel + "=" + codingAgentRole}) ||
+		!containsSequence(runner.calls[1], []string{"--filter", "name=^/" + launcher.config.ContainerName + "$"}) {
 		t.Fatalf("cleanup did not distinguish ownership from name collision: %v", runner.calls)
 	}
 }
@@ -571,7 +571,7 @@ func secureAgentInspect(t *testing.T, launcher *AgentLauncher) containerInspect 
 	inspected.Name = "/" + config.ContainerName
 	inspected.Config.Labels = map[string]string{
 		workspaceTokenLabel: hashText(config.WorkspaceToken),
-		runtimeRoleLabel: codingAgentRole,
+		runtimeRoleLabel:    codingAgentRole,
 	}
 	inspected.Config.User = config.ContainerUser
 	inspected.Config.WorkingDir = containerWorkspacePath
