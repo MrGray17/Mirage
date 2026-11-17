@@ -679,6 +679,61 @@ func responseServer(t *testing.T, actions []string) (string, func()) {
 	}
 }
 
+func TestExecuteListsOnlyConfiguredTarget(t *testing.T) {
+	t.Parallel()
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("target"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "other.txt"), []byte("not exposed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("README.md", filepath.Join(workspace, "unrelated-link")); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+	root, err := os.OpenRoot(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	selected, err := parseAction([]byte(`{"tool":"list_files","arguments":{}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, finished, err := execute(root, selected, defaults(Config{TargetPath: "README.md"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finished {
+		t.Fatal("list_files unexpectedly finished the run")
+	}
+	if result != `["README.md"]` {
+		t.Fatalf("list_files result = %s, want only the configured target", result)
+	}
+}
+
+func TestInspectTargetFileRejectsSymlinkParents(t *testing.T) {
+	t.Parallel()
+	workspace := t.TempDir()
+	if err := os.Mkdir(filepath.Join(workspace, "real"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "real", "README.md"), []byte("target"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real", filepath.Join(workspace, "linked")); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+	root, err := os.OpenRoot(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if _, err := inspectTargetFile(root, "linked/README.md"); !errors.Is(err, ErrPolicy) {
+		t.Fatalf("symlinked target parent returned %v, want ErrPolicy", err)
+	}
+}
+
 func TestListFilesRejectsSymlinkAndCapsEntries(t *testing.T) {
 	t.Parallel()
 	workspace := t.TempDir()
@@ -757,7 +812,7 @@ func TestRunRetriesRejectedPatchWithoutExecutingIt(t *testing.T) {
 	defer closeServer()
 	var output strings.Builder
 	err := Run(context.Background(), Config{
-		Workspace: workspace, BrokerSocket: socket, Model: "qwen2.5-coder:1.5b",
+		Workspace: workspace, TargetPath: "README.md", BrokerSocket: socket, Model: "qwen2.5-coder:1.5b",
 		Task: "replace status and owner in README", Output: &output,
 	})
 	if err != nil {
