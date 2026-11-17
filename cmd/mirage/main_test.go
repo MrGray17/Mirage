@@ -382,6 +382,33 @@ func TestQuickEditBuildsNarrowQwenInvocation(t *testing.T) {
 	}
 }
 
+func TestDigestPinnedImageReferenceValidation(t *testing.T) {
+	t.Parallel()
+	valid := []string{
+		"ghcr.io/mrgray17/mirage-qwen-agent@sha256:" + strings.Repeat("a", 64),
+		"busybox@sha256:" + strings.Repeat("0", 64),
+	}
+	for _, reference := range valid {
+		if !isDigestPinnedImageReference(reference) {
+			t.Errorf("valid digest-pinned image rejected: %q", reference)
+		}
+	}
+	invalid := []string{
+		"",
+		"ghcr.io/example/agent:latest",
+		"ghcr.io/example/agent@sha256:123",
+		"ghcr.io/example/agent@sha256:" + strings.Repeat("A", 64),
+		"GHCR.IO/example/agent@sha256:" + strings.Repeat("a", 64),
+		"ghcr.io/example/agent@sha256:" + strings.Repeat("a", 63) + "g",
+		"ghcr.io/example/agent @sha256:" + strings.Repeat("a", 64),
+	}
+	for _, reference := range invalid {
+		if isDigestPinnedImageReference(reference) {
+			t.Errorf("invalid digest-pinned image accepted: %q", reference)
+		}
+	}
+}
+
 func TestQuickEditRequiresDigestPinnedImage(t *testing.T) {
 	workspace := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("hello\n"), 0o600); err != nil {
@@ -397,6 +424,17 @@ func TestQuickEditRequiresDigestPinnedImage(t *testing.T) {
 	_, err = parseQuickEditPlan([]string{"--workspace", workspace, "README.md", "Improve the introduction"})
 	if err == nil || !strings.Contains(err.Error(), "immutable") {
 		t.Fatalf("mutable image error = %v", err)
+	}
+	t.Setenv("MIRAGE_QWEN_IMAGE", "ghcr.io/example/mirage-qwen@sha256:123")
+	_, err = parseQuickEditPlan([]string{"--workspace", workspace, "README.md", "Improve the introduction"})
+	if err == nil || !strings.Contains(err.Error(), "64 lowercase hexadecimal") {
+		t.Fatalf("short digest error = %v", err)
+	}
+	t.Setenv("MIRAGE_QWEN_IMAGE", "ghcr.io/example/mirage-qwen@sha256:"+strings.Repeat("a", 64))
+	t.Setenv("MIRAGE_HELPER_IMAGE", "busybox:latest")
+	_, err = parseQuickEditPlan([]string{"--workspace", workspace, "README.md", "Improve the introduction"})
+	if err == nil || !strings.Contains(err.Error(), "helper image") {
+		t.Fatalf("mutable helper error = %v", err)
 	}
 }
 
