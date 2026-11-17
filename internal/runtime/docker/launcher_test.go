@@ -308,6 +308,7 @@ func TestPrepareRejectsCapabilityDeviceAndConflictingOptionExtensions(t *testing
 			inspect := secureContainerInspect(t, config)
 			test.mutate(&inspect)
 			runner := securePrepareRunner(t, config)
+			runner.responses[len(runner.responses)-1].output = mustJSON(t, inspect)
 			runner.responses = append(runner.responses, fakeResponse{})
 			launcher, err := newWithRunner(config, runner)
 			if err != nil {
