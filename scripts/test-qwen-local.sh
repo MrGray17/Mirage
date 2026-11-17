@@ -213,7 +213,7 @@ if MIRAGE_QWEN_IMAGE="$qwen_image" MIRAGE_HELPER_IMAGE="$helper_image" \
     --model "$model" \
     --output-dir "$evidence/rejected" \
     --format json \
-    -- /usr/local/bin/mirage-qwen-agent "$rejected_task" \
+    -- /usr/local/bin/mirage-qwen-agent --target README.md "$rejected_task" \
     >"$evidence/rejected-summary.json" 2>"$evidence/rejected-run.log"; then
   cat "$evidence/rejected-summary.json" >&2
   fail "the unauthorized edit unexpectedly succeeded"
