@@ -48,6 +48,30 @@ func TestStrictActionProtocol(t *testing.T) {
 	}
 }
 
+func TestStrictJSONRejectsDuplicateMembersAtEveryDepth(t *testing.T) {
+	t.Parallel()
+	tests := []string{
+		`{"tool":"finish","tool":"list_files","arguments":{}}`,
+		`{"arguments":{"path":"README.md","path":"other.txt"},"tool":"read_file"}`,
+		`{"arguments":{"edits":[{"search":"one","replace":"two","search":"three"}]},"tool":"patch_file"}`,
+		`{"tool":"finish","\\u0074ool":"list_files","arguments":{}}`,
+	}
+	for _, encoded := range tests {
+		if _, err := parseAction([]byte(encoded)); !errors.Is(err, ErrProtocol) {
+			t.Errorf("duplicate-key action %q returned %v, want ErrProtocol", encoded, err)
+		}
+	}
+
+	var target struct {
+		Arguments struct {
+			Path string `json:"path"`
+		} `json:"arguments"`
+	}
+	if err := decodeStrict([]byte(`{"arguments":{"path":"README.md","path":"other.txt"}}`), &target); err == nil {
+		t.Fatal("decodeStrict accepted duplicate nested object members")
+	}
+}
+
 func TestSequenceRequiresRootedInspectThenSinglePatchThenFinish(t *testing.T) {
 	t.Parallel()
 	state := sequenceState{targetPath: "README.md", readContent: make(map[string]string)}
