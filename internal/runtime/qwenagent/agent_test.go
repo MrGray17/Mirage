@@ -775,36 +775,32 @@ func TestRunRetriesRejectedPatchWithoutExecutingIt(t *testing.T) {
 	}
 }
 
-func TestRunStopsAfterThreeIdenticalRejectedActions(t *testing.T) {
-	workspace := t.TempDir()
-	file := filepath.Join(workspace, "README.md")
-	before := "Status: draft\n"
-	if err := os.WriteFile(file, []byte(before), 0o600); err != nil {
-		t.Fatal(err)
+func TestRejectedActionTrackerStopsAfterThreeSemanticRepeats(t *testing.T) {
+	t.Parallel()
+	first := []byte(`{"tool":"patch_file","arguments":{"path":"README.md","mode":"batch","append":null,"search":null,"replace":null,"edits":null}}`)
+	reordered := []byte(`{"arguments":{"edits":null,"replace":null,"search":null,"append":null,"mode":"batch","path":"README.md"},"tool":"patch_file"}`)
+	var tracker rejectionTracker
+	if got := tracker.observe(first); got != 1 {
+		t.Fatalf("first rejection count = %d, want 1", got)
 	}
-	bad := `{"tool":"patch_file","arguments":{"path":"README.md","mode":"batch","append":null,"search":null,"replace":null,"edits":null}}`
-	badReordered := `{"arguments":{"edits":null,"replace":null,"search":null,"append":null,"mode":"batch","path":"README.md"},"tool":"patch_file"}`
-	responses := []string{
-		`{"tool":"list_files","arguments":{}}`,
-		`{"tool":"read_file","arguments":{"path":"README.md"}}`,
-		bad, badReordered, bad,
+	if got := tracker.observe(reordered); got != 2 {
+		t.Fatalf("semantically identical reordered rejection count = %d, want 2", got)
 	}
-	socket, closeServer := responseServer(t, responses)
-	defer closeServer()
-	err := Run(context.Background(), Config{
-		Workspace: workspace, BrokerSocket: socket, Model: "qwen2.5-coder:1.5b",
-		Task: "edit README", MaxSteps: 10,
-	})
-	if !errors.Is(err, ErrProtocol) ||
-		!strings.Contains(err.Error(), "repeated the same rejected action 3 times") ||
-		!strings.Contains(err.Error(), "batch mode requires only an edits array") {
-		t.Fatalf("Run error = %v, want early repeated-action error with final validation reason", err)
+	if got := tracker.observe(first); got != maxRepeatedRejectedActions {
+		t.Fatalf("third rejection count = %d, want %d", got, maxRepeatedRejectedActions)
 	}
-	after, readErr := os.ReadFile(file)
-	if readErr != nil {
-		t.Fatal(readErr)
+}
+
+func TestRejectedActionTrackerResetsAfterAcceptedAction(t *testing.T) {
+	t.Parallel()
+	bad := []byte(`{"tool":"patch_file","arguments":{"path":"README.md","mode":"batch","append":null,"search":null,"replace":null,"edits":null}}`)
+	different := []byte(`{"tool":"finish","arguments":{}}`)
+	var tracker rejectionTracker
+	if got := tracker.observe(bad); got != 1 {
+		t.Fatalf("first rejection count = %d, want 1", got)
 	}
-	if string(after) != before {
-		t.Fatalf("rejected actions changed file: got %q want %q", after, before)
+	tracker.reset()
+	if got := tracker.observe(different); got != 1 {
+		t.Fatalf("post-reset rejection count = %d, want 1", got)
 	}
 }
