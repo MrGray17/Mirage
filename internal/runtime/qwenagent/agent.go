@@ -105,22 +105,14 @@ func Run(ctx context.Context, config Config) error {
 	history := make([]exchange, 0, config.MaxSteps)
 	state := sequenceState{readContent: make(map[string]string)}
 	var lastRejection error
-	lastRejectedOutput := ""
-	repeatedRejectedOutput := 0
+	var rejectedActions rejectionTracker
 	recordRejection := func(step int, encoded []byte, rejection error) error {
 		lastRejection = rejection
-		current := string(encoded)
-		key := rejectedActionKey(encoded)
-		if repeatedRejectedOutput > 0 && key == lastRejectedOutput {
-			repeatedRejectedOutput++
-		} else {
-			lastRejectedOutput = key
-			repeatedRejectedOutput = 1
-		}
-		history = append(history, exchange{Action: current, Result: "ACTION REJECTED: " + rejection.Error()})
+		repeated := rejectedActions.observe(encoded)
+		history = append(history, exchange{Action: string(encoded), Result: "ACTION REJECTED: " + rejection.Error()})
 		logRejectedAction(config.Output, step, encoded, rejection)
-		if repeatedRejectedOutput >= 3 {
-			return fmt.Errorf("%w: model repeated the same rejected action %d times; last rejection: %v", ErrProtocol, repeatedRejectedOutput, rejection)
+		if repeated >= maxRepeatedRejectedActions {
+			return fmt.Errorf("%w: model repeated the same rejected action %d times; last rejection: %v", ErrProtocol, repeated, rejection)
 		}
 		return nil
 	}
@@ -155,8 +147,7 @@ func Run(ctx context.Context, config Config) error {
 			return err
 		}
 		lastRejection = nil
-		lastRejectedOutput = ""
-		repeatedRejectedOutput = 0
+		rejectedActions.reset()
 		logAction(config.Output, step, selected)
 		if finished {
 			return nil
@@ -222,6 +213,29 @@ func buildPrompt(task string, history []exchange) (string, error) {
 		return "", fmt.Errorf("%w: model transcript is too large", ErrLimit)
 	}
 	return string(encoded), nil
+}
+
+const maxRepeatedRejectedActions = 3
+
+type rejectionTracker struct {
+	lastKey string
+	count   int
+}
+
+func (tracker *rejectionTracker) observe(encoded []byte) int {
+	key := rejectedActionKey(encoded)
+	if tracker.count > 0 && key == tracker.lastKey {
+		tracker.count++
+	} else {
+		tracker.lastKey = key
+		tracker.count = 1
+	}
+	return tracker.count
+}
+
+func (tracker *rejectionTracker) reset() {
+	tracker.lastKey = ""
+	tracker.count = 0
 }
 
 // rejectedActionKey makes repetition detection insensitive to JSON key ordering
