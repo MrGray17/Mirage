@@ -151,16 +151,29 @@ func TestRootedFileOperationsAndLimits(t *testing.T) {
 		}
 		t.Fatal(err)
 	}
+	if err := os.Symlink("README.md", filepath.Join(workspace, "inside-link")); err != nil {
+		t.Fatal(err)
+	}
 	root, err := os.OpenRoot(workspace)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	if _, err := readFile(root, "escape", 1024); err == nil {
-		t.Fatal("symlink escape read succeeded")
+	if _, err := readFile(root, "escape", 1024); !errors.Is(err, ErrPolicy) {
+		t.Fatalf("symlink escape read returned %v, want ErrPolicy", err)
 	}
-	if err := writeFile(root, "escape", []byte("changed")); err == nil {
-		t.Fatal("symlink escape write succeeded")
+	if err := writeFile(root, "escape", []byte("changed")); !errors.Is(err, ErrPolicy) {
+		t.Fatalf("symlink escape write returned %v, want ErrPolicy", err)
+	}
+	if _, err := readFile(root, "inside-link", 1024); !errors.Is(err, ErrPolicy) {
+		t.Fatalf("in-root symlink read returned %v, want ErrPolicy", err)
+	}
+	if err := writeFile(root, "inside-link", []byte("changed")); !errors.Is(err, ErrPolicy) {
+		t.Fatalf("in-root symlink write returned %v, want ErrPolicy", err)
+	}
+	originalBytes, _ := os.ReadFile(filepath.Join(workspace, "README.md"))
+	if string(originalBytes) != "before" {
+		t.Fatalf("symlink write changed configured target: %q", originalBytes)
 	}
 	outsideBytes, _ := os.ReadFile(outside)
 	if string(outsideBytes) != "secret" {
