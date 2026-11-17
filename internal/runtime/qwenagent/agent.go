@@ -785,19 +785,11 @@ func protectedPath(name string) bool {
 }
 
 func readFile(root *os.Root, name string, limit int64) ([]byte, error) {
-	name, err := validatePath(name)
-	if err != nil {
-		return nil, err
-	}
-	file, err := root.Open(name)
+	file, err := openRegularFile(root, name, os.O_RDONLY)
 	if err != nil {
 		return nil, fmt.Errorf("read disposable file: %w", err)
 	}
 	defer file.Close()
-	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() {
-		return nil, errors.Join(fmt.Errorf("%w: read target is not a regular file", ErrPolicy), err)
-	}
 	content, err := io.ReadAll(io.LimitReader(file, limit+1))
 	if err != nil {
 		return nil, fmt.Errorf("read disposable file: %w", err)
@@ -809,24 +801,11 @@ func readFile(root *os.Root, name string, limit int64) ([]byte, error) {
 }
 
 func writeFile(root *os.Root, name string, content []byte) error {
-	name, err := validatePath(name)
-	if err != nil {
-		return err
-	}
-	if info, err := root.Lstat(name); err == nil && (info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular()) {
-		return fmt.Errorf("%w: write target is not a regular file", ErrPolicy)
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("inspect disposable write target: %w", err)
-	}
-	// patch_file is intentionally existing-file-only. Acquire the rooted object
-	// first, prove that exact opened object is regular, and only then truncate it.
-	file, err := root.OpenFile(name, os.O_RDWR, 0)
+	// patch_file is intentionally existing-file-only. Open without truncation,
+	// verify the opened object is still the configured regular file, then write.
+	file, err := openRegularFile(root, name, os.O_RDWR)
 	if err != nil {
 		return fmt.Errorf("write disposable file: %w", err)
-	}
-	if info, statErr := file.Stat(); statErr != nil || !info.Mode().IsRegular() {
-		_ = file.Close()
-		return errors.Join(fmt.Errorf("%w: acquired write target is not a regular file", ErrPolicy), statErr)
 	}
 	if err := file.Truncate(0); err != nil {
 		_ = file.Close()
@@ -870,6 +849,45 @@ func inspectTargetFile(root *os.Root, target string) (string, error) {
 		}
 	}
 	return name, nil
+}
+
+func openRegularFile(root *os.Root, name string, flags int) (*os.File, error) {
+	name, err := validatePath(name)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := inspectTargetFile(root, name); err != nil {
+		return nil, err
+	}
+	before, err := root.Lstat(name)
+	if err != nil {
+		return nil, fmt.Errorf("inspect file before open: %w", err)
+	}
+	file, err := root.OpenFile(name, flags, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open rooted file: %w", err)
+	}
+	fail := func(cause error) (*os.File, error) {
+		_ = file.Close()
+		return nil, cause
+	}
+	opened, err := file.Stat()
+	if err != nil {
+		return fail(fmt.Errorf("stat opened file: %w", err))
+	}
+	after, err := root.Lstat(name)
+	if err != nil {
+		return fail(fmt.Errorf("inspect file after open: %w", err))
+	}
+	if _, err := inspectTargetFile(root, name); err != nil {
+		return fail(err)
+	}
+	if before.Mode()&fs.ModeSymlink != 0 || after.Mode()&fs.ModeSymlink != 0 ||
+		!before.Mode().IsRegular() || !opened.Mode().IsRegular() || !after.Mode().IsRegular() ||
+		!os.SameFile(before, opened) || !os.SameFile(opened, after) {
+		return fail(fmt.Errorf("%w: target changed or is not the same regular file", ErrPolicy))
+	}
+	return file, nil
 }
 
 func listFiles(root *os.Root) ([]string, error) {
