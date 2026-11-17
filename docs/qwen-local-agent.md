@@ -76,7 +76,38 @@ pulled from a registry. Mirage requires a repository-qualified immutable
 accepted. Keep the registry reference private or public according to your
 needs, and ensure the rootless Docker user can pull it.
 
-## Run
+## Easy CLI
+
+For normal use, MIRAGE exposes the constrained Qwen workflow as one short
+command:
+
+```bash
+export MIRAGE_QWEN_IMAGE="ghcr.io/your-namespace/mirage-qwen-agent@sha256:<image-digest>"
+mirage edit README.md "Add a concise verification section"
+```
+
+The command defaults to the current project directory, the pinned BusyBox
+helper image, the local `qwen2.5-coder:1.5b` model, and the trusted Ollama
+broker. It prints the project, target file, model, and sandbox network posture,
+then asks for confirmation. Pass `--yes` to skip the prompt intentionally.
+Useful options include `--workspace`, `--image`, `--helper-image`,
+`--timeout`, `--format json`, `--output-dir`, and `--open`.
+
+The first positional argument is the one existing regular file the contract
+authorizes; the remaining arguments form the task. Paths must be relative to
+the workspace, and symbolic links or paths escaping the workspace are refused.
+A single run still cannot create files or edit multiple files. The Qwen agent's
+batch mode means multiple exact replacements **within that one file**, not a
+multi-file transaction.
+
+Set `MIRAGE_QWEN_IMAGE` once in the trusted shell environment, or pass
+`--image` per invocation. The value must be an immutable
+`registry/name@sha256:digest` reference. On Windows PowerShell, set the
+environment variable in the Windows user environment; the native frontend
+passes the image reference explicitly to WSL and translates the current Windows
+directory to its WSL path. No provider credential is forwarded.
+
+## Advanced Run
 
 Ollama must already be serving the exact installed model on its standard local
 endpoint. MIRAGE does not pull models. On native Linux, the trusted broker uses
