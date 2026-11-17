@@ -828,6 +828,20 @@ func runHostileFixture(args []string, stdout, stderr io.Writer) error {
 	return nil
 }
 
+func validateQwenAgentCommand(command []string) (string, error) {
+	if len(command) != 4 || command[0] != "/usr/local/bin/mirage-qwen-agent" ||
+		command[1] != "--target" || strings.TrimSpace(command[2]) == "" ||
+		command[2] == "." || command[2] != path.Clean(command[2]) ||
+		!fs.ValidPath(command[2]) || strings.Contains(command[2], "\\") ||
+		strings.TrimSpace(command[3]) == "" {
+		return "", errors.New("--agent qwen requires the fixed driver command, one relative --target path, and one non-empty task argument")
+	}
+	if err := qwenagent.ValidateTargetPath(command[2]); err != nil {
+		return "", fmt.Errorf("--agent qwen target is not allowed: %w", err)
+	}
+	return command[3], nil
+}
+
 func runAgent(args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("run agent", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -890,19 +904,15 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 	if *brokerKind == "ollama" && *agentMode != "qwen" {
 		return errors.New("--model-broker ollama is reserved for the constrained --agent qwen workflow")
 	}
+	qwenTask := ""
 	if *agentMode == "qwen" {
 		if *brokerKind != "ollama" || strings.TrimSpace(*model) != modelbroker.Qwen25Coder15B {
 			return fmt.Errorf("--agent qwen requires the trusted Ollama broker and exact model %s", modelbroker.Qwen25Coder15B)
 		}
-		if len(command) != 4 || command[0] != "/usr/local/bin/mirage-qwen-agent" ||
-			command[1] != "--target" || strings.TrimSpace(command[2]) == "" ||
-			command[2] == "." || command[2] != path.Clean(command[2]) ||
-			!fs.ValidPath(command[2]) || strings.Contains(command[2], "\\") ||
-			strings.TrimSpace(command[3]) == "" {
-			return errors.New("--agent qwen requires the fixed driver command, one relative --target path, and one non-empty task argument")
-		}
-		if err := qwenagent.ValidateTargetPath(command[2]); err != nil {
-			return fmt.Errorf("--agent qwen target is not allowed: %w", err)
+		var commandErr error
+		qwenTask, commandErr = validateQwenAgentCommand(command)
+		if commandErr != nil {
+			return commandErr
 		}
 		if *publishGitHub {
 			return errors.New("--agent qwen evidence mode does not authorize GitHub publication")
@@ -1151,7 +1161,7 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 		}
 		if *agentMode == "qwen" {
 			summary, evidenceErr := persistQwenProductEvidence(qwenProductSpec{
-				RunID: runID, Task: command[1], ContractHash: contract.Hash(), ManifestHash: manifest.Identity(),
+				RunID: runID, Task: qwenTask, ContractHash: contract.Hash(), ManifestHash: manifest.Identity(),
 				StartedAt: issuedAt, CompletedAt: time.Now().UTC(), AgentImage: *agentImage, SandboxIdentity: launcher.Identity(),
 				Actions: qwenActions, Plan: plan, Decision: decision, RealWorkspace: disposable.RealWorkspace(), CleanupComplete: true,
 				ProcessTreeStopped: true, Reality: "M4_VISIBLE_BASELINE_UNCHANGED",
@@ -1221,7 +1231,7 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 				return err
 			}
 			summary, err := persistQwenProductEvidence(qwenProductSpec{
-				RunID: runID, Task: command[1], ContractHash: contract.Hash(), ManifestHash: manifest.Identity(),
+				RunID: runID, Task: qwenTask, ContractHash: contract.Hash(), ManifestHash: manifest.Identity(),
 				StartedAt: issuedAt, CompletedAt: time.Now().UTC(), AgentImage: *agentImage, SandboxIdentity: launcher.Identity(),
 				Actions: qwenActions, Plan: plan, Decision: decision, Committed: true, CommitPlan: commitPlan.Hash(),
 				RealWorkspace: disposable.RealWorkspace(), CleanupComplete: true,

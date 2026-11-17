@@ -881,6 +881,13 @@ func TestRunRetriesRejectedPatchWithoutExecutingIt(t *testing.T) {
 	if strings.Contains(output.String(), "step=3 tool=patch_file") {
 		t.Fatalf("rejected patch was logged as an executed action: %q", output.String())
 	}
+	actions, err := ParseCompletedActions(output.String())
+	if err != nil {
+		t.Fatalf("completed-action evidence rejected a corrected run: %v; log=%q", err, output.String())
+	}
+	if len(actions) != 4 || actions[0].Sequence != 1 || actions[3].Sequence != 4 {
+		t.Fatalf("completed actions = %#v, want four compacted action sequences", actions)
+	}
 }
 
 func TestRepeatedRejectedActionErrorDoesNotExposeModelControlledJSONKeys(t *testing.T) {

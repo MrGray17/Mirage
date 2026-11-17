@@ -382,6 +382,24 @@ func TestQuickEditBuildsNarrowQwenInvocation(t *testing.T) {
 	}
 }
 
+func TestValidateQwenAgentCommandReturnsTaskRatherThanTargetFlag(t *testing.T) {
+	task := "Edit only README.md. User request: Add a verification section"
+	got, err := validateQwenAgentCommand([]string{
+		"/usr/local/bin/mirage-qwen-agent", "--target", "README.md", task,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != task {
+		t.Fatalf("Qwen evidence task = %q, want %q", got, task)
+	}
+	if _, err := validateQwenAgentCommand([]string{
+		"/usr/local/bin/mirage-qwen-agent", "README.md", task,
+	}); err == nil {
+		t.Fatal("Qwen command without the explicit target flag was accepted")
+	}
+}
+
 func TestDigestPinnedImageReferenceValidation(t *testing.T) {
 	t.Parallel()
 	valid := []string{
