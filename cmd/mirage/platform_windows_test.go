@@ -148,6 +148,11 @@ func TestWindowsEditUsesCurrentDirectoryAndImageSettings(t *testing.T) {
 }
 
 func TestWindowsEditTranslatesExplicitWorkspaceAndPreservesImageFlags(t *testing.T) {
+	current, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedEvidence := filepath.Join(current, ".mirage-evidence")
 	original := translateWindowsBridgePath
 	translateWindowsBridgePath = func(_ wsl.Config, direction, value string) (string, error) {
 		if direction != "-u" {
@@ -156,8 +161,8 @@ func TestWindowsEditTranslatesExplicitWorkspaceAndPreservesImageFlags(t *testing
 		switch filepath.Clean(value) {
 		case filepath.Clean("C:\\Projects\\Mirage"):
 			return "/mnt/c/Projects/Mirage", nil
-		case filepath.Clean("C:\\Projects\\Mirage\\.mirage-evidence"):
-			return "/mnt/c/Projects/Mirage/.mirage-evidence", nil
+		case filepath.Clean(expectedEvidence):
+			return "/mnt/c/current-directory/.mirage-evidence", nil
 		default:
 			t.Fatalf("unexpected Windows path to translate: %q", value)
 			return "", errors.New("unexpected path")
@@ -183,7 +188,7 @@ func TestWindowsEditTranslatesExplicitWorkspaceAndPreservesImageFlags(t *testing
 		"--format", "json",
 		"--yes",
 		"--workspace", "/mnt/c/Projects/Mirage",
-		"--output-dir", "/mnt/c/Projects/Mirage/.mirage-evidence",
+		"--output-dir", "/mnt/c/current-directory/.mirage-evidence",
 		"--image", args[10],
 		"--helper-image", args[12],
 		"README.md", "Fix the introduction",
