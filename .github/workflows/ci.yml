@@ -31,6 +31,7 @@ jobs:
         shell: bash
         run: |
           bash -n scripts/test-live.sh
+          bash -n scripts/test-qwen-local.sh
           bash -n scripts/install.sh
 
       - name: Build pinned Qwen agent image
