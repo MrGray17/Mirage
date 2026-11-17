@@ -165,6 +165,9 @@ func TestWindowsEditTranslatesExplicitWorkspaceAndPreservesImageFlags(t *testing
 	}
 	t.Cleanup(func() { translateWindowsBridgePath = original })
 	args := []string{
+		"--timeout", "2m",
+		"--format", "json",
+		"--yes",
 		"--workspace", "C:\\Projects\\Mirage",
 		"--output-dir", ".\\.mirage-evidence",
 		"--image", "registry.example/qwen@sha256:" + strings.Repeat("c", 64),
@@ -176,14 +179,40 @@ func TestWindowsEditTranslatesExplicitWorkspaceAndPreservesImageFlags(t *testing
 		t.Fatal(err)
 	}
 	want := []string{
+		"--timeout", "2m",
+		"--format", "json",
+		"--yes",
 		"--workspace", "/mnt/c/Projects/Mirage",
 		"--output-dir", "/mnt/c/Projects/Mirage/.mirage-evidence",
-		"--image", args[5],
-		"--helper-image", args[7],
+		"--image", args[11],
+		"--helper-image", args[13],
 		"README.md", "Fix the introduction",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("edit args = %#v, want %#v", got, want)
+	}
+}
+
+func TestWindowsEditDoesNotParseTaskTextAsFlags(t *testing.T) {
+	original := translateWindowsBridgePath
+	translateWindowsBridgePath = func(_ wsl.Config, direction, value string) (string, error) {
+		if direction != "-u" {
+			t.Fatalf("translation direction=%q", direction)
+		}
+		return "/mnt/c/current-project", nil
+	}
+	t.Cleanup(func() { translateWindowsBridgePath = original })
+	t.Setenv("MIRAGE_QWEN_IMAGE", "")
+	t.Setenv("MIRAGE_HELPER_IMAGE", "")
+
+	task := "Document the literal flags --output-dir and --image in the README"
+	got, err := prepareWindowsEditArguments(wsl.Config{Distribution: "Ubuntu"}, []string{"README.md", task})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"--workspace", "/mnt/c/current-project", "README.md", task}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("task text was interpreted as CLI flags: got %#v, want %#v", got, want)
 	}
 }
 
