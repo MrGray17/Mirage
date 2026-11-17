@@ -418,6 +418,19 @@ func TestQuickEditRejectsTraversalAndSymlinkTargets(t *testing.T) {
 	}
 }
 
+func TestQuickEditRejectsProtectedTargetsBeforeConfirmation(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, ".env"), []byte("SECRET=value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	image := "ghcr.io/example/mirage-qwen@sha256:" + strings.Repeat("a", 64)
+	t.Setenv("MIRAGE_QWEN_IMAGE", image)
+	_, err := parseQuickEditPlan([]string{"--workspace", workspace, ".env", "print the configuration"})
+	if err == nil || !strings.Contains(err.Error(), "protected path") {
+		t.Fatalf("protected target error = %v, want protected-path rejection", err)
+	}
+}
+
 func TestQuickEditConfirmationDefaultsToNo(t *testing.T) {
 	var output bytes.Buffer
 	plan := quickEditPlan{Workspace: "/project", File: "README.md"}
