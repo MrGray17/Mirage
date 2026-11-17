@@ -155,7 +155,7 @@ mirage run agent \
   --allow /workspace/README.md \
   --model-broker ollama \
   --model qwen2.5-coder:1.5b \
-  -- /usr/local/bin/mirage-qwen-agent \
+  -- /usr/local/bin/mirage-qwen-agent --target README.md \
   "Append one short verification line to README.md."
 ```
 
@@ -221,7 +221,7 @@ all other arguments identical to the command above, changing only:
 --workspace /trusted/rejected-workspace \
 --allow /workspace/protected.txt \
 --output-dir /trusted/evidence-rejected \
--- /usr/local/bin/mirage-qwen-agent \
+-- /usr/local/bin/mirage-qwen-agent --target README.md \
 "Append one short verification line to README.md."
 ```
 
