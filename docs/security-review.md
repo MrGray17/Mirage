@@ -114,6 +114,14 @@ The post-create inspection model represented several important Docker fields but
 
 **Regression coverage:** the hostile-fixture, coding-agent, and keeper effective-configuration tests mutate the actual inspection response for device cgroup rules, supplementary groups, host namespaces, sysctls, cgroup sharing/parent, inherited volumes, bind mounts, and host-side container-ID file creation.
 
+### 7. Broker shutdown could become non-retryable after a deadline
+
+The model broker's `Close` method set its permanent `closed` flag before graceful HTTP shutdown and socket-directory removal had succeeded. If an upstream request remained active past the caller's context deadline, `Server.Shutdown` returned an error, but the method still attempted directory removal. A subsequent `Close` returned nil immediately because the broker was already marked closed, even though shutdown/cleanup had not completed. Concurrent close calls were also not serialized.
+
+**Fix:** broker close operations are now serialized with a dedicated close mutex. A failed server shutdown or directory removal leaves the broker in a retryable state and preserves the socket directory. The broker becomes permanently closed only after shutdown and directory removal both succeed.
+
+**Regression coverage:** `TestBrokerCloseCanBeRetriedAfterGracefulShutdownTimeout` holds an upstream request open, forces the first close deadline, verifies cleanup state is retained, drains the request, and confirms a second close removes the directory. A further close proves successful idempotency.
+
 ## Residual risks and release limits
 
 | Risk or limitation | Current position |
