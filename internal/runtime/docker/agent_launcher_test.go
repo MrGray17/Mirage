@@ -457,6 +457,7 @@ func secureAgentInspect(t *testing.T, launcher *AgentLauncher) containerInspect 
 	inspected.Config.Image = config.AgentImage
 	inspected.Config.Entrypoint = []string{config.Command[0]}
 	inspected.Config.Cmd = append([]string(nil), config.Command[1:]...)
+	inspected.Config.Env = []string{"HOME=/tmp/mirage-home"}
 	inspected.Config.Healthcheck = &struct {
 		Test []string `json:"Test"`
 	}{Test: []string{"NONE"}}
