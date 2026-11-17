@@ -542,7 +542,7 @@ type containerInspect struct {
 		} `json:"Healthcheck"`
 	} `json:"Config"`
 	HostConfig containerHostConfig `json:"HostConfig"`
-	Mounts []struct {
+	Mounts     []struct {
 		Type        string `json:"Type"`
 		Name        string `json:"Name"`
 		Source      string `json:"Source"`
@@ -552,43 +552,40 @@ type containerInspect struct {
 	} `json:"Mounts"`
 }
 
-// containerHostConfig contains the Docker inspection fields that define the
-// effective security boundary. Keep this model explicit: an omitted field
-// cannot be validated by the launcher's post-create inspection.
 type containerHostConfig struct {
-	Binds              []string          `json:"Binds"`
-	ContainerIDFile    string            `json:"ContainerIDFile"`
-	VolumesFrom        []string          `json:"VolumesFrom"`
-	ReadonlyRootfs     bool              `json:"ReadonlyRootfs"`
-	Privileged         bool              `json:"Privileged"`
-	NetworkMode        string            `json:"NetworkMode"`
-	PidMode            string            `json:"PidMode"`
-	IpcMode            string            `json:"IpcMode"`
-	CgroupnsMode       string            `json:"CgroupnsMode"`
-	UsernsMode         string            `json:"UsernsMode"`
-	UTSMode            string            `json:"UTSMode"`
-	Cgroup             string            `json:"Cgroup"`
-	CgroupParent       string            `json:"CgroupParent"`
-	CapAdd             []string          `json:"CapAdd"`
-	CapDrop            []string          `json:"CapDrop"`
-	GroupAdd           []string          `json:"GroupAdd"`
-	SecurityOpt        []string          `json:"SecurityOpt"`
-	Sysctls            map[string]string `json:"Sysctls"`
-	PidsLimit          *int64            `json:"PidsLimit"`
-	Memory             int64             `json:"Memory"`
-	MemorySwap         int64             `json:"MemorySwap"`
-	NanoCPUs           int64             `json:"NanoCpus"`
-	AutoRemove         bool              `json:"AutoRemove"`
-	Init               *bool             `json:"Init"`
-	ShmSize            int64             `json:"ShmSize"`
-	Tmpfs              map[string]string `json:"Tmpfs"`
-	Ulimits            []dockerUlimit    `json:"Ulimits"`
-	PublishAllPorts    bool              `json:"PublishAllPorts"`
-	PortBindings       map[string][]any  `json:"PortBindings"`
-	Devices            []json.RawMessage `json:"Devices"`
-	DeviceRequests     []json.RawMessage `json:"DeviceRequests"`
-	DeviceCgroupRules  []string          `json:"DeviceCgroupRules"`
-	RestartPolicy      struct {
+	Binds             []string          `json:"Binds"`
+	ContainerIDFile   string            `json:"ContainerIDFile"`
+	VolumesFrom       []string          `json:"VolumesFrom"`
+	ReadonlyRootfs    bool              `json:"ReadonlyRootfs"`
+	Privileged        bool              `json:"Privileged"`
+	NetworkMode       string            `json:"NetworkMode"`
+	PidMode           string            `json:"PidMode"`
+	IpcMode           string            `json:"IpcMode"`
+	CgroupnsMode      string            `json:"CgroupnsMode"`
+	UsernsMode        string            `json:"UsernsMode"`
+	UTSMode           string            `json:"UTSMode"`
+	Cgroup            string            `json:"Cgroup"`
+	CgroupParent      string            `json:"CgroupParent"`
+	CapAdd            []string          `json:"CapAdd"`
+	CapDrop           []string          `json:"CapDrop"`
+	GroupAdd          []string          `json:"GroupAdd"`
+	SecurityOpt       []string          `json:"SecurityOpt"`
+	Sysctls           map[string]string `json:"Sysctls"`
+	PidsLimit         *int64            `json:"PidsLimit"`
+	Memory            int64             `json:"Memory"`
+	MemorySwap        int64             `json:"MemorySwap"`
+	NanoCPUs          int64             `json:"NanoCpus"`
+	AutoRemove        bool              `json:"AutoRemove"`
+	Init              *bool             `json:"Init"`
+	ShmSize           int64             `json:"ShmSize"`
+	Tmpfs             map[string]string `json:"Tmpfs"`
+	Ulimits           []dockerUlimit    `json:"Ulimits"`
+	PublishAllPorts   bool              `json:"PublishAllPorts"`
+	PortBindings      map[string][]any  `json:"PortBindings"`
+	Devices           []json.RawMessage `json:"Devices"`
+	DeviceRequests    []json.RawMessage `json:"DeviceRequests"`
+	DeviceCgroupRules []string          `json:"DeviceCgroupRules"`
+	RestartPolicy     struct {
 		Name string `json:"Name"`
 	} `json:"RestartPolicy"`
 	LogConfig struct {
