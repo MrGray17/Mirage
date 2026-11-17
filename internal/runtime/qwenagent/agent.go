@@ -749,6 +749,13 @@ func countExactMatches(content, search string) int {
 	return matches
 }
 
+// ValidateTargetPath exposes the Qwen driver's narrow relative-path policy to
+// the trusted CLI so unsafe targets are rejected before a sandbox is started.
+func ValidateTargetPath(name string) error {
+	_, err := validatePath(name)
+	return err
+}
+
 func validatePath(name string) (string, error) {
 	if name == "" || path.IsAbs(name) || name != path.Clean(name) || name == "." || !fs.ValidPath(name) || strings.Contains(name, "\\") {
 		return "", fmt.Errorf("%w: invalid relative path", ErrPolicy)
