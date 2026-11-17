@@ -30,7 +30,9 @@ func TestRunRequiresExplicitHostileFixtureCommand(t *testing.T) {
 func TestHelpAndVersionAreStableProductCommands(t *testing.T) {
 	for _, args := range [][]string{{"help"}, {"--help"}, {"-h"}} {
 		var stdout, stderr bytes.Buffer
-		if err := run(args, &stdout, &stderr); err != nil || !strings.Contains(stdout.String(), "Transactional security runtime") {
+		if err := run(args, &stdout, &stderr); err != nil ||
+			!strings.Contains(stdout.String(), "Transactional security runtime") ||
+			!strings.Contains(stdout.String(), "mirage edit <file> <task>") {
 			t.Fatalf("args=%v output=%q error=%v", args, stdout.String(), err)
 		}
 	}
@@ -339,3 +341,109 @@ func m42TemporaryDirectories(t *testing.T) map[string]struct{} {
 	}
 	return result
 }
+
+func TestQuickEditBuildsNarrowQwenInvocation(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.Mkdir(filepath.Join(workspace, "src"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "src", "main.go"), []byte("package main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	image := "ghcr.io/example/mirage-qwen@sha256:" + strings.Repeat("a", 64)
+	t.Setenv("MIRAGE_QWEN_IMAGE", image)
+	t.Setenv("MIRAGE_AGENT_IMAGE", "")
+	t.Setenv("MIRAGE_HELPER_IMAGE", "")
+
+	plan, err := parseQuickEditPlan([]string{
+		"--workspace", workspace, "--yes", "--timeout", "2m",
+		"src/main.go", "Add input validation",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.File != "src/main.go" || plan.Task != "Add input validation" || plan.Image != image ||
+		plan.Helper != defaultQwenHelperImage || plan.Timeout != 2*time.Minute || !plan.Yes {
+		t.Fatalf("quick edit plan = %#v", plan)
+	}
+	args := strings.Join(plan.agentArgs(), " ")
+	for _, expected := range []string{
+		"--agent qwen", "--model-broker ollama", "--model " + modelbroker.Qwen25Coder15B,
+		"--allow /workspace/src/main.go", image, defaultQwenHelperImage,
+		"/usr/local/bin/mirage-qwen-agent", "Edit only src/main.go. User request: Add input validation",
+	} {
+		if !strings.Contains(args, expected) {
+			t.Errorf("agent invocation missing %q: %s", expected, args)
+		}
+	}
+	if strings.Contains(args, "--publish-github") || strings.Contains(args, "--agent generic") {
+		t.Fatalf("quick edit unexpectedly broadened authority: %s", args)
+	}
+}
+
+func TestQuickEditRequiresDigestPinnedImage(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("hello\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MIRAGE_QWEN_IMAGE", "")
+	t.Setenv("MIRAGE_AGENT_IMAGE", "")
+	_, err := parseQuickEditPlan([]string{"--workspace", workspace, "README.md", "Improve the introduction"})
+	if err == nil || !strings.Contains(err.Error(), "MIRAGE_QWEN_IMAGE") {
+		t.Fatalf("missing image error = %v", err)
+	}
+	t.Setenv("MIRAGE_QWEN_IMAGE", "ghcr.io/example/mirage-qwen:latest")
+	_, err = parseQuickEditPlan([]string{"--workspace", workspace, "README.md", "Improve the introduction"})
+	if err == nil || !strings.Contains(err.Error(), "immutable") {
+		t.Fatalf("mutable image error = %v", err)
+	}
+}
+
+func TestQuickEditRejectsTraversalAndSymlinkTargets(t *testing.T) {
+	workspace := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateQuickEditTarget(workspace, "../secret.txt"); err == nil {
+		t.Fatal("workspace traversal was accepted")
+	}
+	link := filepath.Join(workspace, "linked.txt")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+	if _, err := validateQuickEditTarget(workspace, "linked.txt"); err == nil || !strings.Contains(err.Error(), "symbolic links") {
+		t.Fatalf("symlink target error = %v", err)
+	}
+}
+
+func TestQuickEditConfirmationDefaultsToNo(t *testing.T) {
+	var output bytes.Buffer
+	plan := quickEditPlan{Workspace: "/project", File: "README.md"}
+	confirmed, err := confirmQuickEdit(strings.NewReader("\n"), &output, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmed {
+		t.Fatal("empty confirmation should default to no")
+	}
+	if !strings.Contains(output.String(), "README.md") || !strings.Contains(output.String(), "Continue? [y/N]") {
+		t.Fatalf("confirmation prompt = %q", output.String())
+	}
+	confirmed, err = confirmQuickEdit(strings.NewReader("yes\n"), &output, plan)
+	if err != nil || !confirmed {
+		t.Fatalf("explicit yes confirmation = %t, error = %v", confirmed, err)
+	}
+}
+
+func TestQuickEditHelpIsAvailable(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"edit", "--help"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr.String(), "mirage edit [options] <file> <task>") ||
+		!strings.Contains(stderr.String(), "MIRAGE_QWEN_IMAGE") {
+		t.Fatalf("edit help = %q", stderr.String())
+	}
+}
+
