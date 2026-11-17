@@ -32,7 +32,7 @@ This assessment does not mean the product is risk-free. The remaining limits bel
 
 ### Trusted components
 
-The current threat model trusts the Mirage host process, host OS kernel, rootless Docker daemon and its configuration, the authority/contract issuer, the host clock source, and the trusted broker process that holds provider credentials. The GitHub API is an external service whose responses are checked by the publication workflow.
+The current threat model trusts the Mirage host process, host OS kernel, rootless Docker daemon and its configuration, the authority/contract issuer, the host clock source, the trusted broker process that holds provider credentials, and the operator-selected helper/keeper image. The keeper runs as container root inside the rootless daemon's user namespace and has read/write access to the bounded disposable volume; it is not an untrusted agent. Pinning its digest makes the image identity immutable but does not establish its provenance or safety. Use the project's known helper image or an independently vetted image. The GitHub API is an external service whose responses are checked by the publication workflow.
 
 A compromised host account, kernel, Docker daemon, Mirage binary, or authority issuer is outside this trust model. Hashes in a receipt do not make a compromised host trustworthy.
 
@@ -117,7 +117,7 @@ This is a useful test-engineering reminder: a security test must demonstrate tha
 | Filesystem scope | The real commit is intentionally limited to one existing independent regular file's content. It is not a general multi-file transaction engine and does not promise full ACL/xattr/ownership preservation. |
 | Local Qwen/WSL2 behavior | The hosted Linux gate is not proof of a provider-backed Ollama/Qwen run on the user's own WSL2 installation. That separate acceptance must be run with the local model and an authorized GHCR package workflow. |
 | GitHub remote publication | The M5.3 external branch-creation test is separate and has not been run here. It must use a disposable repository and narrowly scoped credentials, never a production repository. |
-| Trusted host | Kernel, rootless Docker daemon, host process, clock source, and contract issuer remain trusted components. This is not a sandbox against a compromised host administrator. |
+| Trusted host and helper image | Kernel, rootless Docker daemon, host process, clock source, contract issuer, and the helper/keeper image remain trusted components. A custom `--helper-image` must be independently vetted: it has write access to the disposable volume even though it is network-disabled, capability-dropped, and confined by rootless Docker. A digest pin is an identity pin, not a provenance or safety audit. This is not a sandbox against a compromised host administrator. |
 
 These limits are part of the security contract, not embarrassing footnotes. Do not describe Mirage as crash-durable, signed, syscall-complete, multi-file transactional, or independently secure against a compromised host.
 
