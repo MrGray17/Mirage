@@ -112,6 +112,77 @@ func TestWindowsFrontendClassifiesPublicAndAdvancedRuns(t *testing.T) {
 	}
 }
 
+
+func TestWindowsEditUsesCurrentDirectoryAndImageSettings(t *testing.T) {
+	current, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := translateWindowsBridgePath
+	translateWindowsBridgePath = func(_ wsl.Config, direction, value string) (string, error) {
+		if direction != "-u" || value != current {
+			t.Fatalf("translation direction=%q path=%q; want -u %q", direction, value, current)
+		}
+		return "/mnt/c/current-project", nil
+	}
+	t.Cleanup(func() { translateWindowsBridgePath = original })
+	image := "ghcr.io/example/mirage-qwen@sha256:" + strings.Repeat("a", 64)
+	helper := "busybox@sha256:" + strings.Repeat("b", 64)
+	t.Setenv("MIRAGE_QWEN_IMAGE", image)
+	t.Setenv("MIRAGE_AGENT_IMAGE", "")
+	t.Setenv("MIRAGE_HELPER_IMAGE", helper)
+
+	got, err := prepareWindowsEditArguments(wsl.Config{Distribution: "Ubuntu"}, []string{"README.md", "Add a section"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"--workspace", "/mnt/c/current-project",
+		"--image", image,
+		"--helper-image", helper,
+		"README.md", "Add a section",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("edit args = %#v, want %#v", got, want)
+	}
+}
+
+func TestWindowsEditTranslatesExplicitWorkspaceAndPreservesImageFlags(t *testing.T) {
+	original := translateWindowsBridgePath
+	translateWindowsBridgePath = func(_ wsl.Config, direction, value string) (string, error) {
+		if direction != "-u" || value != filepath.Clean("C:\\Projects\\Mirage") {
+			t.Fatalf("translation direction=%q path=%q", direction, value)
+		}
+		return "/mnt/c/Projects/Mirage", nil
+	}
+	t.Cleanup(func() { translateWindowsBridgePath = original })
+	args := []string{
+		"--workspace", "C:\\Projects\\Mirage",
+		"--image", "registry.example/qwen@sha256:" + strings.Repeat("c", 64),
+		"--helper-image", "busybox@sha256:" + strings.Repeat("d", 64),
+		"README.md", "Fix the introduction",
+	}
+	got, err := prepareWindowsEditArguments(wsl.Config{Distribution: "Ubuntu"}, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"--workspace", "/mnt/c/Projects/Mirage",
+		"--image", args[2],
+		"--helper-image", args[4],
+		"README.md", "Fix the introduction",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("edit args = %#v, want %#v", got, want)
+	}
+}
+
+func TestEditCommandRequiresLinuxBackendOnWindows(t *testing.T) {
+	if !requiresLinuxBackend([]string{"edit", "README.md", "Add a section"}) {
+		t.Fatal("edit command bypassed the WSL security backend")
+	}
+}
+
 func TestLoadWSLConfigFailsClearlyWhenAbsent(t *testing.T) {
 	t.Setenv("LOCALAPPDATA", t.TempDir())
 	if _, err := loadWSLConfig(); err == nil || !strings.Contains(err.Error(), "run the MIRAGE installer") {
