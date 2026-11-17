@@ -472,6 +472,11 @@ func secureAgentInspect(t *testing.T, launcher *AgentLauncher) containerInspect 
 	inspected.HostConfig.NanoCPUs = config.NanoCPUs
 	init := true
 	inspected.HostConfig.Init = &init
+	inspected.HostConfig.ShmSize = 16 << 20
+	inspected.HostConfig.Tmpfs = map[string]string{
+		"/tmp": "rw,noexec,nosuid,nodev,size=16777216,mode=1777",
+	}
+	inspected.HostConfig.Ulimits = []dockerUlimit{{Name: "nofile", Soft: 256, Hard: 256}}
 	inspected.HostConfig.RestartPolicy.Name = "no"
 	inspected.HostConfig.LogConfig.Type = "local"
 	inspected.HostConfig.LogConfig.Config = map[string]string{
