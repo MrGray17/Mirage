@@ -51,6 +51,36 @@ func TestVerifyAgentContainerRejectsCapabilityAndDeviceExtensions(t *testing.T) 
 		{name: "additional ulimit", mutate: func(inspect *containerInspect) {
 			inspect.HostConfig.Ulimits = append(inspect.HostConfig.Ulimits, dockerUlimit{Name: "core", Soft: 0, Hard: 0})
 		}},
+		{name: "device cgroup rule", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.DeviceCgroupRules = []string{"c *:* rwm"}
+		}},
+		{name: "supplementary group", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.GroupAdd = []string{"0"}
+		}},
+		{name: "host user namespace", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.UsernsMode = "host"
+		}},
+		{name: "host UTS namespace", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.UTSMode = "host"
+		}},
+		{name: "namespace sysctl", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Sysctls = map[string]string{"net.ipv4.ip_forward": "1"}
+		}},
+		{name: "shared cgroup", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Cgroup = "container:0123456789ab"
+		}},
+		{name: "custom cgroup parent", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.CgroupParent = "mirage.slice"
+		}},
+		{name: "inherited volume", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.VolumesFrom = []string{"host-secrets:ro"}
+		}},
+		{name: "legacy bind", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Binds = []string{"/etc:/host-etc:ro"}
+		}},
+		{name: "container ID file", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.ContainerIDFile = "/tmp/mirage-container-id"
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -88,6 +118,36 @@ func TestVerifySeedContainerRejectsCapabilityAndDeviceExtensions(t *testing.T) {
 		}},
 		{name: "additional ulimit", mutate: func(inspect *containerInspect) {
 			inspect.HostConfig.Ulimits = append(inspect.HostConfig.Ulimits, dockerUlimit{Name: "core", Soft: 0, Hard: 0})
+		}},
+		{name: "device cgroup rule", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.DeviceCgroupRules = []string{"c *:* rwm"}
+		}},
+		{name: "supplementary group", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.GroupAdd = []string{"0"}
+		}},
+		{name: "host user namespace", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.UsernsMode = "host"
+		}},
+		{name: "host UTS namespace", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.UTSMode = "host"
+		}},
+		{name: "namespace sysctl", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Sysctls = map[string]string{"net.ipv4.ip_forward": "1"}
+		}},
+		{name: "shared cgroup", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Cgroup = "container:0123456789ab"
+		}},
+		{name: "custom cgroup parent", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.CgroupParent = "mirage.slice"
+		}},
+		{name: "inherited volume", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.VolumesFrom = []string{"host-secrets:ro"}
+		}},
+		{name: "legacy bind", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Binds = []string{"/etc:/host-etc:ro"}
+		}},
+		{name: "container ID file", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.ContainerIDFile = "/tmp/mirage-container-id"
 		}},
 	}
 	for _, test := range tests {

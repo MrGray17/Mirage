@@ -407,6 +407,9 @@ func (l *Launcher) verifyContainer(ctx context.Context) error {
 	}
 
 	host := inspected.HostConfig
+	if host.hasUnapprovedHostExtensions() {
+		return fmt.Errorf("%w: unexpected device, group, namespace, cgroup, or mount extension", ErrIsolation)
+	}
 	if inspected.Config.User != l.config.ContainerUser || inspected.Config.WorkingDir != containerWorkspacePath {
 		return fmt.Errorf("%w: hostile container user or working directory changed", ErrIsolation)
 	}
@@ -538,37 +541,7 @@ type containerInspect struct {
 			Test []string `json:"Test"`
 		} `json:"Healthcheck"`
 	} `json:"Config"`
-	HostConfig struct {
-		ReadonlyRootfs  bool              `json:"ReadonlyRootfs"`
-		Privileged      bool              `json:"Privileged"`
-		NetworkMode     string            `json:"NetworkMode"`
-		PidMode         string            `json:"PidMode"`
-		IpcMode         string            `json:"IpcMode"`
-		CgroupnsMode    string            `json:"CgroupnsMode"`
-		CapAdd          []string          `json:"CapAdd"`
-		CapDrop         []string          `json:"CapDrop"`
-		SecurityOpt     []string          `json:"SecurityOpt"`
-		PidsLimit       *int64            `json:"PidsLimit"`
-		Memory          int64             `json:"Memory"`
-		MemorySwap      int64             `json:"MemorySwap"`
-		NanoCPUs        int64             `json:"NanoCpus"`
-		AutoRemove      bool              `json:"AutoRemove"`
-		Init            *bool             `json:"Init"`
-		ShmSize         int64             `json:"ShmSize"`
-		Tmpfs           map[string]string `json:"Tmpfs"`
-		Ulimits         []dockerUlimit    `json:"Ulimits"`
-		PublishAllPorts bool              `json:"PublishAllPorts"`
-		PortBindings    map[string][]any  `json:"PortBindings"`
-		Devices         []json.RawMessage `json:"Devices"`
-		DeviceRequests  []json.RawMessage `json:"DeviceRequests"`
-		RestartPolicy   struct {
-			Name string `json:"Name"`
-		} `json:"RestartPolicy"`
-		LogConfig struct {
-			Type   string            `json:"Type"`
-			Config map[string]string `json:"Config"`
-		} `json:"LogConfig"`
-	} `json:"HostConfig"`
+	HostConfig containerHostConfig `json:"HostConfig"`
 	Mounts []struct {
 		Type        string `json:"Type"`
 		Name        string `json:"Name"`
@@ -577,6 +550,68 @@ type containerInspect struct {
 		RW          bool   `json:"RW"`
 		Propagation string `json:"Propagation"`
 	} `json:"Mounts"`
+}
+
+// containerHostConfig contains the Docker inspection fields that define the
+// effective security boundary. Keep this model explicit: an omitted field
+// cannot be validated by the launcher's post-create inspection.
+type containerHostConfig struct {
+	Binds              []string          `json:"Binds"`
+	ContainerIDFile    string            `json:"ContainerIDFile"`
+	VolumesFrom        []string          `json:"VolumesFrom"`
+	ReadonlyRootfs     bool              `json:"ReadonlyRootfs"`
+	Privileged         bool              `json:"Privileged"`
+	NetworkMode        string            `json:"NetworkMode"`
+	PidMode            string            `json:"PidMode"`
+	IpcMode            string            `json:"IpcMode"`
+	CgroupnsMode       string            `json:"CgroupnsMode"`
+	UsernsMode         string            `json:"UsernsMode"`
+	UTSMode            string            `json:"UTSMode"`
+	Cgroup             string            `json:"Cgroup"`
+	CgroupParent       string            `json:"CgroupParent"`
+	CapAdd             []string          `json:"CapAdd"`
+	CapDrop            []string          `json:"CapDrop"`
+	GroupAdd           []string          `json:"GroupAdd"`
+	SecurityOpt        []string          `json:"SecurityOpt"`
+	Sysctls            map[string]string `json:"Sysctls"`
+	PidsLimit          *int64            `json:"PidsLimit"`
+	Memory             int64             `json:"Memory"`
+	MemorySwap         int64             `json:"MemorySwap"`
+	NanoCPUs           int64             `json:"NanoCpus"`
+	AutoRemove         bool              `json:"AutoRemove"`
+	Init               *bool             `json:"Init"`
+	ShmSize            int64             `json:"ShmSize"`
+	Tmpfs              map[string]string `json:"Tmpfs"`
+	Ulimits            []dockerUlimit    `json:"Ulimits"`
+	PublishAllPorts    bool              `json:"PublishAllPorts"`
+	PortBindings       map[string][]any  `json:"PortBindings"`
+	Devices            []json.RawMessage `json:"Devices"`
+	DeviceRequests     []json.RawMessage `json:"DeviceRequests"`
+	DeviceCgroupRules  []string          `json:"DeviceCgroupRules"`
+	RestartPolicy      struct {
+		Name string `json:"Name"`
+	} `json:"RestartPolicy"`
+	LogConfig struct {
+		Type   string            `json:"Type"`
+		Config map[string]string `json:"Config"`
+	} `json:"LogConfig"`
+}
+
+// hasUnapprovedHostExtensions rejects HostConfig settings that are not part
+// of Mirage's launch contract. This includes settings that can grant device
+// or group access, share host namespaces/cgroups, add external resources, or
+// alter the cgroup hierarchy.
+func (host containerHostConfig) hasUnapprovedHostExtensions() bool {
+	return len(host.Binds) != 0 ||
+		host.ContainerIDFile != "" ||
+		len(host.VolumesFrom) != 0 ||
+		len(host.GroupAdd) != 0 ||
+		host.UsernsMode != "" ||
+		host.UTSMode != "" ||
+		host.Cgroup != "" ||
+		host.CgroupParent != "" ||
+		len(host.Sysctls) != 0 ||
+		len(host.DeviceCgroupRules) != 0
 }
 
 type dockerUlimit struct {

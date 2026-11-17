@@ -392,6 +392,9 @@ func (l *AgentLauncher) verifySeedContainer(ctx context.Context) error {
 		return fmt.Errorf("%w: decode quota-volume keeper: %w", ErrIsolation, err)
 	}
 	host := inspected.HostConfig
+	if host.hasUnapprovedHostExtensions() {
+		return fmt.Errorf("%w: unexpected keeper device, group, namespace, cgroup, or mount extension", ErrIsolation)
+	}
 	if inspected.Config.User != "0:0" || inspected.Config.WorkingDir != containerWorkspacePath || inspected.Config.Image != l.config.HelperImage || len(inspected.Config.Entrypoint) != 1 || inspected.Config.Entrypoint[0] != "/bin/sh" || !equalStrings(inspected.Config.Cmd, []string{"-c", "exec sleep " + seedSleepSeconds}) || inspected.Config.Healthcheck == nil || !equalStrings(inspected.Config.Healthcheck.Test, []string{"NONE"}) {
 		return fmt.Errorf("%w: quota-volume keeper image or command changed", ErrIsolation)
 	}
@@ -500,6 +503,9 @@ func (l *AgentLauncher) verifyAgentContainer(ctx context.Context) error {
 		return fmt.Errorf("%w: decode coding-agent configuration: %w", ErrIsolation, err)
 	}
 	host := inspected.HostConfig
+	if host.hasUnapprovedHostExtensions() {
+		return fmt.Errorf("%w: unexpected agent device, group, namespace, cgroup, or mount extension", ErrIsolation)
+	}
 	if inspected.Config.User != l.config.ContainerUser || inspected.Config.WorkingDir != containerWorkspacePath || inspected.Config.Image != l.config.AgentImage || len(inspected.Config.Entrypoint) != 1 || inspected.Config.Entrypoint[0] != l.config.Command[0] || !equalStrings(inspected.Config.Cmd, l.config.Command[1:]) || inspected.Config.Healthcheck == nil || !equalStrings(inspected.Config.Healthcheck.Test, []string{"NONE"}) {
 		return fmt.Errorf("%w: coding-agent image, command, user, or working directory changed", ErrIsolation)
 	}

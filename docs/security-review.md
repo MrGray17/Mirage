@@ -106,6 +106,14 @@ The first version of the new hostile-launcher regression test mutated a local in
 
 This is a useful test-engineering reminder: a security test must demonstrate that the adversarial input reached the exact code path being asserted.
 
+### 6. Docker HostConfig inspection omitted additional device, group, namespace, cgroup, and mount controls
+
+The post-create inspection model represented several important Docker fields but omitted `DeviceCgroupRules`, `GroupAdd`, `UsernsMode`, `UTSMode`, `Sysctls`, `Cgroup`, `CgroupParent`, `VolumesFrom`, legacy `Binds`, and `ContainerIDFile`. The launch arguments did not request these settings, but the effective-configuration verifier could not explicitly reject them if they appeared in the inspected container configuration.
+
+**Fix:** `containerInspect.HostConfig` is now a named, explicit `containerHostConfig` model. A shared `hasUnapprovedHostExtensions` policy rejects all of these settings. The hostile fixture, coding-agent, and trusted keeper verifiers all invoke the same policy before accepting their inspected configurations.
+
+**Regression coverage:** the hostile-fixture, coding-agent, and keeper effective-configuration tests mutate the actual inspection response for device cgroup rules, supplementary groups, host namespaces, sysctls, cgroup sharing/parent, inherited volumes, bind mounts, and host-side container-ID file creation.
+
 ## Residual risks and release limits
 
 | Risk or limitation | Current position |
