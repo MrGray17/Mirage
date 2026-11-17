@@ -243,7 +243,7 @@ go run ./cmd/mirage verify "$rejected_receipt" ||
   fail "rejected execution receipt did not verify"
 printf 'Unauthorized edit rejected; trusted files unchanged; receipt valid: PASS\n'
 
-printf '\n<success>MIRAGE LOCAL QWEN ACCEPTANCE: PASS</success>\n'
+printf '\nPASS: MIRAGE LOCAL QWEN ACCEPTANCE\n'
 printf 'Source commit: %s\nQwen image: %s\n' "$source_commit" "$qwen_image"
 printf 'Authorized workspace: %s\nRejected workspace:  %s\nEvidence:             %s\n' \
   "$workspace" "$rejected_workspace" "$evidence"
