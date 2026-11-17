@@ -296,7 +296,7 @@ func TestPrepareRejectsCapabilityDeviceAndConflictingOptionExtensions(t *testing
 			inspect.HostConfig.Tmpfs["/run"] = "rw,nosuid,nodev,size=1048576,mode=1777"
 		}},
 		{name: "additional ulimit", mutate: func(inspect *containerInspect) {
-			inspect.HostConfig.Ulimits = append(inspect.HostConfig.Ulimits, dockerUlimit{Name:"core", Soft:0, Hard:0})
+			inspect.HostConfig.Ulimits = append(inspect.HostConfig.Ulimits, dockerUlimit{Name: "core", Soft: 0, Hard: 0})
 		}},
 		{name: "conflicting tmpfs mode", mutate: func(inspect *containerInspect) {
 			inspect.HostConfig.Tmpfs["/tmp"] += ",mode=0777"
