@@ -447,4 +447,3 @@ func TestQuickEditHelpIsAvailable(t *testing.T) {
 		t.Fatalf("edit help = %q", stderr.String())
 	}
 }
-
