@@ -12,36 +12,8 @@ import (
 
 const maxActionLogBytes = 32 << 10
 
-var actionLogLine = regexp.MustCompile(`^qwen_agent step=([1-9][0-9]*) tool=(list_files|read_file|patch_file|finish) path=("(?:[^"\\]|\\.)*")package qwenagent
-
-import (
-	"bufio"
-	"bytes"
-	"errors"
-	"fmt"
-	"io"
-	"regexp"
-	"strconv"
-)
-
-const maxActionLogBytes = 32 << 10
-
-)
-var rejectedActionLogLine = regexp.MustCompile(`^qwen_agent step=([1-9][0-9]*) action_rejected tool=(unknown|list_files|read_file|patch_file|finish) mode=(unknown|none|append|replace|batch|invalid) fields=(unavailable|[a-z_,]*) reason=(protocol_violation|policy_violation|limit_exceeded|unknown)package qwenagent
-
-import (
-	"bufio"
-	"bytes"
-	"errors"
-	"fmt"
-	"io"
-	"regexp"
-	"strconv"
-)
-
-const maxActionLogBytes = 32 << 10
-
-)
+var actionLogLine = regexp.MustCompile(`^qwen_agent step=([1-9][0-9]*) tool=(list_files|read_file|patch_file|finish) path=("(?:[^"\\]|\\.)*")$`)
+var rejectedActionLogLine = regexp.MustCompile(`^qwen_agent step=([1-9][0-9]*) action_rejected tool=(unknown|list_files|read_file|patch_file|finish) mode=(unknown|none|append|replace|batch|invalid) fields=(unavailable|[a-z_,]*) reason=(protocol_violation|policy_violation|limit_exceeded|unknown)$`)
 
 // CompletedAction is agent-level evidence emitted only after the constrained
 // driver successfully executes an action. It is not trusted final-state proof.
@@ -52,7 +24,9 @@ type CompletedAction struct {
 }
 
 // ParseCompletedActions accepts only the exact bounded diagnostic grammar
-// emitted by logAction. Natural-language model output cannot become evidence.
+// emitted by the constrained driver. Rejected model attempts are diagnostic
+// records, not completed actions, and therefore do not enter the receipt's
+// completed-action sequence.
 func ParseCompletedActions(encoded string) ([]CompletedAction, error) {
 	if len(encoded) == 0 || len(encoded) > maxActionLogBytes {
 		return nil, fmt.Errorf("%w: action log is empty or oversized", ErrProtocol)
@@ -91,8 +65,7 @@ func ParseCompletedActions(encoded string) ([]CompletedAction, error) {
 				return nil, fmt.Errorf("%w: action log path is outside driver policy", ErrProtocol)
 			}
 		}
-		// Sequence identifies completed actions, not model attempts. Rejected
-		// attempts are omitted while their step numbers remain visible.
+		// Receipt sequence numbers count completed actions, not model attempts.
 		actions = append(actions, CompletedAction{Sequence: len(actions) + 1, Tool: match[2], Resource: name})
 	}
 	if err := scanner.Err(); err != nil {
@@ -102,4 +75,8 @@ func ParseCompletedActions(encoded string) ([]CompletedAction, error) {
 		return nil, fmt.Errorf("%w: action log does not match the constrained sequence", ErrProtocol)
 	}
 	return actions, nil
+}
+
+func IsActionEvidenceError(err error) bool {
+	return errors.Is(err, ErrProtocol)
 }
