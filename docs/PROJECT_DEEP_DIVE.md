@@ -577,18 +577,29 @@ MIRAGE includes a constrained local-model demonstration using the exact model na
 
 ### 13.1 Small tool surface
 
-The Qwen driver is intentionally not a full shell environment. Its allowed sequence is:
+The Qwen driver is intentionally not a full shell environment. The trusted
+host passes one relative `--target` path, and the state machine exposes only
+that path to the model:
 
 ~~~text
-list_files
-    -> read_file
-    -> patch_file
+list_files (returns the configured target only)
+    -> read_file (exact configured target)
+    -> patch_file (append, exact replace, or bounded batch)
     -> finish
 ~~~
 
-The driver reads and writes only within the disposable workspace. Paths are rooted, path traversal and symlink escapes are rejected, file and transcript sizes are bounded, and the protocol requires the expected ordering. The allowed patch_file operation appends model-selected text to the file's previous content after the required read step.
+The driver reads and writes only that existing regular file inside the
+disposable workspace. It does not walk or expose unrelated repository files.
+Target paths are rooted; protected paths, traversal, symlinks, and special
+objects are rejected. File, transcript, and edit counts are bounded. Every
+batch contains at most 16 exact literal replacements, each search must match
+exactly once in the current intermediate content, and the complete result is
+prepared before the write. The final frozen-tree scan and contract remain the
+authority over whether the observed mutation can reach the trusted workspace.
 
-The configured sequence is deliberately small. There is no shell, general network tool, Git tool, environment-variable tool, or arbitrary subprocess interface in the Qwen driver.
+The configured sequence is deliberately small. There is no shell, general
+network tool, Git tool, environment-variable tool, or arbitrary subprocess
+interface in the Qwen driver.
 
 ### 13.2 Why a broker exists
 
@@ -600,7 +611,7 @@ The model output remains untrusted. It chooses a constrained action, but does no
 
 ### 13.3 Authorized model run
 
-In the documented positive flow, the contract permits an edit to README.md. Qwen selects its allowed tools and modifies the disposable copy. The trusted runtime freezes the result, observes the actual README change, verifies it against the contract, and commits one mutation if all checks pass.
+In the documented positive flow, the trusted CLI selects README.md as the target and the contract permits that exact path. Qwen selects only the bounded edit operation; it cannot choose a different file to read or modify. The trusted runtime freezes the result, observes the actual README change, verifies it against the contract, and commits one mutation if all checks pass.
 
 ### 13.4 Rejected model run
 
