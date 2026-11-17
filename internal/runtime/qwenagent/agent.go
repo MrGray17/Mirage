@@ -118,6 +118,7 @@ func Run(ctx context.Context, config Config) error {
 			repeatedRejectedOutput = 1
 		}
 		history = append(history, exchange{Action: current, Result: "ACTION REJECTED: " + rejection.Error()})
+		logRejectedAction(config.Output, step, encoded, rejection)
 		if repeatedRejectedOutput >= 3 {
 			return fmt.Errorf("%w: model repeated the same rejected action %d times; last rejection: %v", ErrProtocol, repeatedRejectedOutput, rejection)
 		}
@@ -356,78 +357,117 @@ func (state *sequenceState) observe(selected action, result string) {
 }
 
 func actionFormat(state sequenceState) any {
-	tools := []string{"list_files"}
-	if state.listed {
-		tools = []string{"read_file"}
-	}
-	if len(state.readContent) != 0 {
-		tools = []string{"patch_file"}
-	}
-	if state.wrote {
-		tools = []string{"finish"}
-	}
-	variants := make([]any, 0, len(tools))
-	addVariant := func(tool string, arguments map[string]any) {
-		variants = append(variants, map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"tool":      map[string]any{"const": tool},
-				"arguments": arguments,
-			},
-			"required":             []string{"tool", "arguments"},
-			"additionalProperties": false,
-		})
-	}
-	for _, tool := range tools {
-		argumentProperties := map[string]any{}
-		requiredArguments := []string{}
-		switch tool {
-		case "read_file":
-			argumentProperties["path"] = map[string]any{"type": "string"}
-			requiredArguments = []string{"path"}
-		case "patch_file":
-			readPaths := make([]string, 0, len(state.readContent))
-			for name := range state.readContent {
-				readPaths = append(readPaths, name)
-			}
-			sort.Strings(readPaths)
-			argumentProperties["path"] = map[string]any{"type": "string", "enum": readPaths}
-			argumentProperties["mode"] = map[string]any{"type": "string", "enum": []string{"append", "replace", "batch"}}
-			argumentProperties["append"] = map[string]any{"type": []string{"string", "null"}, "minLength": 1}
-			argumentProperties["search"] = map[string]any{"type": []string{"string", "null"}, "minLength": 1}
-			argumentProperties["replace"] = map[string]any{"type": []string{"string", "null"}}
-			argumentProperties["edits"] = map[string]any{
-				"type": []string{"array", "null"},
-				"items": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"search":  map[string]any{"type": "string", "minLength": 1},
-						"replace": map[string]any{"type": "string"},
-					},
-					"required":             []string{"search", "replace"},
-					"additionalProperties": false,
+	tool := "list_files"
+	argumentProperties := map[string]any{}
+	requiredArguments := []string{}
+	switch {
+	case state.wrote:
+		tool = "finish"
+	case len(state.readContent) != 0:
+		tool = "patch_file"
+		readPaths := make([]string, 0, len(state.readContent))
+		for name := range state.readContent {
+			readPaths = append(readPaths, name)
+		}
+		sort.Strings(readPaths)
+		argumentProperties["path"] = map[string]any{"type": "string", "enum": readPaths}
+		argumentProperties["mode"] = map[string]any{"type": "string", "enum": []string{"append", "replace", "batch"}}
+		argumentProperties["append"] = map[string]any{"type": []string{"string", "null"}, "minLength": 1}
+		argumentProperties["search"] = map[string]any{"type": []string{"string", "null"}, "minLength": 1}
+		argumentProperties["replace"] = map[string]any{"type": []string{"string", "null"}}
+		argumentProperties["edits"] = map[string]any{
+			"type": []string{"array", "null"},
+			"items": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"search":  map[string]any{"type": "string", "minLength": 1},
+					"replace": map[string]any{"type": "string"},
 				},
-				"minItems": 1,
-				"maxItems": maxFileEdits,
-			}
-			requiredArguments = []string{"path", "mode", "append", "search", "replace", "edits"}
+				"required":             []string{"search", "replace"},
+				"additionalProperties": false,
+			},
+			"minItems": 1,
+			"maxItems": maxFileEdits,
 		}
-		arguments := map[string]any{
-			"type":                 "object",
-			"properties":           argumentProperties,
-			"additionalProperties": false,
-		}
-		if len(requiredArguments) != 0 {
-			arguments["required"] = requiredArguments
-		}
-		addVariant(tool, arguments)
+		requiredArguments = []string{"path", "mode", "append", "search", "replace", "edits"}
+	case state.listed:
+		tool = "read_file"
+		argumentProperties["path"] = map[string]any{"type": "string"}
+		requiredArguments = []string{"path"}
+	}
+
+	arguments := map[string]any{
+		"type":                 "object",
+		"properties":           argumentProperties,
+		"additionalProperties": false,
+	}
+	if requiredArguments != nil {
+		arguments["required"] = requiredArguments
+	}
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"tool":      map[string]any{"type": "string", "const": tool},
+			"arguments": arguments,
+		},
+		"required":             []string{"tool", "arguments"},
+		"additionalProperties": false,
 	}
 	return map[string]any{
 		"format": map[string]any{
 			"type": "json_schema", "name": "mirage_action", "strict": true,
-			"schema": map[string]any{"oneOf": variants},
+			"schema": schema,
 		},
 	}
+}
+
+// summarizeRejectedAction reports only protocol shape. It intentionally omits
+// paths, file contents, search strings, and replacement text from diagnostics.
+func summarizeRejectedAction(encoded []byte) string {
+	var envelope struct {
+		Tool      string                     `json:"tool"`
+		Arguments map[string]json.RawMessage `json:"arguments"`
+	}
+	if err := json.Unmarshal(encoded, &envelope); err != nil {
+		return "tool=unknown mode=unknown fields=unavailable"
+	}
+	tool := "unknown"
+	switch envelope.Tool {
+	case "list_files", "read_file", "patch_file", "finish":
+		tool = envelope.Tool
+	}
+	mode := "none"
+	if raw, ok := envelope.Arguments["mode"]; ok {
+		var value string
+		if json.Unmarshal(raw, &value) == nil {
+			switch value {
+			case "append", "replace", "batch":
+				mode = value
+			default:
+				mode = "invalid"
+			}
+		} else {
+			mode = "invalid"
+		}
+	}
+	knownFields := []string{"path", "mode", "append", "search", "replace", "edits"}
+	present := make([]string, 0, len(knownFields))
+	for _, field := range knownFields {
+		if _, ok := envelope.Arguments[field]; ok {
+			present = append(present, field)
+		}
+	}
+	return fmt.Sprintf("tool=%s mode=%s fields=%s", tool, mode, strings.Join(present, ","))
+}
+
+func logRejectedAction(output io.Writer, step int, encoded []byte, rejection error) {
+	const maxReasonBytes = 256
+	reason := rejection.Error()
+	if len(reason) > maxReasonBytes {
+		reason = reason[:maxReasonBytes]
+	}
+	fmt.Fprintf(output, "qwen_agent step=%d action_rejected %s reason=%q\\n",
+		step, summarizeRejectedAction(encoded), reason)
 }
 
 func parseAction(encoded []byte) (action, error) {
