@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -238,7 +239,7 @@ func translateEditWorkspace(config wsl.Config, value string) (string, error) {
 	}
 	// An absolute POSIX path is already expressed in the WSL filesystem.
 	if strings.HasPrefix(value, "/") && filepath.VolumeName(value) == "" {
-		return filepath.Clean(value), nil
+		return path.Clean(value), nil
 	}
 	absolute, err := filepath.Abs(value)
 	if err != nil {
