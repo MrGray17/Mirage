@@ -187,6 +187,25 @@ func TestWindowsEditTranslatesExplicitWorkspaceAndPreservesImageFlags(t *testing
 	}
 }
 
+func TestWindowsEditPreservesExplicitWSLPaths(t *testing.T) {
+	got, err := prepareWindowsEditArguments(wsl.Config{Distribution: "Ubuntu"}, []string{
+		"--workspace", "/mnt/c/Projects/Mirage",
+		"--output-dir", "/mnt/c/Projects/Mirage-evidence",
+		"README.md", "Update the file",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"--workspace", "/mnt/c/Projects/Mirage",
+		"--output-dir", "/mnt/c/Projects/Mirage-evidence",
+		"README.md", "Update the file",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("WSL paths changed during Windows argument preparation: got %#v, want %#v", got, want)
+	}
+}
+
 func TestWindowsEditRejectsDuplicateOutputDirectory(t *testing.T) {
 	original := translateWindowsBridgePath
 	translateWindowsBridgePath = func(_ wsl.Config, direction, value string) (string, error) {
