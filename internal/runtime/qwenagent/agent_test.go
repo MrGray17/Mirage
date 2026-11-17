@@ -50,7 +50,7 @@ func TestStrictActionProtocol(t *testing.T) {
 
 func TestSequenceRequiresRootedInspectThenSinglePatchThenFinish(t *testing.T) {
 	t.Parallel()
-	state := sequenceState{readContent: make(map[string]string)}
+	state := sequenceState{targetPath: "README.md", readContent: make(map[string]string)}
 	read, _ := parseAction([]byte(`{"tool":"read_file","arguments":{"path":"README.md"}}`))
 	if err := state.validate(read); !errors.Is(err, ErrProtocol) {
 		t.Fatalf("read before list returned %v", err)
@@ -59,9 +59,13 @@ func TestSequenceRequiresRootedInspectThenSinglePatchThenFinish(t *testing.T) {
 	if err := state.validate(list); err != nil {
 		t.Fatal(err)
 	}
-	state.observe(list, `[]`)
+	state.observe(list, `["README.md"]`)
 	if err := state.validate(read); err != nil {
 		t.Fatal(err)
+	}
+	otherRead, _ := parseAction([]byte(`{"tool":"read_file","arguments":{"path":"other.txt"}}`))
+	if err := state.validate(otherRead); !errors.Is(err, ErrPolicy) {
+		t.Fatalf("read outside configured target returned %v", err)
 	}
 	state.observe(read, `"original"`)
 	wrong, _ := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"other.txt","mode":"append","append":"x","search":null,"replace":null,"edits":null}}`))
@@ -176,7 +180,7 @@ func TestRootedFileOperationsAndLimits(t *testing.T) {
 
 func TestActionFormatDeclaresBoundedEditBatch(t *testing.T) {
 	t.Parallel()
-	formatted := actionFormat(sequenceState{readContent: map[string]string{"README.md": "before"}}).(map[string]any)
+	formatted := actionFormat(sequenceState{targetPath: "README.md", readContent: map[string]string{"README.md": "before"}}).(map[string]any)
 	format := formatted["format"].(map[string]any)
 	schema := format["schema"].(map[string]any)
 	if schema["type"] != "object" {
@@ -588,7 +592,7 @@ func TestRunExecutesStructuredModelLoop(t *testing.T) {
 	socket, closeServer := responseServer(t, responses)
 	defer closeServer()
 	var output strings.Builder
-	err := Run(context.Background(), Config{Workspace: workspace, BrokerSocket: socket, Model: "qwen2.5-coder:1.5b", Task: "edit README", Output: &output})
+	err := Run(context.Background(), Config{Workspace: workspace, TargetPath: "README.md", BrokerSocket: socket, Model: "qwen2.5-coder:1.5b", Task: "edit README", Output: &output})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -622,7 +626,7 @@ func TestRunFailsClosedOnProtocolAndStepLimit(t *testing.T) {
 			}
 			socket, closeServer := responseServer(t, test.responses)
 			defer closeServer()
-			err := Run(context.Background(), Config{Workspace: workspace, BrokerSocket: socket, Model: "qwen2.5-coder:1.5b", Task: "task", MaxSteps: test.maxSteps})
+			err := Run(context.Background(), Config{Workspace: workspace, TargetPath: "README.md", BrokerSocket: socket, Model: "qwen2.5-coder:1.5b", Task: "task", MaxSteps: test.maxSteps})
 			if !errors.Is(err, test.want) {
 				t.Fatalf("got %v, want %v", err, test.want)
 			}
