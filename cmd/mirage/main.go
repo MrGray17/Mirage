@@ -133,9 +133,6 @@ func parseQuickEditPlan(args []string) (quickEditPlan, error) {
 	flags.SetOutput(io.Discard)
 	workspaceRoot := flags.String("workspace", ".", "project directory; defaults to the current directory")
 	imageDefault := strings.TrimSpace(os.Getenv("MIRAGE_QWEN_IMAGE"))
-	if imageDefault == "" {
-		imageDefault = strings.TrimSpace(os.Getenv("MIRAGE_AGENT_IMAGE"))
-	}
 	image := flags.String("image", imageDefault, "digest-pinned Qwen agent image (or set MIRAGE_QWEN_IMAGE)")
 	helperDefault := strings.TrimSpace(os.Getenv("MIRAGE_HELPER_IMAGE"))
 	if helperDefault == "" {
