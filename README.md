@@ -175,6 +175,35 @@ mirage verify <receipt_file>
 See [the competition operator guide](docs/competition-demo.md) for presentation
 details.
 
+## Quick local edit
+
+After installing MIRAGE, starting Ollama, and making a digest-pinned Qwen image
+available to rootless Docker, the normal editing command is intentionally short:
+
+```bash
+export MIRAGE_QWEN_IMAGE="ghcr.io/your-namespace/mirage-qwen-agent@sha256:<image-digest>"
+mirage edit README.md "Add a concise verification section"
+```
+
+MIRAGE uses the current project directory, the local
+`qwen2.5-coder:1.5b` model through the trusted Ollama broker, and a pinned
+helper image. It shows the exact workspace and target file and asks for
+confirmation before launching. Use `--yes` only when you deliberately want to
+skip that prompt. On Windows, run the same command from PowerShell; the frontend
+translates the current Windows directory into the configured WSL distribution.
+
+This first local-agent workflow is deliberately scoped to **one existing
+regular file per run**. The file path is the explicit authority boundary:
+`mirage edit src/main.go "Add input validation"` cannot authorize changes to
+other files. The Qwen driver has no shell, Git, or network tools, and the
+sandbox remains network-disabled. Multi-file editing is not part of this v1
+command.
+
+Configure `MIRAGE_QWEN_IMAGE` once in your shell environment (or pass
+`--image` to an individual command). The image must be referenced by its
+immutable `name@sha256:digest`, never a mutable tag. The exact model and helper
+image are fixed defaults; there is no silent model fallback.
+
 ## Real local-Qwen proof
 
 Ollama must already be serving exactly `qwen2.5-coder:1.5b`; MIRAGE never pulls
