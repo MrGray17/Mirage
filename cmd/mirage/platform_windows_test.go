@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -187,6 +188,15 @@ func TestWindowsEditTranslatesExplicitWorkspaceAndPreservesImageFlags(t *testing
 }
 
 func TestWindowsEditRejectsDuplicateOutputDirectory(t *testing.T) {
+	original := translateWindowsBridgePath
+	translateWindowsBridgePath = func(_ wsl.Config, direction, value string) (string, error) {
+		if direction != "-u" {
+			t.Fatalf("translation direction=%q", direction)
+		}
+		return "/mnt/c/Temp/one", nil
+	}
+	t.Cleanup(func() { translateWindowsBridgePath = original })
+
 	_, err := prepareWindowsEditArguments(wsl.Config{Distribution: "Ubuntu"}, []string{
 		"--output-dir", "C:\\Temp\\one",
 		"--output-dir=C:\\Temp\\two",
