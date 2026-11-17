@@ -113,7 +113,7 @@ func Run(ctx context.Context, config Config) error {
 		history = append(history, exchange{Action: string(encoded), Result: "ACTION REJECTED: " + rejection.Error()})
 		logRejectedAction(config.Output, step, encoded, rejection)
 		if repeated >= maxRepeatedRejectedActions {
-			return fmt.Errorf("%w: model repeated the same rejected action %d times; last rejection: %v", ErrProtocol, repeated, rejection)
+			return fmt.Errorf("%w: model repeated the same rejected action %d times; last rejection class: %s", ErrProtocol, repeated, rejectionClass(rejection))
 		}
 		return nil
 	}
@@ -157,7 +157,7 @@ func Run(ctx context.Context, config Config) error {
 		history = append(history, exchange{Action: string(encoded), Result: result})
 	}
 	if lastRejection != nil {
-		return fmt.Errorf("%w: model did not finish within %d steps; last action rejected: %v", ErrLimit, config.MaxSteps, lastRejection)
+		return fmt.Errorf("%w: model did not finish within %d steps; last action rejection class: %s", ErrLimit, config.MaxSteps, rejectionClass(lastRejection))
 	}
 	return fmt.Errorf("%w: model did not finish within %d steps", ErrLimit, config.MaxSteps)
 }
@@ -516,18 +516,22 @@ func summarizeRejectedAction(encoded []byte) string {
 	return fmt.Sprintf("tool=%s mode=%s fields=%s", tool, mode, strings.Join(present, ","))
 }
 
-func logRejectedAction(output io.Writer, step int, encoded []byte, rejection error) {
-	reason := "unknown"
+func rejectionClass(rejection error) string {
 	switch {
 	case errors.Is(rejection, ErrPolicy):
-		reason = "policy_violation"
+		return "policy_violation"
 	case errors.Is(rejection, ErrLimit):
-		reason = "limit_exceeded"
+		return "limit_exceeded"
 	case errors.Is(rejection, ErrProtocol):
-		reason = "protocol_violation"
+		return "protocol_violation"
+	default:
+		return "unknown"
 	}
+}
+
+func logRejectedAction(output io.Writer, step int, encoded []byte, rejection error) {
 	fmt.Fprintf(output, "qwen_agent step=%d action_rejected %s reason=%s\n",
-		step, summarizeRejectedAction(encoded), reason)
+		step, summarizeRejectedAction(encoded), rejectionClass(rejection))
 }
 
 func parseAction(encoded []byte) (action, error) {
