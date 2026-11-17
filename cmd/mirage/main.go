@@ -128,6 +128,27 @@ type quickEditPlan struct {
 	Yes       bool
 }
 
+func isDigestPinnedImageReference(reference string) bool {
+	if reference == "" || reference != strings.TrimSpace(reference) {
+		return false
+	}
+	const marker = "@sha256:"
+	index := strings.LastIndex(reference, marker)
+	if index <= 0 || index+len(marker)+64 != len(reference) {
+		return false
+	}
+	name := reference[:index]
+	if name != strings.ToLower(name) || strings.ContainsAny(name, "@ \\t\\r\\n") || strings.HasSuffix(name, "/") {
+		return false
+	}
+	for _, character := range reference[index+len(marker):] {
+		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
 func parseQuickEditPlan(args []string) (quickEditPlan, error) {
 	flags := flag.NewFlagSet("edit", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -154,11 +175,11 @@ func parseQuickEditPlan(args []string) (quickEditPlan, error) {
 	if strings.TrimSpace(*image) == "" {
 		return quickEditPlan{}, errors.New("Qwen image is not configured; pass --image <registry/image@sha256:digest> or set MIRAGE_QWEN_IMAGE once")
 	}
-	if !strings.Contains(*image, "@sha256:") {
-		return quickEditPlan{}, errors.New("Qwen image must use an immutable name@sha256:digest reference")
+	if !isDigestPinnedImageReference(*image) {
+		return quickEditPlan{}, errors.New("Qwen image must use name@sha256: followed by 64 lowercase hexadecimal characters")
 	}
-	if strings.TrimSpace(*helper) == "" || !strings.Contains(*helper, "@sha256:") {
-		return quickEditPlan{}, errors.New("helper image must use an immutable name@sha256:digest reference")
+	if !isDigestPinnedImageReference(*helper) {
+		return quickEditPlan{}, errors.New("helper image must use name@sha256: followed by 64 lowercase hexadecimal characters")
 	}
 	if *timeout < time.Second || *timeout > 30*time.Minute {
 		return quickEditPlan{}, errors.New("--timeout must be between 1s and 30m")
@@ -830,8 +851,11 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	command := flags.Args()
-	if *agentImage == "" || *helperImage == "" {
-		return errors.New("--image and --helper-image are required and must be digest-pinned")
+	if !isDigestPinnedImageReference(*agentImage) {
+		return errors.New("--image is required and must use name@sha256: followed by 64 lowercase hexadecimal characters")
+	}
+	if !isDigestPinnedImageReference(*helperImage) {
+		return errors.New("--helper-image is required and must use name@sha256: followed by 64 lowercase hexadecimal characters")
 	}
 	if strings.TrimSpace(*allowedResource) == "" {
 		return errors.New("--allow is required and must identify exactly one existing /workspace file")
