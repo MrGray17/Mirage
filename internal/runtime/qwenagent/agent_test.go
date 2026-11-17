@@ -304,14 +304,14 @@ func TestLogRejectedActionOmitsWorkspaceContent(t *testing.T) {
 	t.Parallel()
 	encoded := []byte(`{"tool":"patch_file","arguments":{"path":"README.md","mode":"batch","append":null,"search":null,"replace":null,"edits":[{"search":"PRIVATE_SEARCH_SENTINEL","replace":"PRIVATE_REPLACE_SENTINEL"}]}}`)
 	var output strings.Builder
-	logRejectedAction(&output, 4, encoded, errors.New("batch mode requires only an edits array"))
+	logRejectedAction(&output, 4, encoded, fmt.Errorf("%w: PRIVATE_ERROR_SENTINEL", ErrProtocol))
 	log := output.String()
-	for _, secret := range []string{"README.md", "PRIVATE_SEARCH_SENTINEL", "PRIVATE_REPLACE_SENTINEL"} {
+	for _, secret := range []string{"README.md", "PRIVATE_SEARCH_SENTINEL", "PRIVATE_REPLACE_SENTINEL", "PRIVATE_ERROR_SENTINEL"} {
 		if strings.Contains(log, secret) {
 			t.Fatalf("rejection log leaked %q: %s", secret, log)
 		}
 	}
-	for _, expected := range []string{"step=4", "action_rejected", "tool=patch_file", "mode=batch", "fields=path,mode,append,search,replace,edits"} {
+	for _, expected := range []string{"step=4", "action_rejected", "tool=patch_file", "mode=batch", "reason=protocol_violation", "fields=path,mode,append,search,replace,edits"} {
 		if !strings.Contains(log, expected) {
 			t.Errorf("rejection log missing %q: %s", expected, log)
 		}
