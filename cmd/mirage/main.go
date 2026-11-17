@@ -10,8 +10,8 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"path"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -35,9 +35,9 @@ import (
 )
 
 const (
-	defaultRunDuration  = 8 * time.Second
-	operationTimeout    = 30 * time.Second
-	brokerPreflightExit  = 78
+	defaultRunDuration     = 8 * time.Second
+	operationTimeout       = 30 * time.Second
+	brokerPreflightExit    = 78
 	defaultQwenHelperImage = "busybox@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0"
 )
 
@@ -116,16 +116,16 @@ func printQuickEditHelp(writer io.Writer) {
 }
 
 type quickEditPlan struct {
-	Workspace  string
-	File       string
-	Task       string
-	Image      string
-	Helper     string
-	Timeout    time.Duration
-	Format     string
-	OutputDir  string
-	Open       bool
-	Yes        bool
+	Workspace string
+	File      string
+	Task      string
+	Image     string
+	Helper    string
+	Timeout   time.Duration
+	Format    string
+	OutputDir string
+	Open      bool
+	Yes       bool
 }
 
 func parseQuickEditPlan(args []string) (quickEditPlan, error) {
