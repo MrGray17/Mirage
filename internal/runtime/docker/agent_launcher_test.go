@@ -157,6 +157,12 @@ func TestVerifySeedContainerRejectsCapabilityAndDeviceExtensions(t *testing.T) {
 				t.Fatal(err)
 			}
 			var inspect containerInspect
+			inspect.ID = "0123456789ab"
+			inspect.Name = "/"+launcher.seedName
+			inspect.Config.Labels = map[string]string{
+				workspaceTokenLabel: hashText(launcher.config.WorkspaceToken),
+				runtimeRoleLabel: quotaKeeperRole,
+			}
 			inspect.Config.User = "0:0"
 			inspect.Config.WorkingDir = containerWorkspacePath
 			inspect.Config.Image = launcher.config.HelperImage
@@ -200,6 +206,34 @@ func TestVerifySeedContainerRejectsCapabilityAndDeviceExtensions(t *testing.T) {
 	}
 }
 
+func TestAgentDestroyDoesNotRemoveSameNameContainerOwnedByAnotherRun(t *testing.T) {
+	launcher, err := NewAgent(agentTestConfig(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{responses: []fakeResponse{
+		{output: nil}, // no agent container has this run's labels
+		{output: []byte("0123456789ab\n")}, // same agent name belongs to another run
+	}}
+	launcher.runner = runner
+	launcher.containerCreateTried = true
+	launcher.containerID = "0123456789ab"
+	if err := launcher.Destroy(context.Background()); !errors.Is(err, ErrIsolation) {
+		t.Fatalf("foreign name collision error = %v, want ErrIsolation", err)
+	}
+	if launcher.containerID == "" || !launcher.containerCreateTried {
+		t.Fatalf("cleanup forgot unresolved ownership conflict: agent=%q tried=%t", launcher.containerID, launcher.containerCreateTried)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("foreign container received destructive commands: %v", runner.calls)
+	}
+	if !containsSequence(runner.calls[0], []string{"--filter", "label="+workspaceTokenLabel+"="+hashText(launcher.config.WorkspaceToken)}) ||
+		!containsSequence(runner.calls[0], []string{"--filter", "label="+runtimeRoleLabel+"="+codingAgentRole}) ||
+		!containsSequence(runner.calls[1], []string{"--filter", "name=^/"+launcher.config.ContainerName+"$"}) {
+		t.Fatalf("cleanup did not distinguish ownership from name collision: %v", runner.calls)
+	}
+}
+
 func TestAgentLauncherUsesQuotaVolumeAndExactArgv(t *testing.T) {
 	config := agentTestConfig(t)
 	launcher, err := NewAgent(config)
@@ -213,6 +247,8 @@ func TestAgentLauncherUsesQuotaVolumeAndExactArgv(t *testing.T) {
 	}
 	for _, required := range [][]string{
 		{"--network", "none"},
+		{"--label", workspaceTokenLabel+"="+hashText(config.WorkspaceToken)},
+		{"--label", runtimeRoleLabel+"="+codingAgentRole},
 		{"--read-only"},
 		{"--cap-drop", "ALL"},
 		{"--security-opt", "no-new-privileges=true"},
@@ -225,6 +261,11 @@ func TestAgentLauncherUsesQuotaVolumeAndExactArgv(t *testing.T) {
 		if !containsSequence(arguments, required) {
 			t.Errorf("agent create arguments are missing %v: %v", required, arguments)
 		}
+	}
+	seedArgs := launcher.seedCreateArguments()
+	if !containsSequence(seedArgs, []string{"--label", workspaceTokenLabel+"="+hashText(config.WorkspaceToken)}) ||
+		!containsSequence(seedArgs, []string{"--label", runtimeRoleLabel+"="+quotaKeeperRole}) {
+		t.Fatalf("quota keeper create command lacks run/role ownership labels: %v", seedArgs)
 	}
 	if !strings.Contains(joined, "type=volume,src="+launcher.volumeName+",dst=/workspace,volume-nocopy") {
 		t.Fatalf("agent command lacks the hard-quota volume: %v", arguments)
@@ -512,6 +553,12 @@ func secureAgentInspect(t *testing.T, launcher *AgentLauncher) containerInspect 
 	config := launcher.config
 	pids := config.PIDLimit
 	var inspected containerInspect
+	inspected.ID = "0123456789ab"
+	inspected.Name = "/"+config.ContainerName
+	inspected.Config.Labels = map[string]string{
+		workspaceTokenLabel: hashText(config.WorkspaceToken),
+		runtimeRoleLabel: codingAgentRole,
+	}
 	inspected.Config.User = config.ContainerUser
 	inspected.Config.WorkingDir = containerWorkspacePath
 	inspected.Config.Image = config.AgentImage

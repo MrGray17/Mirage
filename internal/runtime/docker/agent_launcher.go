@@ -391,6 +391,9 @@ func (l *AgentLauncher) verifySeedContainer(ctx context.Context) error {
 	if err := json.Unmarshal(output, &inspected); err != nil {
 		return fmt.Errorf("%w: decode quota-volume keeper: %w", ErrIsolation, err)
 	}
+	if err := verifyContainerOwner(inspected, l.seedID, l.seedName, l.config.WorkspaceToken, quotaKeeperRole); err != nil {
+		return fmt.Errorf("%w: quota-volume keeper ownership changed: %w", ErrIsolation, err)
+	}
 	host := inspected.HostConfig
 	if host.hasUnapprovedHostExtensions() {
 		return fmt.Errorf("%w: unexpected keeper device, group, namespace, cgroup, or mount extension", ErrIsolation)
@@ -451,7 +454,10 @@ func (l *AgentLauncher) createAgent(ctx context.Context) error {
 func (l *AgentLauncher) seedCreateArguments() []string {
 	mount := "type=volume,src=" + l.volumeName + ",dst=" + containerWorkspacePath + ",volume-nocopy"
 	return []string{
-		"create", "--name", l.seedName, "--pull", "never",
+		"create", "--name", l.seedName,
+		"--label", workspaceTokenLabel+"="+hashText(l.config.WorkspaceToken),
+		"--label", runtimeRoleLabel+"="+quotaKeeperRole,
+		"--pull", "never",
 		"--user", "0:0", "--workdir", containerWorkspacePath,
 		"--read-only", "--network", "none", "--ipc", "private", "--cgroupns", "private",
 		"--cap-drop", "ALL", "--security-opt", "no-new-privileges=true", "--security-opt", "seccomp=builtin",
@@ -466,7 +472,10 @@ func (l *AgentLauncher) seedCreateArguments() []string {
 func (l *AgentLauncher) agentCreateArguments() []string {
 	mount := "type=volume,src=" + l.volumeName + ",dst=" + containerWorkspacePath + ",volume-nocopy"
 	args := []string{
-		"create", "--name", l.config.ContainerName, "--pull", "never",
+		"create", "--name", l.config.ContainerName,
+		"--label", workspaceTokenLabel+"="+hashText(l.config.WorkspaceToken),
+		"--label", runtimeRoleLabel+"="+codingAgentRole,
+		"--pull", "never",
 		"--user", l.config.ContainerUser, "--workdir", containerWorkspacePath,
 		"--read-only", "--network", "none", "--ipc", "private", "--cgroupns", "private",
 		"--cap-drop", "ALL", "--security-opt", "no-new-privileges=true", "--security-opt", "seccomp=builtin",
@@ -501,6 +510,9 @@ func (l *AgentLauncher) verifyAgentContainer(ctx context.Context) error {
 	var inspected containerInspect
 	if err := json.Unmarshal(output, &inspected); err != nil {
 		return fmt.Errorf("%w: decode coding-agent configuration: %w", ErrIsolation, err)
+	}
+	if err := verifyContainerOwner(inspected, l.containerID, l.config.ContainerName, l.config.WorkspaceToken, codingAgentRole); err != nil {
+		return fmt.Errorf("%w: coding-agent ownership changed: %w", ErrIsolation, err)
 	}
 	host := inspected.HostConfig
 	if host.hasUnapprovedHostExtensions() {
@@ -607,22 +619,35 @@ func (l *AgentLauncher) destroyLocked(ctx context.Context) error {
 	}
 	var result error
 	for _, item := range []struct {
-		name string
-		id   *string
+		name      string
+		role      string
+		attempted bool
+		id        *string
 	}{
-		{name: l.config.ContainerName, id: &l.containerID},
-		{name: l.seedName, id: &l.seedID},
+		{name: l.config.ContainerName, role: codingAgentRole, attempted: l.containerCreateTried || l.containerID != "", id: &l.containerID},
+		{name: l.seedName, role: quotaKeeperRole, attempted: l.seedCreateTried || l.seedID != "", id: &l.seedID},
 	} {
-		observed, err := l.findContainerByName(ctx, item.name)
+		if !item.attempted {
+			continue
+		}
+		observed, err := l.findOwnedContainer(ctx, item.name, item.role)
 		if err != nil {
-			result = errors.Join(result, fmt.Errorf("resolve container %q before cleanup: %w", item.name, err))
+			result = errors.Join(result, fmt.Errorf("resolve owned container %q before cleanup: %w", item.name, err))
 			continue
 		}
 		if observed == "" {
 			*item.id = ""
 			continue
 		}
+		if containerIDPattern.MatchString(*item.id) && !sameContainerID(*item.id, observed) {
+			result = errors.Join(result, fmt.Errorf("%w: owned container %q identity changed", ErrIsolation, item.name))
+			continue
+		}
 		*item.id = observed
+		if err := l.verifyContainerOwner(ctx, observed, item.name, item.role); err != nil {
+			result = errors.Join(result, err)
+			continue
+		}
 		if err := l.stopContainerAndProve(ctx, observed); err != nil {
 			result = errors.Join(result, err)
 			continue
@@ -716,6 +741,48 @@ func (l *AgentLauncher) findContainerByName(ctx context.Context, name string) (s
 		return fields[0], nil
 	}
 	return "", nil
+}
+
+func (l *AgentLauncher) findOwnedContainer(ctx context.Context, name, role string) (string, error) {
+	output, err := l.run(ctx,
+		"ps", "--all", "--no-trunc",
+		"--filter", "label="+workspaceTokenLabel+"="+hashText(l.config.WorkspaceToken),
+		"--filter", "label="+runtimeRoleLabel+"="+role,
+		"--format", "{{.ID}}",
+	)
+	if err != nil {
+		return "", err
+	}
+	fields := strings.Fields(string(output))
+	if len(fields) > 1 || (len(fields) == 1 && !containerIDPattern.MatchString(fields[0])) {
+		return "", fmt.Errorf("%w: Docker returned an invalid owned-container inventory", ErrIsolation)
+	}
+	if len(fields) == 1 {
+		return fields[0], nil
+	}
+	foreign, err := l.findContainerByName(ctx, name)
+	if err != nil {
+		return "", err
+	}
+	if foreign != "" {
+		return "", fmt.Errorf("%w: container name %q is occupied by an unowned container", ErrIsolation, name)
+	}
+	return "", nil
+}
+
+func (l *AgentLauncher) verifyContainerOwner(ctx context.Context, id, name, role string) error {
+	output, err := l.run(ctx, "inspect", "--format", "{{json .}}", id)
+	if err != nil {
+		return fmt.Errorf("%w: inspect owned container %q: %w", ErrIsolation, name, err)
+	}
+	var inspected containerInspect
+	if err := json.Unmarshal(output, &inspected); err != nil {
+		return fmt.Errorf("%w: decode owned container %q: %w", ErrIsolation, name, err)
+	}
+	if err := verifyContainerOwner(inspected, id, name, l.config.WorkspaceToken, role); err != nil {
+		return fmt.Errorf("%w: refuse cleanup of container %q without matching Mirage ownership: %w", ErrIsolation, name, err)
+	}
+	return nil
 }
 
 func (l *AgentLauncher) findVolumeByName(ctx context.Context) (string, error) {

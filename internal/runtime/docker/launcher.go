@@ -22,6 +22,11 @@ import (
 
 const (
 	DisposableMarker       = ".mirage-disposable-workspace"
+	workspaceTokenLabel    = "dev.mirage.workspace-token-sha256"
+	runtimeRoleLabel       = "dev.mirage.runtime-role"
+	hostileFixtureRole     = "hostile-fixture"
+	codingAgentRole        = "coding-agent"
+	quotaKeeperRole        = "quota-keeper"
 	defaultContainerUser   = "65532:65532"
 	defaultMemoryBytes     = int64(256 << 20)
 	defaultPIDLimit        = int64(64)
@@ -331,16 +336,24 @@ func (l *Launcher) Destroy(ctx context.Context) error {
 	if !l.createTried && l.containerID == "" {
 		return nil
 	}
-	observedID, observeErr := l.findContainerByName(ctx)
+	observedID, observeErr := l.findOwnedContainer(ctx)
 	if observeErr != nil {
-		return fmt.Errorf("resolve hostile container before cleanup: %w", observeErr)
+		return fmt.Errorf("resolve owned hostile container before cleanup: %w", observeErr)
 	}
 	if observedID == "" {
 		l.containerID = ""
 		l.createTried = false
+		l.prepared = false
+		l.started = false
 		return nil
 	}
+	if containerIDPattern.MatchString(l.containerID) && !sameContainerID(l.containerID, observedID) {
+		return fmt.Errorf("%w: owned hostile container identity changed", ErrIsolation)
+	}
 	l.containerID = observedID
+	if err := l.verifyContainerOwner(ctx, observedID); err != nil {
+		return err
+	}
 	if !l.frozen {
 		if err := l.stopAndProve(ctx); err != nil {
 			return err
@@ -366,6 +379,8 @@ func (l *Launcher) createArguments() []string {
 	return []string{
 		"create",
 		"--name", l.config.ContainerName,
+		"--label", workspaceTokenLabel+"="+hashText(l.config.WorkspaceToken),
+		"--label", runtimeRoleLabel+"="+hostileFixtureRole,
 		"--pull", "never",
 		"--user", l.config.ContainerUser,
 		"--workdir", containerWorkspacePath,
@@ -404,6 +419,9 @@ func (l *Launcher) verifyContainer(ctx context.Context) error {
 	var inspected containerInspect
 	if err := json.Unmarshal(output, &inspected); err != nil {
 		return fmt.Errorf("%w: decode hostile container configuration: %w", ErrIsolation, err)
+	}
+	if err := verifyContainerOwner(inspected, l.containerID, l.config.ContainerName, l.config.WorkspaceToken, hostileFixtureRole); err != nil {
+		return fmt.Errorf("%w: hostile container ownership changed: %w", ErrIsolation, err)
 	}
 
 	host := inspected.HostConfig
@@ -506,15 +524,77 @@ func (l *Launcher) inspectState(ctx context.Context) (containerState, error) {
 }
 
 func (l *Launcher) removeCreated(ctx context.Context) error {
-	if l.containerID == "" {
+	if !l.createTried && l.containerID == "" {
 		return nil
 	}
-	_, err := l.run(ctx, "rm", "--force", l.containerID)
+	observedID, err := l.findOwnedContainer(ctx)
 	if err != nil {
+		return fmt.Errorf("resolve owned rejected hostile container: %w", err)
+	}
+	if observedID == "" {
+		l.containerID = ""
+		l.createTried = false
+		return nil
+	}
+	if containerIDPattern.MatchString(l.containerID) && !sameContainerID(l.containerID, observedID) {
+		return fmt.Errorf("%w: rejected hostile container identity changed", ErrIsolation)
+	}
+	l.containerID = observedID
+	if err := l.verifyContainerOwner(ctx, observedID); err != nil {
+		return err
+	}
+	if err := l.stopAndProve(ctx); err != nil {
+		return err
+	}
+	if _, err := l.run(ctx, "rm", "--force", l.containerID); err != nil {
 		return fmt.Errorf("remove rejected hostile container: %w", err)
 	}
 	l.containerID = ""
 	l.createTried = false
+	l.prepared = false
+	l.started = false
+	return nil
+}
+
+func (l *Launcher) findOwnedContainer(ctx context.Context) (string, error) {
+	output, err := l.run(ctx,
+		"ps", "--all", "--no-trunc",
+		"--filter", "label="+workspaceTokenLabel+"="+hashText(l.config.WorkspaceToken),
+		"--filter", "label="+runtimeRoleLabel+"="+hostileFixtureRole,
+		"--format", "{{.ID}}",
+	)
+	if err != nil {
+		return "", err
+	}
+	fields := strings.Fields(string(output))
+	if len(fields) > 1 || (len(fields) == 1 && !containerIDPattern.MatchString(fields[0])) {
+		return "", fmt.Errorf("%w: Docker returned an invalid owned-container inventory", ErrIsolation)
+	}
+	if len(fields) == 1 {
+		return fields[0], nil
+	}
+	foreign, err := l.findContainerByName(ctx)
+	if err != nil {
+		return "", err
+	}
+	if foreign != "" {
+		return "", fmt.Errorf("%w: hostile container name is occupied by an unowned container", ErrIsolation)
+	}
+	return "", nil
+}
+
+func (l *Launcher) verifyContainerOwner(ctx context.Context, id string) error {
+	output, err := l.run(ctx, "inspect", "--format", "{{json .}}", id)
+	if err != nil {
+		return fmt.Errorf("%w: inspect owned hostile container: %w", ErrIsolation, err)
+	}
+	var inspected containerInspect
+	if err := json.Unmarshal(output, &inspected); err != nil {
+		return fmt.Errorf("%w: decode owned hostile container: %w", ErrIsolation, err)
+	}
+	if err := verifyContainerOwner(inspected, id, l.config.ContainerName, l.config.WorkspaceToken, hostileFixtureRole); err != nil {
+		return fmt.Errorf("%w: refuse cleanup of a container without matching Mirage ownership: %w", ErrIsolation, err)
+	}
 	return nil
 }
 
@@ -530,7 +610,10 @@ type daemonInfo struct {
 }
 
 type containerInspect struct {
+	ID   string `json:"Id"`
+	Name string `json:"Name"`
 	Config struct {
+		Labels      map[string]string `json:"Labels"`
 		User        string   `json:"User"`
 		WorkingDir  string   `json:"WorkingDir"`
 		Image       string   `json:"Image"`
@@ -550,6 +633,35 @@ type containerInspect struct {
 		RW          bool   `json:"RW"`
 		Propagation string `json:"Propagation"`
 	} `json:"Mounts"`
+}
+
+// verifyContainerOwner binds teardown authority to the immutable workspace
+// token hash, an explicit runtime role, and the Docker container ID. A
+// fallback name is accepted only when Docker's inspect response names exactly
+// the expected container and carries both ownership labels.
+func verifyContainerOwner(inspected containerInspect, requestedID, expectedName, token, role string) error {
+	actualID := strings.ToLower(strings.TrimSpace(inspected.ID))
+	if !containerIDPattern.MatchString(actualID) {
+		return errors.New("Docker inspect did not return a canonical container ID")
+	}
+	if containerIDPattern.MatchString(requestedID) {
+		if !sameContainerID(actualID, requestedID) {
+			return errors.New("Docker inspect returned a different container ID")
+		}
+	} else if inspected.Name != "/"+expectedName {
+		return errors.New("Docker inspect returned a different container name")
+	}
+	if inspected.Config.Labels[workspaceTokenLabel] != hashText(token) || inspected.Config.Labels[runtimeRoleLabel] != role {
+		return errors.New("Docker container ownership labels do not match this run and role")
+	}
+	return nil
+}
+
+func sameContainerID(first, second string) bool {
+	first = strings.ToLower(strings.TrimSpace(first))
+	second = strings.ToLower(strings.TrimSpace(second))
+	return containerIDPattern.MatchString(first) && containerIDPattern.MatchString(second) &&
+		(strings.HasPrefix(first, second) || strings.HasPrefix(second, first))
 }
 
 type containerHostConfig struct {

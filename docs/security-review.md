@@ -122,6 +122,14 @@ The model broker's `Close` method set its permanent `closed` flag before gracefu
 
 **Regression coverage:** `TestBrokerCloseCanBeRetriedAfterGracefulShutdownTimeout` holds an upstream request open, forces the first close deadline, verifies cleanup state is retained, drains the request, and confirms a second close removes the directory. A further close proves successful idempotency.
 
+### 8. Docker teardown trusted reusable container names instead of run ownership
+
+The hostile fixture and coding-agent launchers rediscovered containers by name during cleanup, then stopped and removed whichever container currently occupied that name. Container names are not durable identities: after an uncertain create/remove response, a name can be reused by a different container. A retry could therefore delete a resource that does not belong to the current Mirage run. The agent launcher applied the same pattern to both its coding-agent and quota-volume keeper containers.
+
+**Fix:** each managed container now receives two Docker labels: a SHA-256 hash of the run's unpredictable workspace token and an explicit runtime role. Cleanup enumerates containers by both labels, verifies the inspected container ID and ownership labels before stopping/removing, and compares any previously recorded ID against the discovered ID. If a reserved name remains occupied without matching labels, cleanup fails closed instead of deleting the replacement or claiming that cleanup is complete. The same ownership checks are part of post-create effective-configuration verification.
+
+**Regression coverage:** `TestDestroyDoesNotRemoveSameNameContainerOwnedByAnotherRun` and `TestAgentDestroyDoesNotRemoveSameNameContainerOwnedByAnotherRun` prove that cleanup uses run/role-scoped inventory and issues no destructive Docker command for a foreign same-name replacement.
+
 ## Residual risks and release limits
 
 | Risk or limitation | Current position |
