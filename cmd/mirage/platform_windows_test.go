@@ -181,6 +181,11 @@ func TestEditCommandRequiresLinuxBackendOnWindows(t *testing.T) {
 	if !requiresLinuxBackend([]string{"edit", "README.md", "Add a section"}) {
 		t.Fatal("edit command bypassed the WSL security backend")
 	}
+	for _, args := range [][]string{{"edit", "--help"}, {"edit", "-h"}} {
+		if requiresLinuxBackend(args) {
+			t.Fatalf("local edit help unnecessarily required WSL: %v", args)
+		}
+	}
 }
 
 func TestLoadWSLConfigFailsClearlyWhenAbsent(t *testing.T) {
