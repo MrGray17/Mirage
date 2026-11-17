@@ -883,6 +883,27 @@ func TestRunRetriesRejectedPatchWithoutExecutingIt(t *testing.T) {
 	}
 }
 
+func TestRepeatedRejectedActionErrorDoesNotExposeModelControlledJSONKeys(t *testing.T) {
+	t.Parallel()
+	workspace := t.TempDir()
+	invalid := `{"tool":"list_files","arguments":{},"PRIVATE_DUPLICATE_FIELD_SENTINEL":1,"PRIVATE_DUPLICATE_FIELD_SENTINEL":2}`
+	socket, closeServer := responseServer(t, []string{invalid, invalid, invalid})
+	defer closeServer()
+	err := Run(context.Background(), Config{
+		Workspace: workspace, TargetPath: "README.md", BrokerSocket: socket,
+		Model: "qwen2.5-coder:1.5b", Task: "edit README",
+	})
+	if !errors.Is(err, ErrProtocol) {
+		t.Fatalf("repeated malformed action error = %v, want ErrProtocol", err)
+	}
+	if strings.Contains(err.Error(), "PRIVATE_DUPLICATE_FIELD_SENTINEL") {
+		t.Fatalf("terminal error leaked model-controlled JSON key: %v", err)
+	}
+	if !strings.Contains(err.Error(), "protocol_violation") {
+		t.Fatalf("terminal error omitted safe rejection class: %v", err)
+	}
+}
+
 func TestRejectedActionTrackerStopsAfterThreeSemanticRepeats(t *testing.T) {
 	t.Parallel()
 	first := []byte(`{"tool":"patch_file","arguments":{"path":"README.md","mode":"batch","append":null,"search":null,"replace":null,"edits":null}}`)
