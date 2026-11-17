@@ -272,6 +272,87 @@ func TestPrepareRemovesContainerWhenEffectiveIsolationDiffers(t *testing.T) {
 	}
 }
 
+func TestPrepareRejectsCapabilityDeviceAndConflictingOptionExtensions(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*containerInspect)
+	}{
+		{name: "added capability", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.CapAdd = []string{"NET_ADMIN"}
+		}},
+		{name: "device request", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.DeviceRequests = []json.RawMessage{json.RawMessage(`{"Driver":"nvidia","Count":-1}`)}
+		}},
+		{name: "conflicting no-new-privileges", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.SecurityOpt = []string{"no-new-privileges=true", "no-new-privileges=false", "seccomp=builtin"}
+		}},
+		{name: "conflicting seccomp", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.SecurityOpt = []string{"no-new-privileges=true", "seccomp=builtin", "seccomp=unconfined"}
+		}},
+		{name: "extra tmpfs permission", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Tmpfs["/tmp"] += ",exec"
+		}},
+		{name: "conflicting tmpfs mode", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Tmpfs["/tmp"] += ",mode=0777"
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := dockerTestConfig(t)
+			inspect := secureContainerInspect(t, config)
+			test.mutate(&inspect)
+			runner := securePrepareRunner(t, config)
+			runner.responses = append(runner.responses, fakeResponse{})
+			launcher, err := newWithRunner(config, runner)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := launcher.Prepare(context.Background()); !errors.Is(err, ErrIsolation) {
+				t.Fatalf("prepare error = %v, want ErrIsolation", err)
+			}
+			if last := runner.calls[len(runner.calls)-1]; !containsSequence(last, []string{"rm", "--force", "0123456789ab"}) {
+				t.Fatalf("rejected container cleanup = %v", last)
+			}
+		})
+	}
+}
+
+func TestSafeTmpfsRejectsExtrasAndDuplicateOptions(t *testing.T) {
+	valid := "rw,noexec,nosuid,nodev,size=16777216,mode=1777"
+	if !safeTmpfs(valid) {
+		t.Fatal("canonical tmpfs options were rejected")
+	}
+	for _, invalid := range []string{
+		valid + ",exec",
+		valid + ",rw",
+		valid + ",mode=0777",
+		"rw,nosuid,nodev,size=16777216,mode=1777",
+		"",
+	} {
+		if safeTmpfs(invalid) {
+			t.Errorf("unsafe tmpfs options accepted: %q", invalid)
+		}
+	}
+}
+
+func TestSafeSecurityOptionsRequireExactlyOneEnabledPolicyPair(t *testing.T) {
+	if !safeSecurityOptions([]string{"no-new-privileges=true", "seccomp=builtin"}) ||
+		!safeSecurityOptions([]string{"no-new-privileges", "seccomp=builtin"}) {
+		t.Fatal("valid security option pair was rejected")
+	}
+	for _, invalid := range [][]string{
+		{"no-new-privileges=true", "no-new-privileges=false", "seccomp=builtin"},
+		{"no-new-privileges=true", "seccomp=builtin", "seccomp=unconfined"},
+		{"no-new-privileges=false", "seccomp=builtin"},
+		{"no-new-privileges=true", "seccomp=unconfined"},
+		{"no-new-privileges=true", "seccomp=builtin", "unexpected=option"},
+	} {
+		if safeSecurityOptions(invalid) {
+			t.Errorf("unsafe security options accepted: %#v", invalid)
+		}
+	}
+}
+
 func TestPrepareRejectsSharedPIDNamespace(t *testing.T) {
 	config := dockerTestConfig(t)
 	inspect := secureContainerInspect(t, config)

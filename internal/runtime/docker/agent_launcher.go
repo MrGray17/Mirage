@@ -395,10 +395,10 @@ func (l *AgentLauncher) verifySeedContainer(ctx context.Context) error {
 	if inspected.Config.User != "0:0" || inspected.Config.WorkingDir != containerWorkspacePath || inspected.Config.Image != l.config.HelperImage || len(inspected.Config.Entrypoint) != 1 || inspected.Config.Entrypoint[0] != "/bin/sh" || !equalStrings(inspected.Config.Cmd, []string{"-c", "exec sleep " + seedSleepSeconds}) || inspected.Config.Healthcheck == nil || !equalStrings(inspected.Config.Healthcheck.Test, []string{"NONE"}) {
 		return fmt.Errorf("%w: quota-volume keeper image or command changed", ErrIsolation)
 	}
-	if host.Privileged || !host.ReadonlyRootfs || host.NetworkMode != "none" || !privatePIDMode(host.PidMode) || host.IpcMode != "private" || host.CgroupnsMode != "private" || !containsFold(host.CapDrop, "ALL") || !hasNoNewPrivileges(host.SecurityOpt) || !containsExactFold(host.SecurityOpt, "seccomp=builtin") {
+	if host.Privileged || !host.ReadonlyRootfs || host.NetworkMode != "none" || !privatePIDMode(host.PidMode) || host.IpcMode != "private" || host.CgroupnsMode != "private" || !containsFold(host.CapDrop, "ALL") || len(host.CapAdd) != 0 || !safeSecurityOptions(host.SecurityOpt) {
 		return fmt.Errorf("%w: quota-volume keeper isolation changed", ErrIsolation)
 	}
-	if host.PidsLimit == nil || *host.PidsLimit != 8 || host.Memory != 32<<20 || host.MemorySwap != 32<<20 || host.NanoCPUs != 250_000_000 || host.Init == nil || !*host.Init || host.AutoRemove || host.ShmSize != 4<<20 || !safeSizedTmpfs(host.Tmpfs["/tmp"], "size=1048576") || !hasExactNoFileLimit(host.Ulimits, 64) || host.RestartPolicy.Name != "no" || host.LogConfig.Type != "none" || len(host.Devices) != 0 || host.PublishAllPorts || len(host.PortBindings) != 0 {
+	if host.PidsLimit == nil || *host.PidsLimit != 8 || host.Memory != 32<<20 || host.MemorySwap != 32<<20 || host.NanoCPUs != 250_000_000 || host.Init == nil || !*host.Init || host.AutoRemove || host.ShmSize != 4<<20 || !safeSizedTmpfs(host.Tmpfs["/tmp"], "size=1048576") || !hasExactNoFileLimit(host.Ulimits, 64) || host.RestartPolicy.Name != "no" || host.LogConfig.Type != "none" || len(host.Devices) != 0 || len(host.DeviceRequests) != 0 || host.PublishAllPorts || len(host.PortBindings) != 0 {
 		return fmt.Errorf("%w: quota-volume keeper resource policy changed", ErrIsolation)
 	}
 	if len(inspected.Mounts) != 1 {
@@ -511,10 +511,10 @@ func (l *AgentLauncher) verifyAgentContainer(ctx context.Context) error {
 			return fmt.Errorf("%w: coding-agent broker environment changed", ErrIsolation)
 		}
 	}
-	if host.Privileged || !host.ReadonlyRootfs || host.NetworkMode != "none" || !privatePIDMode(host.PidMode) || host.IpcMode != "private" || host.CgroupnsMode != "private" || !containsFold(host.CapDrop, "ALL") || !hasNoNewPrivileges(host.SecurityOpt) || !containsExactFold(host.SecurityOpt, "seccomp=builtin") {
+	if host.Privileged || !host.ReadonlyRootfs || host.NetworkMode != "none" || !privatePIDMode(host.PidMode) || host.IpcMode != "private" || host.CgroupnsMode != "private" || !containsFold(host.CapDrop, "ALL") || len(host.CapAdd) != 0 || !safeSecurityOptions(host.SecurityOpt) {
 		return fmt.Errorf("%w: coding-agent isolation changed", ErrIsolation)
 	}
-	if host.PidsLimit == nil || *host.PidsLimit != l.config.PIDLimit || host.Memory != l.config.MemoryBytes || host.MemorySwap != l.config.MemoryBytes || host.NanoCPUs != l.config.NanoCPUs || host.Init == nil || !*host.Init || host.AutoRemove || host.ShmSize != 16<<20 || !safeSizedTmpfs(host.Tmpfs["/tmp"], "size=16777216") || !hasExactNoFileLimit(host.Ulimits, 256) || host.RestartPolicy.Name != "no" || !safeAgentLogConfig(host.LogConfig.Type, host.LogConfig.Config, l.config.DiagnosticBytes) || len(host.Devices) != 0 || host.PublishAllPorts || len(host.PortBindings) != 0 {
+	if host.PidsLimit == nil || *host.PidsLimit != l.config.PIDLimit || host.Memory != l.config.MemoryBytes || host.MemorySwap != l.config.MemoryBytes || host.NanoCPUs != l.config.NanoCPUs || host.Init == nil || !*host.Init || host.AutoRemove || host.ShmSize != 16<<20 || !safeSizedTmpfs(host.Tmpfs["/tmp"], "size=16777216") || !hasExactNoFileLimit(host.Ulimits, 256) || host.RestartPolicy.Name != "no" || !safeAgentLogConfig(host.LogConfig.Type, host.LogConfig.Config, l.config.DiagnosticBytes) || len(host.Devices) != 0 || len(host.DeviceRequests) != 0 || host.PublishAllPorts || len(host.PortBindings) != 0 {
 		return fmt.Errorf("%w: coding-agent resource or device policy changed", ErrIsolation)
 	}
 	expectedMounts := 1
@@ -882,17 +882,8 @@ type volumeInspect struct {
 }
 
 func sameOptionSet(first, second string) bool {
-	left := strings.Split(first, ",")
-	right := strings.Split(second, ",")
-	if len(left) != len(right) {
-		return false
-	}
-	for _, value := range left {
-		if !containsFold(right, value) {
-			return false
-		}
-	}
-	return true
+	expected := strings.Split(second, ",")
+	return exactOptionSet(first, expected)
 }
 
 func equalStrings(first, second []string) bool {
@@ -908,14 +899,7 @@ func equalStrings(first, second []string) bool {
 }
 
 func safeSizedTmpfs(options, size string) bool {
-	required := []string{"rw", "noexec", "nosuid", "nodev", size, "mode=1777"}
-	parts := strings.Split(strings.ToLower(options), ",")
-	for _, wanted := range required {
-		if !containsFold(parts, wanted) {
-			return false
-		}
-	}
-	return true
+	return exactOptionSet(options, []string{"rw", "noexec", "nosuid", "nodev", size, "mode=1777"})
 }
 
 func hasExactNoFileLimit(limits []dockerUlimit, value int64) bool {

@@ -419,9 +419,8 @@ func (l *Launcher) verifyContainer(ctx context.Context) error {
 	if host.Privileged || !host.ReadonlyRootfs || host.NetworkMode != "none" || !privatePIDMode(host.PidMode) || host.IpcMode != "private" || host.CgroupnsMode != "private" {
 		return fmt.Errorf("%w: namespace or root-filesystem isolation changed", ErrIsolation)
 	}
-	if !containsFold(host.CapDrop, "ALL") ||
-		!hasNoNewPrivileges(host.SecurityOpt) ||
-		!containsExactFold(host.SecurityOpt, "seccomp=builtin") {
+	if !containsFold(host.CapDrop, "ALL") || len(host.CapAdd) != 0 ||
+		!safeSecurityOptions(host.SecurityOpt) {
 		return fmt.Errorf("%w: capability or privilege isolation changed", ErrIsolation)
 	}
 	if host.PidsLimit == nil || *host.PidsLimit != l.config.PIDLimit || host.Memory != l.config.MemoryBytes || host.MemorySwap != l.config.MemoryBytes || host.NanoCPUs != l.config.NanoCPUs {
@@ -430,7 +429,7 @@ func (l *Launcher) verifyContainer(ctx context.Context) error {
 	if host.Init == nil || !*host.Init || host.AutoRemove || host.ShmSize != 16<<20 || !safeTmpfs(host.Tmpfs["/tmp"]) || !hasNoFileLimit(host.Ulimits) {
 		return fmt.Errorf("%w: init, temporary storage, or descriptor limits changed", ErrIsolation)
 	}
-	if host.RestartPolicy.Name != "no" || host.LogConfig.Type != "none" || len(host.Devices) != 0 || host.PublishAllPorts || len(host.PortBindings) != 0 {
+	if host.RestartPolicy.Name != "no" || host.LogConfig.Type != "none" || len(host.Devices) != 0 || len(host.DeviceRequests) != 0 || host.PublishAllPorts || len(host.PortBindings) != 0 {
 		return fmt.Errorf("%w: restart, logging, device, or port isolation changed", ErrIsolation)
 	}
 	if len(inspected.Mounts) != 1 {
@@ -546,6 +545,7 @@ type containerInspect struct {
 		PidMode         string            `json:"PidMode"`
 		IpcMode         string            `json:"IpcMode"`
 		CgroupnsMode    string            `json:"CgroupnsMode"`
+		CapAdd          []string          `json:"CapAdd"`
 		CapDrop         []string          `json:"CapDrop"`
 		SecurityOpt     []string          `json:"SecurityOpt"`
 		PidsLimit       *int64            `json:"PidsLimit"`
@@ -560,6 +560,7 @@ type containerInspect struct {
 		PublishAllPorts bool              `json:"PublishAllPorts"`
 		PortBindings    map[string][]any  `json:"PortBindings"`
 		Devices         []json.RawMessage `json:"Devices"`
+		DeviceRequests  []json.RawMessage `json:"DeviceRequests"`
 		RestartPolicy   struct {
 			Name string `json:"Name"`
 		} `json:"RestartPolicy"`
@@ -787,15 +788,57 @@ func containsSecurityOption(options []string, wanted string) bool {
 	return false
 }
 
-func safeTmpfs(options string) bool {
-	required := []string{"rw", "noexec", "nosuid", "nodev", "size=16777216", "mode=1777"}
-	parts := strings.Split(strings.ToLower(options), ",")
-	for _, wanted := range required {
-		if !containsFold(parts, wanted) {
+func safeSecurityOptions(options []string) bool {
+	if len(options) != 2 {
+		return false
+	}
+	hasNoNewPrivileges, hasSeccomp := false, false
+	for _, option := range options {
+		switch strings.ToLower(strings.TrimSpace(option)) {
+		case "no-new-privileges", "no-new-privileges=true", "no-new-privileges:true":
+			if hasNoNewPrivileges {
+				return false
+			}
+			hasNoNewPrivileges = true
+		case "seccomp=builtin":
+			if hasSeccomp {
+				return false
+			}
+			hasSeccomp = true
+		default:
 			return false
 		}
 	}
-	return true
+	return hasNoNewPrivileges && hasSeccomp
+}
+
+// exactOptionSet compares comma-separated Docker option values as a multiset.
+// It rejects extra permissions, conflicting duplicates, and repeated options.
+func exactOptionSet(actual string, expected []string) bool {
+	parts := strings.Split(strings.ToLower(actual), ",")
+	if strings.TrimSpace(actual) == "" || len(parts) != len(expected) {
+		return false
+	}
+	counts := make(map[string]int, len(expected))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return false
+		}
+		counts[part]++
+	}
+	for _, wanted := range expected {
+		key := strings.ToLower(strings.TrimSpace(wanted))
+		if counts[key] != 1 {
+			return false
+		}
+		delete(counts, key)
+	}
+	return len(counts) == 0
+}
+
+func safeTmpfs(options string) bool {
+	return exactOptionSet(options, []string{"rw", "noexec", "nosuid", "nodev", "size=16777216", "mode=1777"})
 }
 
 func hasNoFileLimit(limits []dockerUlimit) bool {

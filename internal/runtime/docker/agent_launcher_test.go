@@ -13,6 +13,121 @@ import (
 	"github.com/MrGray17/Mirage/internal/runtime/diagnostics"
 )
 
+func TestSameOptionSetRejectsDuplicatesAndConflicts(t *testing.T) {
+	if !sameOptionSet("size=67108864,mode=0777,nosuid,nodev", "size=67108864,mode=0777,nosuid,nodev") {
+		t.Fatal("identical volume options were rejected")
+	}
+	for _, actual := range []string{
+		"size=67108864,mode=0777,nosuid,nodev,nosuid",
+		"size=67108864,mode=0777,nosuid,nodev,exec",
+		"size=67108864,mode=0777,suid,nodev",
+	} {
+		if sameOptionSet(actual, "size=67108864,mode=0777,nosuid,nodev") {
+			t.Errorf("non-exact quota-volume options accepted: %q", actual)
+		}
+	}
+}
+
+func TestVerifyAgentContainerRejectsCapabilityAndDeviceExtensions(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*containerInspect)
+	}{
+		{name: "added capability", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.CapAdd = []string{"SYS_ADMIN"}
+		}},
+		{name: "device request", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.DeviceRequests = []json.RawMessage{json.RawMessage(`{"Driver":"nvidia","Count":-1}`)}
+		}},
+		{name: "conflicting security options", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.SecurityOpt = []string{"no-new-privileges=true", "no-new-privileges=false", "seccomp=builtin"}
+		}},
+		{name: "tmpfs execution permission", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Tmpfs["/tmp"] += ",exec"
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			launcher, err := NewAgent(agentTestConfig(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			inspect := secureAgentInspect(t, launcher)
+			test.mutate(&inspect)
+			launcher.runner = &fakeRunner{responses: []fakeResponse{{output: mustJSON(t, inspect)}}}
+			launcher.containerID = "0123456789ab"
+			if err := launcher.verifyAgentContainer(context.Background()); !errors.Is(err, ErrIsolation) {
+				t.Fatalf("verifyAgentContainer error = %v, want ErrIsolation", err)
+			}
+		})
+	}
+}
+
+func TestVerifySeedContainerRejectsCapabilityAndDeviceExtensions(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*containerInspect)
+	}{
+		{name: "added capability", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.CapAdd = []string{"SYS_ADMIN"}
+		}},
+		{name: "device request", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.DeviceRequests = []json.RawMessage{json.RawMessage(`{"Driver":"nvidia","Count":-1}`)}
+		}},
+		{name: "extra tmpfs permission", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Tmpfs = map[string]string{"/tmp": "rw,noexec,nosuid,nodev,size=1048576,mode=1777,exec"}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			launcher, err := NewAgent(agentTestConfig(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var inspect containerInspect
+			inspect.Config.User = "0:0"
+			inspect.Config.WorkingDir = containerWorkspacePath
+			inspect.Config.Image = launcher.config.HelperImage
+			inspect.Config.Entrypoint = []string{"/bin/sh"}
+			inspect.Config.Cmd = []string{"-c", "exec sleep " + seedSleepSeconds}
+			inspect.Config.Healthcheck = &struct {
+				Test []string `json:"Test"`
+			}{Test: []string{"NONE"}}
+			inspect.HostConfig.ReadonlyRootfs = true
+			inspect.HostConfig.NetworkMode = "none"
+			inspect.HostConfig.IpcMode = "private"
+			inspect.HostConfig.CgroupnsMode = "private"
+			inspect.HostConfig.CapDrop = []string{"ALL"}
+			inspect.HostConfig.SecurityOpt = []string{"no-new-privileges=true", "seccomp=builtin"}
+			inspect.HostConfig.PidsLimit = int64Pointer(8)
+			inspect.HostConfig.Memory = 32 << 20
+			inspect.HostConfig.MemorySwap = 32 << 20
+			inspect.HostConfig.NanoCPUs = 250_000_000
+			enabled := true
+			inspect.HostConfig.Init = &enabled
+			inspect.HostConfig.ShmSize = 4 << 20
+			inspect.HostConfig.Tmpfs = map[string]string{"/tmp": "rw,noexec,nosuid,nodev,size=1048576,mode=1777"}
+			inspect.HostConfig.Ulimits = []dockerUlimit{{Name: "nofile", Soft: 64, Hard: 64}}
+			inspect.HostConfig.RestartPolicy.Name = "no"
+			inspect.HostConfig.LogConfig.Type = "none"
+			inspect.Mounts = append(inspect.Mounts, struct {
+				Type        string `json:"Type"`
+				Name        string `json:"Name"`
+				Source      string `json:"Source"`
+				Destination string `json:"Destination"`
+				RW          bool `json:"RW"`
+				Propagation string `json:"Propagation"`
+			}{Type: "volume", Name: launcher.volumeName, Destination: containerWorkspacePath, RW: true})
+			test.mutate(&inspect)
+			launcher.runner = &fakeRunner{responses: []fakeResponse{{output: mustJSON(t, inspect)}}}
+			launcher.seedID = "0123456789ab"
+			if err := launcher.verifySeedContainer(context.Background()); !errors.Is(err, ErrIsolation) {
+				t.Fatalf("verifySeedContainer error = %v, want ErrIsolation", err)
+			}
+		})
+	}
+}
+
 func TestAgentLauncherUsesQuotaVolumeAndExactArgv(t *testing.T) {
 	config := agentTestConfig(t)
 	launcher, err := NewAgent(config)
@@ -317,6 +432,8 @@ func agentTestConfig(t *testing.T) AgentConfig {
 		Command:        []string{"/usr/local/bin/coding-agent", "exec", "edit README.md"},
 	}
 }
+
+func int64Pointer(value int64) *int64 { return &value }
 
 func secureAgentInspect(t *testing.T, launcher *AgentLauncher) containerInspect {
 	t.Helper()
