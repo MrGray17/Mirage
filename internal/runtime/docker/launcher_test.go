@@ -344,7 +344,12 @@ func TestPrepareRejectsCapabilityDeviceAndConflictingOptionExtensions(t *testing
 			test.mutate(&inspect)
 			runner := securePrepareRunner(t, config)
 			runner.responses[len(runner.responses)-1].output = mustJSON(t, inspect)
-			runner.responses = append(runner.responses, fakeResponse{})
+			runner.responses = append(runner.responses,
+				fakeResponse{output: []byte("0123456789ab\n")}, // run/role inventory
+				fakeResponse{output: mustJSON(t, inspect)}, // ownership inspection
+				fakeResponse{output: mustJSON(t, containerState{Status: "created", PID: 0})},
+				fakeResponse{output: nil}, // remove
+			)
 			launcher, err := newWithRunner(config, runner)
 			if err != nil {
 				t.Fatal(err)
@@ -408,6 +413,9 @@ func TestPrepareRejectsSharedPIDNamespace(t *testing.T) {
 		{output: []byte("0123456789ab\n")},
 		{output: mustJSON(t, inspect)},
 		{output: []byte("0123456789ab\n")},
+		{output: mustJSON(t, secureContainerInspect(t, config))},
+		{output: mustJSON(t, containerState{Status: "created", PID: 0})},
+		{output: nil},
 	}}
 	launcher, err := newWithRunner(config, runner)
 	if err != nil {
@@ -431,6 +439,9 @@ func TestPrepareRejectsUnconfinedEffectiveSeccomp(t *testing.T) {
 		{output: []byte("0123456789ab\n")},
 		{output: mustJSON(t, inspect)},
 		{output: []byte("0123456789ab\n")},
+		{output: mustJSON(t, secureContainerInspect(t, config))},
+		{output: mustJSON(t, containerState{Status: "created", PID: 0})},
+		{output: nil},
 	}}
 	launcher, err := newWithRunner(config, runner)
 	if err != nil {
@@ -460,6 +471,9 @@ func TestPrepareRejectsDisabledEffectiveNoNewPrivileges(t *testing.T) {
 				{output: []byte("0123456789ab\n")},
 				{output: mustJSON(t, inspect)},
 				{output: []byte("0123456789ab\n")},
+				{output: mustJSON(t, secureContainerInspect(t, config))},
+				{output: mustJSON(t, containerState{Status: "created", PID: 0})},
+				{output: nil},
 			}}
 			launcher, err := newWithRunner(config, runner)
 			if err != nil {
@@ -510,6 +524,9 @@ func TestPrepareRejectsEnabledImageHealthcheck(t *testing.T) {
 		{output: []byte("0123456789ab\n")},
 		{output: mustJSON(t, inspect)},
 		{output: []byte("0123456789ab\n")},
+		{output: mustJSON(t, secureContainerInspect(t, config))},
+		{output: mustJSON(t, containerState{Status: "created", PID: 0})},
+		{output: nil},
 	}}
 	launcher, err := newWithRunner(config, runner)
 	if err != nil {
