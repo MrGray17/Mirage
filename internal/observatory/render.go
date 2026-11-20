@@ -658,6 +658,7 @@ const pageTemplateSource = `<!doctype html>
     summary { width: fit-content; padding: 11px 0; color: var(--muted); cursor: pointer; font-size: 13px; font-weight: 600; }
     summary::marker { color: var(--orange); }
     summary:focus-visible { outline: 2px solid var(--orange); outline-offset: 4px; border-radius: 2px; }
+    .proof-note { max-width: 780px; margin: 0; padding: 0 0 14px; color: var(--muted); font-size: 12px; line-height: 1.5; }
     .proof-groups { padding: 6px 0 19px; display: grid; grid-template-columns: 1.2fr .9fr 1.1fr; gap: 34px; }
     .proof-group { min-width: 0; }
     .proof-group h3 { margin: 0 0 10px; color: var(--ink); font-size: 12px; font-weight: 680; }
@@ -847,10 +848,11 @@ const pageTemplateSource = `<!doctype html>
     <footer class="proof-footer">
       <div class="proof-status">
         <p class="invariant">CommittedEffects &sube; AuthorizedEffects</p>
-        <div class="receipt-status">Receipt <strong>VALID</strong></div>
+        <div class="receipt-status">Receipt integrity <strong>VALID</strong></div>
       </div>
       <details>
-        <summary>Cryptographic proof</summary>
+        <summary>Integrity details</summary>
+        <p class="proof-note">SHA-256 hashes help detect changes to this evidence; they are not a digital signature or independent attestation against a compromised host.</p>
         <div class="proof-groups">
           <section class="proof-group" aria-labelledby="integrity-proof-heading">
             <h3 id="integrity-proof-heading">Integrity</h3>
