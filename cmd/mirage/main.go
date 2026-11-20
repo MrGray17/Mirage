@@ -292,8 +292,7 @@ func (plan quickEditPlan) agentArgs() []string {
 
 func quickEditAgentTask(file, request string) string {
 	return fmt.Sprintf(
-		"Edit only %s. Prefer exact replacement mode, or batch mode for multiple replacements. "+
-			"Use append mode only when the user explicitly requests an end-of-file append. "+
+		"Edit only %s. Use one exact-replacement batch containing every requested replacement. "+
 			"Preserve every unrequested byte. User request: %s",
 		file, request,
 	)

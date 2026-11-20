@@ -276,9 +276,14 @@ func TestExactReplacementModeRemovesAndRejectsAppend(t *testing.T) {
 	schema := formatted["format"].(map[string]any)["schema"].(map[string]any)
 	properties := schema["properties"].(map[string]any)
 	arguments := properties["arguments"].(map[string]any)
-	modes := arguments["properties"].(map[string]any)["mode"].(map[string]any)["enum"].([]string)
-	if strings.Join(modes, ",") != "replace,batch" {
-		t.Fatalf("exact replacement modes = %v, want replace,batch", modes)
+	argumentProperties := arguments["properties"].(map[string]any)
+	if mode := argumentProperties["mode"].(map[string]any)["const"]; mode != "batch" {
+		t.Fatalf("exact replacement mode = %v, want batch", mode)
+	}
+	for _, omitted := range []string{"append", "search", "replace"} {
+		if _, exists := argumentProperties[omitted]; exists {
+			t.Errorf("exact replacement schema still exposes %s", omitted)
+		}
 	}
 	appendAction, err := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"README.md","mode":"append","append":"after","search":null,"replace":null,"edits":null}}`))
 	if err != nil {
@@ -286,6 +291,26 @@ func TestExactReplacementModeRemovesAndRejectsAppend(t *testing.T) {
 	}
 	if err := state.validate(appendAction); !errors.Is(err, ErrProtocol) {
 		t.Fatalf("exact replacement mode accepted append: %v", err)
+	}
+	replaceAction, err := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"README.md","mode":"replace","append":null,"search":"before","replace":"after","edits":null}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.validate(replaceAction); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("exact replacement mode accepted non-batch replacement: %v", err)
+	}
+}
+
+func TestExactBatchInstructionsMatchNarrowSchema(t *testing.T) {
+	t.Parallel()
+	for _, expected := range []string{
+		"containing only path, mode, and edits",
+		`Set mode to "batch"`,
+		"Do not include append, search, or replace fields",
+	} {
+		if !strings.Contains(exactBatchInstructions, expected) {
+			t.Errorf("exact batch instructions missing %q", expected)
+		}
 	}
 }
 

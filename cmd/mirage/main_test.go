@@ -423,8 +423,7 @@ func TestQuickEditBuildsNarrowQwenInvocation(t *testing.T) {
 		"--agent qwen", "--model-broker ollama", "--model " + modelbroker.Qwen25Coder15B,
 		"--allow /workspace/src/main.go", image, defaultQwenHelperImage,
 		"/usr/local/bin/mirage-qwen-agent", "--target-exact src/main.go",
-		"Edit only src/main.go. Prefer exact replacement mode, or batch mode for multiple replacements.",
-		"Use append mode only when the user explicitly requests an end-of-file append.",
+		"Edit only src/main.go. Use one exact-replacement batch containing every requested replacement.",
 		"Preserve every unrequested byte. User request: Add input validation",
 	} {
 		if !strings.Contains(args, expected) {
@@ -441,9 +440,7 @@ func TestQuickEditTaskSteersSmallModelAwayFromAccidentalAppend(t *testing.T) {
 	task := quickEditAgentTask("README.md", `Replace "Status: draft" with "Status: verified"`)
 	for _, expected := range []string{
 		"Edit only README.md.",
-		"Prefer exact replacement mode",
-		"batch mode for multiple replacements",
-		"Use append mode only when the user explicitly requests an end-of-file append",
+		"Use one exact-replacement batch containing every requested replacement",
 		"Preserve every unrequested byte",
 		`User request: Replace "Status: draft" with "Status: verified"`,
 	} {
