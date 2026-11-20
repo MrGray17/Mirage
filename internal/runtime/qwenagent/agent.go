@@ -558,14 +558,21 @@ func summarizeRejectedAction(encoded []byte) string {
 			present = append(present, field)
 		}
 	}
-	editsCount := "unavailable"
-	if raw, ok := envelope.Arguments["edits"]; ok {
-		var edits []json.RawMessage
-		if json.Unmarshal(raw, &edits) == nil {
-			editsCount = fmt.Sprintf("%d", len(edits))
-		}
+	return fmt.Sprintf("tool=%s mode=%s fields=%s", tool, mode, strings.Join(present, ","))
+}
+
+func rejectedEditCount(encoded []byte) string {
+	var envelope struct {
+		Arguments map[string]json.RawMessage `json:"arguments"`
 	}
-	return fmt.Sprintf("tool=%s mode=%s fields=%s edits_count=%s", tool, mode, strings.Join(present, ","), editsCount)
+	if json.Unmarshal(encoded, &envelope) != nil {
+		return "unavailable"
+	}
+	var edits []json.RawMessage
+	if json.Unmarshal(envelope.Arguments["edits"], &edits) != nil {
+		return "unavailable"
+	}
+	return fmt.Sprintf("%d", len(edits))
 }
 
 func rejectionClass(rejection error) string {
@@ -582,8 +589,8 @@ func rejectionClass(rejection error) string {
 }
 
 func logRejectedAction(output io.Writer, step int, encoded []byte, rejection error) {
-	fmt.Fprintf(output, "qwen_agent step=%d action_rejected %s reason=%s\n",
-		step, summarizeRejectedAction(encoded), rejectionClass(rejection))
+	fmt.Fprintf(output, "qwen_agent step=%d action_rejected %s reason=%s edits_count=%s\n",
+		step, summarizeRejectedAction(encoded), rejectionClass(rejection), rejectedEditCount(encoded))
 }
 
 func parseAction(encoded []byte) (action, error) {

@@ -13,7 +13,7 @@ import (
 const maxActionLogBytes = 32 << 10
 
 var actionLogLine = regexp.MustCompile(`^qwen_agent step=([1-9][0-9]*) tool=(list_files|read_file|patch_file|finish) path=("(?:[^"\\]|\\.)*")$`)
-var rejectedActionLogLine = regexp.MustCompile(`^qwen_agent step=([1-9][0-9]*) action_rejected tool=(unknown|list_files|read_file|patch_file|finish) mode=(unknown|none|append|replace|batch|invalid) fields=(unavailable|[a-z_,]*) reason=(protocol_violation|policy_violation|limit_exceeded|unknown)$`)
+var rejectedActionLogLine = regexp.MustCompile(`^qwen_agent step=([1-9][0-9]*) action_rejected tool=(unknown|list_files|read_file|patch_file|finish) mode=(unknown|none|append|replace|batch|invalid) fields=(unavailable|[a-z_,]*) reason=(protocol_violation|policy_violation|limit_exceeded|unknown)(?: edits_count=(?:unavailable|[0-9]+))?$`)
 
 // CompletedAction is agent-level evidence emitted only after the constrained
 // driver successfully executes an action. It is not trusted final-state proof.
