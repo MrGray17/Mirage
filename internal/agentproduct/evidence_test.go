@@ -36,7 +36,7 @@ func TestCommittedQwenEvidenceBindsActionsObservationAndCommit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, wanted := range []string{"COMMITTED", "Completed agent actions", "read_file", "patch_file", "Receipt <strong>VALID</strong>"} {
+	for _, wanted := range []string{"COMMITTED", "Completed agent actions", "read_file", "patch_file", "Receipt integrity <strong>VALID</strong>"} {
 		if !strings.Contains(string(page), wanted) {
 			t.Errorf("Observatory omitted %q", wanted)
 		}
