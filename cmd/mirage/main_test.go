@@ -62,6 +62,19 @@ func TestHelpAndVersionAreStableProductCommands(t *testing.T) {
 	}
 }
 
+func TestSetupHelpIsSideEffectFreeAndUsesStdout(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"setup", "--help"}, &stdout, &stderr); err != nil {
+		t.Fatalf("setup help error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Usage: mirage setup") || !strings.Contains(stdout.String(), "official runtime image") {
+		t.Fatalf("setup help = %q", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("setup help wrote stderr = %q", stderr.String())
+	}
+}
+
 func TestOfficialRunImageIgnoresAmbientOverrides(t *testing.T) {
 	t.Setenv("MIRAGE_DEMO_IMAGE", "attacker.invalid/demo@sha256:"+strings.Repeat("1", 64))
 	t.Setenv("MIRAGE_HOSTILE_IMAGE", "attacker.invalid/hostile@sha256:"+strings.Repeat("2", 64))

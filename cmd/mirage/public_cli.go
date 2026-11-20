@@ -134,11 +134,14 @@ func runDoctor(args []string, stdout, stderr io.Writer) error {
 
 func runSetup(args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("setup", flag.ContinueOnError)
-	flags.SetOutput(stderr)
+	flags.SetOutput(io.Discard)
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
+			fmt.Fprintln(stdout, "Usage: mirage setup")
+			fmt.Fprintln(stdout, "\nVerifies the official runtime image and prepares the local evidence directory.")
 			return nil
 		}
+		fmt.Fprintln(stderr, err)
 		return err
 	}
 	if flags.NArg() != 0 {
