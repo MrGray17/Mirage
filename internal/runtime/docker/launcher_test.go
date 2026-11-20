@@ -346,7 +346,7 @@ func TestPrepareRejectsCapabilityDeviceAndConflictingOptionExtensions(t *testing
 			runner.responses[len(runner.responses)-1].output = mustJSON(t, inspect)
 			runner.responses = append(runner.responses,
 				fakeResponse{output: []byte("0123456789ab\n")}, // run/role inventory
-				fakeResponse{output: mustJSON(t, inspect)}, // ownership inspection
+				fakeResponse{output: mustJSON(t, inspect)},     // ownership inspection
 				fakeResponse{output: mustJSON(t, containerState{Status: "created", PID: 0})},
 				fakeResponse{output: nil}, // remove
 			)
@@ -357,8 +357,23 @@ func TestPrepareRejectsCapabilityDeviceAndConflictingOptionExtensions(t *testing
 			if err := launcher.Prepare(context.Background()); !errors.Is(err, ErrIsolation) {
 				t.Fatalf("prepare error = %v, want ErrIsolation", err)
 			}
-			if last := runner.calls[len(runner.calls)-1]; !containsSequence(last, []string{"rm", "--force", "0123456789ab"}) {
-				t.Fatalf("rejected container cleanup = %v", last)
+			if len(runner.responses) != 0 {
+				t.Fatalf("rejected container cleanup left %d fake responses unconsumed", len(runner.responses))
+			}
+			if len(runner.calls) < 4 {
+				t.Fatalf("rejected container cleanup issued only %d commands: %v", len(runner.calls), runner.calls)
+			}
+			cleanup := runner.calls[len(runner.calls)-4:]
+			if !containsSequence(cleanup[0], []string{
+				"ps", "--all", "--no-trunc",
+				"--filter", "label=" + workspaceTokenLabel + "=" + hashText(config.WorkspaceToken),
+				"--filter", "label=" + runtimeRoleLabel + "=" + hostileFixtureRole,
+				"--format", "{{.ID}}",
+			}) ||
+				!containsSequence(cleanup[1], []string{"inspect", "--format", "{{json .}}", "0123456789ab"}) ||
+				!containsSequence(cleanup[2], []string{"inspect", "--format", "{{json .State}}", "0123456789ab"}) ||
+				!containsSequence(cleanup[3], []string{"rm", "--force", "0123456789ab"}) {
+				t.Fatalf("rejected container cleanup sequence = %v", cleanup)
 			}
 		})
 	}
