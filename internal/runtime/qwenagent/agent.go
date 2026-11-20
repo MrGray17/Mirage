@@ -50,15 +50,16 @@ var (
 )
 
 type Config struct {
-	Workspace     string
-	TargetPath    string
-	BrokerSocket  string
-	Model         string
-	Task          string
-	MaxSteps      int
-	MaxReadBytes  int64
-	MaxWriteBytes int64
-	Output        io.Writer
+	Workspace             string
+	TargetPath            string
+	ExactReplacementsOnly bool
+	BrokerSocket          string
+	Model                 string
+	Task                  string
+	MaxSteps              int
+	MaxReadBytes          int64
+	MaxWriteBytes         int64
+	Output                io.Writer
 }
 
 type action struct {
@@ -104,7 +105,10 @@ func Run(ctx context.Context, config Config) error {
 	defer root.Close()
 	client := unixClient(config.BrokerSocket)
 	history := make([]exchange, 0, config.MaxSteps)
-	state := sequenceState{targetPath: config.TargetPath, readContent: make(map[string]string)}
+	state := sequenceState{
+		targetPath: config.TargetPath, readContent: make(map[string]string),
+		exactReplacementsOnly: config.ExactReplacementsOnly,
+	}
 	var lastRejection error
 	var rejectedActions rejectionTracker
 	recordRejection := func(step int, encoded []byte, rejection error) error {
@@ -320,10 +324,11 @@ func requestModel(ctx context.Context, client *http.Client, model, prompt string
 }
 
 type sequenceState struct {
-	targetPath  string
-	listed      bool
-	readContent map[string]string
-	wrote       bool
+	targetPath            string
+	listed                bool
+	readContent           map[string]string
+	wrote                 bool
+	exactReplacementsOnly bool
 }
 
 func (state sequenceState) validate(selected action) error {
@@ -371,6 +376,9 @@ func (state sequenceState) validate(selected action) error {
 		}
 		if arguments.Path != state.targetPath {
 			return fmt.Errorf("%w: patch_file is limited to the configured target", ErrPolicy)
+		}
+		if state.exactReplacementsOnly && arguments.Mode == "append" {
+			return fmt.Errorf("%w: append mode is disabled for exact-replacement edits", ErrProtocol)
 		}
 		original, read := state.readContent[arguments.Path]
 		if !read {
@@ -427,7 +435,11 @@ func actionFormat(state sequenceState) any {
 		}
 		sort.Strings(readPaths)
 		argumentProperties["path"] = map[string]any{"type": "string", "enum": readPaths}
-		argumentProperties["mode"] = map[string]any{"type": "string", "enum": []string{"append", "replace", "batch"}}
+		modes := []string{"append", "replace", "batch"}
+		if state.exactReplacementsOnly {
+			modes = []string{"replace", "batch"}
+		}
+		argumentProperties["mode"] = map[string]any{"type": "string", "enum": modes}
 		argumentProperties["append"] = map[string]any{"type": []string{"string", "null"}, "minLength": 1}
 		argumentProperties["search"] = map[string]any{"type": []string{"string", "null"}, "minLength": 1}
 		argumentProperties["replace"] = map[string]any{"type": []string{"string", "null"}}

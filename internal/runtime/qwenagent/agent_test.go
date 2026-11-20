@@ -266,6 +266,29 @@ func TestActionFormatDeclaresBoundedEditBatch(t *testing.T) {
 	}
 }
 
+func TestExactReplacementModeRemovesAndRejectsAppend(t *testing.T) {
+	t.Parallel()
+	state := sequenceState{
+		targetPath: "README.md", listed: true, wrote: false,
+		readContent: map[string]string{"README.md": "before"}, exactReplacementsOnly: true,
+	}
+	formatted := actionFormat(state).(map[string]any)
+	schema := formatted["format"].(map[string]any)["schema"].(map[string]any)
+	properties := schema["properties"].(map[string]any)
+	arguments := properties["arguments"].(map[string]any)
+	modes := arguments["properties"].(map[string]any)["mode"].(map[string]any)["enum"].([]string)
+	if strings.Join(modes, ",") != "replace,batch" {
+		t.Fatalf("exact replacement modes = %v, want replace,batch", modes)
+	}
+	appendAction, err := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"README.md","mode":"append","append":"after","search":null,"replace":null,"edits":null}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.validate(appendAction); !errors.Is(err, ErrProtocol) {
+		t.Fatalf("exact replacement mode accepted append: %v", err)
+	}
+}
+
 func TestActionFormatHasExactlyOneToolForEachState(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

@@ -422,7 +422,7 @@ func TestQuickEditBuildsNarrowQwenInvocation(t *testing.T) {
 	for _, expected := range []string{
 		"--agent qwen", "--model-broker ollama", "--model " + modelbroker.Qwen25Coder15B,
 		"--allow /workspace/src/main.go", image, defaultQwenHelperImage,
-		"/usr/local/bin/mirage-qwen-agent", "--target src/main.go",
+		"/usr/local/bin/mirage-qwen-agent", "--target-exact src/main.go",
 		"Edit only src/main.go. Prefer exact replacement mode, or batch mode for multiple replacements.",
 		"Use append mode only when the user explicitly requests an end-of-file append.",
 		"Preserve every unrequested byte. User request: Add input validation",
@@ -463,6 +463,12 @@ func TestValidateQwenAgentCommandReturnsTaskRatherThanTargetFlag(t *testing.T) {
 	}
 	if got != task {
 		t.Fatalf("Qwen evidence task = %q, want %q", got, task)
+	}
+	got, err = validateQwenAgentCommand([]string{
+		"/usr/local/bin/mirage-qwen-agent", "--target-exact", "README.md", task,
+	})
+	if err != nil || got != task {
+		t.Fatalf("exact-only Qwen command task = %q, error = %v", got, err)
 	}
 	if _, err := validateQwenAgentCommand([]string{
 		"/usr/local/bin/mirage-qwen-agent", "README.md", task,

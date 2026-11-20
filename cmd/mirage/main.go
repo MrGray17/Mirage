@@ -287,7 +287,7 @@ func (plan quickEditPlan) agentArgs() []string {
 		args = append(args, "--open")
 	}
 	task := quickEditAgentTask(plan.File, plan.Task)
-	return append(args, "--", "/usr/local/bin/mirage-qwen-agent", "--target", plan.File, task)
+	return append(args, "--", "/usr/local/bin/mirage-qwen-agent", "--target-exact", plan.File, task)
 }
 
 func quickEditAgentTask(file, request string) string {
@@ -855,7 +855,7 @@ func runHostileFixture(args []string, stdout, stderr io.Writer) error {
 
 func validateQwenAgentCommand(command []string) (string, error) {
 	if len(command) != 4 || command[0] != "/usr/local/bin/mirage-qwen-agent" ||
-		command[1] != "--target" || strings.TrimSpace(command[2]) == "" ||
+		(command[1] != "--target" && command[1] != "--target-exact") || strings.TrimSpace(command[2]) == "" ||
 		command[2] == "." || command[2] != path.Clean(command[2]) ||
 		!fs.ValidPath(command[2]) || strings.Contains(command[2], "\\") ||
 		strings.TrimSpace(command[3]) == "" {

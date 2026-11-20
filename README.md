@@ -195,7 +195,9 @@ translates the current Windows directory into the configured WSL distribution.
 This first local-agent workflow is deliberately scoped to **one existing
 regular file per run**. The file path is the explicit authority boundary:
 `mirage edit src/main.go "Add input validation"` cannot authorize changes to
-other files. The Qwen driver has no shell, Git, or network tools, and the
+other files. Quick edits expose only exact replacement and batch replacement
+actions, preventing a small model from silently substituting an append. The
+Qwen driver has no shell, Git, or network tools, and the
 sandbox remains network-disabled. Multi-file editing is not part of this v1
 command.
 

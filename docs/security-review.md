@@ -76,7 +76,7 @@ The evidence parser previously accepted only successful action lines and treated
 
 ### 2. Qwen receipts recorded the target flag instead of the user task
 
-The Qwen driver command shape is `mirage-qwen-agent --target <file> <task>`. The evidence builder previously read `command[1]`, which was the literal flag `--target`, rather than the task argument. This made the recorded task inaccurate even though the driver received the correct command.
+The Qwen driver command shape is `mirage-qwen-agent (--target|--target-exact) <file> <task>`; the quick command uses the exact-only form. The evidence builder previously read `command[1]`, which was the target-mode flag, rather than the task argument. This made the recorded task inaccurate even though the driver received the correct command.
 
 **Fix:** command validation is centralized in `validateQwenAgentCommand`; it returns the validated task argument, which is used by both receipt and effect-graph evidence construction.
 

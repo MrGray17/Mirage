@@ -134,6 +134,8 @@ Useful options include `--workspace`, `--image`, `--helper-image`,
 The first positional argument is the one existing regular file the contract
 authorizes; the remaining arguments form the task. Paths must be relative to
 the workspace, and symbolic links or paths escaping the workspace are refused.
+A quick edit exposes only exact replacement and batch replacement actions to
+the local model; append remains available only through the advanced command.
 A single run still cannot create files or edit multiple files. The Qwen agent's
 batch mode means multiple exact replacements **within that one file**, not a
 multi-file transaction.
