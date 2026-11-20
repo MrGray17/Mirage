@@ -307,6 +307,8 @@ func TestExactBatchInstructionsMatchNarrowSchema(t *testing.T) {
 		"containing only path, mode, and edits",
 		`Set mode to "batch"`,
 		"Do not include append, search, or replace fields",
+		"set the edit search to OLD and the edit replace to NEW",
+		"must never equal the search value",
 	} {
 		if !strings.Contains(exactBatchInstructions, expected) {
 			t.Errorf("exact batch instructions missing %q", expected)
