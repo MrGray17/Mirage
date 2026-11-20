@@ -286,8 +286,17 @@ func (plan quickEditPlan) agentArgs() []string {
 	if plan.Open {
 		args = append(args, "--open")
 	}
-	task := fmt.Sprintf("Edit only %s. User request: %s", plan.File, plan.Task)
+	task := quickEditAgentTask(plan.File, plan.Task)
 	return append(args, "--", "/usr/local/bin/mirage-qwen-agent", "--target", plan.File, task)
+}
+
+func quickEditAgentTask(file, request string) string {
+	return fmt.Sprintf(
+		"Edit only %s. Prefer exact replacement mode, or batch mode for multiple replacements. "+
+			"Use append mode only when the user explicitly requests an end-of-file append. "+
+			"Preserve every unrequested byte. User request: %s",
+		file, request,
+	)
 }
 
 func runQuickEdit(args []string, stdout, stderr io.Writer) error {
