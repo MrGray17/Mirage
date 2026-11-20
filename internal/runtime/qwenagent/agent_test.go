@@ -248,6 +248,11 @@ func TestActionFormatDeclaresBoundedEditBatch(t *testing.T) {
 	if _, ok := edits["items"].(map[string]any); !ok {
 		t.Fatal("edits schema is missing item shape")
 	}
+	editProperties := edits["items"].(map[string]any)["properties"].(map[string]any)
+	if !strings.Contains(editProperties["search"].(map[string]any)["description"].(string), "OLD") ||
+		!strings.Contains(editProperties["replace"].(map[string]any)["description"].(string), "NEW") {
+		t.Fatal("edit schema does not distinguish old search text from new replacement text")
+	}
 	required, ok := arguments["required"].([]string)
 	if !ok {
 		t.Fatalf("required schema has unexpected type %T", arguments["required"])

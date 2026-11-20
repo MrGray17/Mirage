@@ -450,12 +450,19 @@ func actionFormat(state sequenceState) any {
 			argumentProperties["replace"] = map[string]any{"type": []string{"string", "null"}}
 		}
 		argumentProperties["edits"] = map[string]any{
-			"type": []string{"array", "null"},
+			"type":        []string{"array", "null"},
+			"description": "Exact replacements requested by the user, in order.",
 			"items": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"search":  map[string]any{"type": "string", "minLength": 1},
-					"replace": map[string]any{"type": "string"},
+					"search": map[string]any{
+						"type": "string", "minLength": 1,
+						"description": "Exact OLD text currently present in the file.",
+					},
+					"replace": map[string]any{
+						"type":        "string",
+						"description": "Exact NEW text requested by the user; it must differ from search.",
+					},
 				},
 				"required":             []string{"search", "replace"},
 				"additionalProperties": false,
