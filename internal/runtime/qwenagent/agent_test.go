@@ -386,7 +386,7 @@ func TestLogRejectedActionOmitsWorkspaceContent(t *testing.T) {
 			t.Fatalf("rejection log leaked %q: %s", secret, log)
 		}
 	}
-	for _, expected := range []string{"step=4", "action_rejected", "tool=patch_file", "mode=batch", "reason=protocol_violation", "fields=path,mode,append,search,replace,edits"} {
+	for _, expected := range []string{"step=4", "action_rejected", "tool=patch_file", "mode=batch", "reason=protocol_violation", "fields=path,mode,append,search,replace,edits", "edits_count=1"} {
 		if !strings.Contains(log, expected) {
 			t.Errorf("rejection log missing %q: %s", expected, log)
 		}

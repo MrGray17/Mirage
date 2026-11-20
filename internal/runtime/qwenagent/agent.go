@@ -558,7 +558,14 @@ func summarizeRejectedAction(encoded []byte) string {
 			present = append(present, field)
 		}
 	}
-	return fmt.Sprintf("tool=%s mode=%s fields=%s", tool, mode, strings.Join(present, ","))
+	editsCount := "unavailable"
+	if raw, ok := envelope.Arguments["edits"]; ok {
+		var edits []json.RawMessage
+		if json.Unmarshal(raw, &edits) == nil {
+			editsCount = fmt.Sprintf("%d", len(edits))
+		}
+	}
+	return fmt.Sprintf("tool=%s mode=%s fields=%s edits_count=%s", tool, mode, strings.Join(present, ","), editsCount)
 }
 
 func rejectionClass(rejection error) string {
