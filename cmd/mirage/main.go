@@ -293,7 +293,7 @@ func (plan quickEditPlan) agentArgs() []string {
 func quickEditAgentTask(file, request string) string {
 	return fmt.Sprintf(
 		"Edit only %s. Use one exact-replacement batch containing every requested replacement. "+
-			"For each request to replace OLD with NEW, search for OLD and replace it with NEW; never copy OLD into both fields. "+
+			"For each request to replace OLD with NEW, put OLD in from and NEW in to; never copy OLD into both fields. "+
 			"Preserve every unrequested byte. User request: %s",
 		file, request,
 	)

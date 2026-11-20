@@ -424,7 +424,7 @@ func TestQuickEditBuildsNarrowQwenInvocation(t *testing.T) {
 		"--allow /workspace/src/main.go", image, defaultQwenHelperImage,
 		"/usr/local/bin/mirage-qwen-agent", "--target-exact src/main.go",
 		"Edit only src/main.go. Use one exact-replacement batch containing every requested replacement.",
-		"For each request to replace OLD with NEW, search for OLD and replace it with NEW; never copy OLD into both fields.",
+		"For each request to replace OLD with NEW, put OLD in from and NEW in to; never copy OLD into both fields.",
 		"Preserve every unrequested byte. User request: Add input validation",
 	} {
 		if !strings.Contains(args, expected) {
@@ -442,7 +442,7 @@ func TestQuickEditTaskSteersSmallModelAwayFromAccidentalAppend(t *testing.T) {
 	for _, expected := range []string{
 		"Edit only README.md.",
 		"Use one exact-replacement batch containing every requested replacement",
-		"search for OLD and replace it with NEW",
+		"put OLD in from and NEW in to",
 		"Preserve every unrequested byte",
 		`User request: Replace "Status: draft" with "Status: verified"`,
 	} {

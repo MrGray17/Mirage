@@ -290,6 +290,13 @@ func TestExactReplacementModeRemovesAndRejectsAppend(t *testing.T) {
 			t.Errorf("exact replacement schema still exposes %s", omitted)
 		}
 	}
+	exactEditProperties := argumentProperties["edits"].(map[string]any)["items"].(map[string]any)["properties"].(map[string]any)
+	if _, exists := exactEditProperties["from"]; !exists {
+		t.Fatal("exact replacement schema is missing from")
+	}
+	if _, exists := exactEditProperties["to"]; !exists {
+		t.Fatal("exact replacement schema is missing to")
+	}
 	appendAction, err := parseAction([]byte(`{"tool":"patch_file","arguments":{"path":"README.md","mode":"append","append":"after","search":null,"replace":null,"edits":null}}`))
 	if err != nil {
 		t.Fatal(err)
@@ -312,12 +319,25 @@ func TestExactBatchInstructionsMatchNarrowSchema(t *testing.T) {
 		"containing only path, mode, and edits",
 		`Set mode to "batch"`,
 		"Do not include append, search, or replace fields",
-		"set the edit search to OLD and the edit replace to NEW",
-		"must never equal the search value",
+		"set from to OLD and to to NEW",
+		"must never equal from",
 	} {
 		if !strings.Contains(exactBatchInstructions, expected) {
 			t.Errorf("exact batch instructions missing %q", expected)
 		}
+	}
+}
+
+func TestFromToEditNormalizesToExistingEngine(t *testing.T) {
+	t.Parallel()
+	from, to := "Status: draft", "Status: verified"
+	edit := textEdit{From: &from, To: &to}
+	content, err := applyTextEdit([]byte("Status: draft\n"), edit, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "Status: verified\n" {
+		t.Fatalf("from/to edit content = %q", content)
 	}
 }
 
