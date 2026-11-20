@@ -339,6 +339,12 @@ func TestFromToEditNormalizesToExistingEngine(t *testing.T) {
 	if string(content) != "Status: verified\n" {
 		t.Fatalf("from/to edit content = %q", content)
 	}
+	edits := []textEdit{{From: &from, To: &to}}
+	if err := validatePatchArguments(patchArguments{
+		Path: "README.md", Mode: "batch", Edits: &edits,
+	}, "Status: draft\n"); err != nil {
+		t.Fatalf("growing from/to edit failed semantic validation: %v", err)
+	}
 }
 
 func TestActionFormatHasExactlyOneToolForEachState(t *testing.T) {

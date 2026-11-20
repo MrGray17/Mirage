@@ -771,10 +771,14 @@ func validatePatchArguments(arguments patchArguments, original string) error {
 	}
 	working := []byte(original)
 	for _, edit := range edits {
+		normalized, err := normalizeTextEdit(edit)
+		if err != nil {
+			return err
+		}
 		// State validation checks semantic validity, while the execution path
 		// separately enforces the configured output-size limit.
-		maximum := int64(len(working)) + int64(len(edit.Replace))
-		next, err := applyTextEdit(working, edit, maximum)
+		maximum := int64(len(working)) + int64(len(normalized.Replace))
+		next, err := applyTextEdit(working, normalized, maximum)
 		if err != nil {
 			return err
 		}
