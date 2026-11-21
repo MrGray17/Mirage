@@ -108,6 +108,7 @@ func Run(ctx context.Context, config Config) error {
 	}
 	defer root.Close()
 	client := unixClient(config.BrokerSocket)
+	defer client.CloseIdleConnections()
 	history := make([]exchange, 0, config.MaxSteps)
 	state := sequenceState{
 		targetPath: config.TargetPath, readContent: make(map[string]string),
@@ -208,7 +209,8 @@ func unixClient(socket string) *http.Client {
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, "unix", socket)
 		},
-		DisableKeepAlives: true,
+		MaxIdleConns:        1,
+		MaxIdleConnsPerHost: 1,
 	}
 	return &http.Client{Transport: transport}
 }

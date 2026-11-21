@@ -48,6 +48,19 @@ func TestStrictActionProtocol(t *testing.T) {
 	}
 }
 
+func TestUnixClientUsesOneRunScopedKeepAlivePool(t *testing.T) {
+	t.Parallel()
+	client := unixClient(filepath.Join(t.TempDir(), "model.sock"))
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T", client.Transport)
+	}
+	if transport.DisableKeepAlives || transport.MaxIdleConns != 1 || transport.MaxIdleConnsPerHost != 1 {
+		t.Fatalf("unsafe Unix connection pool: disable=%t max=%d per_host=%d",
+			transport.DisableKeepAlives, transport.MaxIdleConns, transport.MaxIdleConnsPerHost)
+	}
+}
+
 func TestStrictJSONRejectsDuplicateMembersAtEveryDepth(t *testing.T) {
 	t.Parallel()
 	tests := []string{
