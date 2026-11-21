@@ -113,6 +113,26 @@ func TestWindowsFrontendClassifiesPublicAndAdvancedRuns(t *testing.T) {
 	}
 }
 
+func TestWindowsFrontendRoutesWSLReceiptPathsToBackend(t *testing.T) {
+	for _, args := range [][]string{
+		{"verify", "/home/user/.cache/mirage/runs/run/receipt.json"},
+		{"receipt", "verify", "/mnt/c/evidence/receipt.json"},
+	} {
+		if !requiresLinuxBackend(args) {
+			t.Fatalf("WSL receipt path was not routed to backend: %v", args)
+		}
+	}
+	for _, args := range [][]string{
+		{"verify", `C:\Evidence\receipt.json`},
+		{"receipt", "verify", `C:\Evidence\receipt.json`},
+		{"verify", "--help"},
+	} {
+		if requiresLinuxBackend(args) {
+			t.Fatalf("Windows receipt path was unexpectedly routed to backend: %v", args)
+		}
+	}
+}
+
 func TestWindowsEditUsesCurrentDirectoryAndImageSettings(t *testing.T) {
 	current, err := os.Getwd()
 	if err != nil {

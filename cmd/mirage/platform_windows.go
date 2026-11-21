@@ -57,6 +57,10 @@ func requiresLinuxBackend(args []string) bool {
 	case "edit":
 		// Help is local and must remain available even before WSL is configured.
 		return len(args) < 2 || (args[1] != "--help" && args[1] != "-h")
+	case "verify":
+		return len(args) == 2 && strings.HasPrefix(args[1], "/")
+	case "receipt":
+		return len(args) == 3 && args[1] == "verify" && strings.HasPrefix(args[2], "/")
 	default:
 		return false
 	}
