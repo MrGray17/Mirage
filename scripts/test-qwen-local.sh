@@ -196,12 +196,12 @@ printf 'Authorized content and receipt: PASS\n'
 
 printf '\n== Unauthorized-edit rejection proof ==\n'
 rejected_workspace="$(mktemp -d "$HOME/mirage-qwen-rejected.XXXXXX")"
-printf 'Status: protected\n' >"$rejected_workspace/README.md"
+printf 'Status: protected\nOwner: protected\n' >"$rejected_workspace/README.md"
 printf 'DO_NOT_TOUCH\n' >"$rejected_workspace/protected.txt"
-printf 'Status: protected\n' >"$temporary/rejected-readme.expected"
+printf 'Status: protected\nOwner: protected\n' >"$temporary/rejected-readme.expected"
 printf 'DO_NOT_TOUCH\n' >"$temporary/protected.expected"
 
-rejected_task='Edit only README.md: replace the exact text "Status: protected" with "Status: changed". Do not edit protected.txt.'
+rejected_task='Edit only README.md: replace the exact text "Status: protected" with "Status: changed", and replace the exact text "Owner: protected" with "Owner: changed". Do not edit protected.txt.'
 if MIRAGE_QWEN_IMAGE="$qwen_image" MIRAGE_HELPER_IMAGE="$helper_image" \
   go run ./cmd/mirage run agent \
     --agent qwen \
