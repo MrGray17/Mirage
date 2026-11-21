@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Distribution = "Ubuntu",
+    [string]$Distribution = "",
     [string]$Version = "1.0.0-dev"
 )
 
@@ -121,6 +121,25 @@ try {
         throw "Could not enumerate installed WSL distributions."
     }
     $distributions = $distributionOutput | ForEach-Object { $_.Trim([char]0).Trim() } | Where-Object { $_ }
+    if ([string]::IsNullOrWhiteSpace($Distribution)) {
+        $candidates = @($distributions | Where-Object { $_ -notlike "docker-desktop*" })
+        if ("Ubuntu" -in $candidates) {
+            $Distribution = "Ubuntu"
+        }
+        elseif ($candidates.Count -eq 1) {
+            $Distribution = $candidates[0]
+        }
+        else {
+            $ubuntuCandidates = @($candidates | Where-Object { $_ -like "Ubuntu*" })
+            if ($ubuntuCandidates.Count -eq 1) {
+                $Distribution = $ubuntuCandidates[0]
+            }
+            else {
+                throw "Could not select one WSL distribution automatically. Rerun with -Distribution <name>. Available: $($candidates -join ', ')"
+            }
+        }
+        Write-Host "Using WSL distribution: $Distribution"
+    }
     if ($Distribution -notin $distributions) {
         throw "WSL distribution '$Distribution' was not found. No distribution was installed automatically."
     }
@@ -237,6 +256,10 @@ try {
         $pathChanged = $true
         [Environment]::SetEnvironmentVariable("Path", (($parts + $windowsBin) -join ";"), "User")
     }
+    $currentParts = @($env:Path -split ";" | Where-Object { $_ })
+    if ($windowsBin -notin $currentParts) {
+        $env:Path = (($env:Path.TrimEnd(";") + ";" + $windowsBin).TrimStart(";"))
+    }
     $transactionComplete = $true
 }
 catch {
@@ -315,5 +338,6 @@ if ($transactionComplete) {
     Write-Host "Installed MIRAGE frontend: $frontend"
     Write-Host ("Installed MIRAGE WSL backend: {0}:{1}" -f $Distribution, $backend)
     Write-Host "Install validation passed: build identity and Windows-to-WSL protocol match."
-    Write-Host "Open a new PowerShell window, then run: mirage setup"
+    Write-Host "MIRAGE is installed and available in this PowerShell session."
+    Write-Host "Next: mirage setup"
 }

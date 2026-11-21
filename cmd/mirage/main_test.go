@@ -67,7 +67,7 @@ func TestSetupHelpIsSideEffectFreeAndUsesStdout(t *testing.T) {
 	if err := run([]string{"setup", "--help"}, &stdout, &stderr); err != nil {
 		t.Fatalf("setup help error = %v", err)
 	}
-	if !strings.Contains(stdout.String(), "Usage: mirage setup") || !strings.Contains(stdout.String(), "official runtime image") {
+	if !strings.Contains(stdout.String(), "Usage: mirage setup") || !strings.Contains(stdout.String(), "every pinned runtime image") {
 		t.Fatalf("setup help = %q", stdout.String())
 	}
 	if stderr.Len() != 0 {
@@ -503,19 +503,18 @@ func TestDigestPinnedImageReferenceValidation(t *testing.T) {
 	}
 }
 
-func TestQuickEditRequiresDigestPinnedImage(t *testing.T) {
+func TestQuickEditUsesOfficialImageByDefaultAndRejectsMutableOverrides(t *testing.T) {
 	workspace := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("hello\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("MIRAGE_QWEN_IMAGE", "")
 	t.Setenv("MIRAGE_AGENT_IMAGE", "ghcr.io/example/generic-agent@sha256:"+strings.Repeat("a", 64))
-	_, err := parseQuickEditPlan([]string{"--workspace", workspace, "README.md", "Improve the introduction"})
-	if err == nil || !strings.Contains(err.Error(), "MIRAGE_QWEN_IMAGE") {
-		t.Fatalf("missing image error = %v", err)
+	plan, err := parseQuickEditPlan([]string{"--workspace", workspace, "README.md", "Improve the introduction"})
+	if err != nil || plan.Image != defaultQwenImage {
+		t.Fatalf("default image plan = %#v, error = %v", plan, err)
 	}
-	t.Setenv("MIRAGE_QWEN_IMAGE", "ghcr.io/example/mirage-qwen:latest")
-	_, err = parseQuickEditPlan([]string{"--workspace", workspace, "README.md", "Improve the introduction"})
+	_, err = parseQuickEditPlan([]string{"--workspace", workspace, "--image", "ghcr.io/example/mirage-qwen:latest", "README.md", "Improve the introduction"})
 	if err == nil || !strings.Contains(err.Error(), "immutable") {
 		t.Fatalf("mutable image error = %v", err)
 	}

@@ -30,7 +30,7 @@ Get started (deterministic demo; no provider API key or GitHub write):
 
 Edit one existing file with local Qwen:
   mirage edit [options] <file> <task>
-  Set MIRAGE_QWEN_IMAGE to a digest-pinned image before the first edit.
+  The official digest-pinned Qwen runtime is the default.
 
 Usage:
   mirage run [malicious|benign] [--open] [--json]
@@ -74,11 +74,15 @@ func runVersion(args []string, stdout, stderr io.Writer) error {
 }
 
 type doctorReport struct {
-	Ready          bool                            `json:"ready"`
-	Environment    runtimedocker.EnvironmentReport `json:"environment"`
-	OfficialImage  string                          `json:"official_image"`
-	ImageAvailable bool                            `json:"image_available"`
-	Error          string                          `json:"error,omitempty"`
+	Ready                bool                            `json:"ready"`
+	Environment          runtimedocker.EnvironmentReport `json:"environment"`
+	OfficialImage        string                          `json:"official_image"`
+	ImageAvailable       bool                            `json:"image_available"`
+	QwenImage            string                          `json:"qwen_image"`
+	QwenImageAvailable   bool                            `json:"qwen_image_available"`
+	HelperImage          string                          `json:"helper_image"`
+	HelperImageAvailable bool                            `json:"helper_image_available"`
+	Error                string                          `json:"error,omitempty"`
 }
 
 func runDoctor(args []string, stdout, stderr io.Writer) error {
@@ -96,12 +100,24 @@ func runDoctor(args []string, stdout, stderr io.Writer) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), operationTimeout)
 	defer cancel()
-	report := doctorReport{OfficialImage: demo.OfficialImage}
+	report := doctorReport{
+		OfficialImage: demo.OfficialImage,
+		QwenImage:     defaultQwenImage,
+		HelperImage:   defaultQwenHelperImage,
+	}
 	var err error
 	report.Environment, err = runtimedocker.CheckEnvironment(ctx, "docker")
 	if err == nil {
 		err = runtimedocker.ImageAvailable(ctx, "docker", demo.OfficialImage)
 		report.ImageAvailable = err == nil
+	}
+	if err == nil {
+		err = runtimedocker.ImageAvailable(ctx, "docker", defaultQwenImage)
+		report.QwenImageAvailable = err == nil
+	}
+	if err == nil {
+		err = runtimedocker.ImageAvailable(ctx, "docker", defaultQwenHelperImage)
+		report.HelperImageAvailable = err == nil
 	}
 	report.Ready = err == nil
 	if err != nil {
@@ -119,7 +135,9 @@ func runDoctor(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stdout, "  Seccomp                    %s\n", passFail(report.Environment.Seccomp))
 		fmt.Fprintf(stdout, "  cgroup v2 + systemd        %s\n", passFail(report.Environment.CgroupVersion == "2" && strings.EqualFold(report.Environment.CgroupDriver, "systemd")))
 		fmt.Fprintf(stdout, "  Resource delegation        %s\n", passFail(len(report.Environment.DelegatedControllers) >= 3))
-		fmt.Fprintf(stdout, "  Official image             %s\n", passFail(report.ImageAvailable))
+		fmt.Fprintf(stdout, "  Demo image                 %s\n", passFail(report.ImageAvailable))
+		fmt.Fprintf(stdout, "  Qwen runtime               %s\n", passFail(report.QwenImageAvailable))
+		fmt.Fprintf(stdout, "  Helper image               %s\n", passFail(report.HelperImageAvailable))
 		if report.Ready {
 			fmt.Fprintln(stdout, "\nREADY")
 		} else {
@@ -138,7 +156,7 @@ func runSetup(args []string, stdout, stderr io.Writer) error {
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			fmt.Fprintln(stdout, "Usage: mirage setup")
-			fmt.Fprintln(stdout, "\nVerifies the official runtime image and prepares the local evidence directory.")
+			fmt.Fprintln(stdout, "\nPulls and verifies every pinned runtime image and prepares the local evidence directory.")
 			return nil
 		}
 		fmt.Fprintln(stderr, err)
@@ -151,9 +169,22 @@ func runSetup(args []string, stdout, stderr io.Writer) error {
 	defer cancelSignal()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	pulled, err := runtimedocker.EnsureImage(ctx, "docker", demo.OfficialImage)
-	if err != nil {
-		return fmt.Errorf("setup made no security configuration changes: %w", err)
+	type setupImage struct {
+		label     string
+		reference string
+		pulled    bool
+	}
+	images := []setupImage{
+		{label: "Demo image", reference: demo.OfficialImage},
+		{label: "Qwen runtime", reference: defaultQwenImage},
+		{label: "Helper image", reference: defaultQwenHelperImage},
+	}
+	for index := range images {
+		pulled, err := runtimedocker.EnsureImage(ctx, "docker", images[index].reference)
+		if err != nil {
+			return fmt.Errorf("setup stopped while preparing %s: %w", strings.ToLower(images[index].label), err)
+		}
+		images[index].pulled = pulled
 	}
 	cache, err := os.UserCacheDir()
 	if err != nil {
@@ -164,12 +195,17 @@ func runSetup(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("create evidence directory: %w", err)
 	}
 	fmt.Fprintln(stdout, "MIRAGE SETUP")
-	if pulled {
-		fmt.Fprintln(stdout, "  Official image             PULLED + VERIFIED")
-	} else {
-		fmt.Fprintln(stdout, "  Official image             PRESENT + VERIFIED")
+	for _, image := range images {
+		status := "PRESENT + VERIFIED"
+		if image.pulled {
+			status = "PULLED + VERIFIED"
+		}
+		fmt.Fprintf(stdout, "  %-26s %s\n", image.label, status)
 	}
-	fmt.Fprintf(stdout, "  Evidence directory         %s\n\nREADY\n", outputRoot)
+	fmt.Fprintf(stdout, "  %-26s %s\n", "Evidence directory", outputRoot)
+	fmt.Fprintln(stdout, "\nRUNTIME READY")
+	fmt.Fprintln(stdout, "Next: ensure Ollama is running with qwen2.5-coder:1.5b, then run:")
+	fmt.Fprintln(stdout, "  mirage edit README.md \"Improve the introduction\"")
 	return nil
 }
 

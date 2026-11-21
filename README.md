@@ -73,12 +73,11 @@ identity in the binary. Install only from the commit you intend to run, and
 verify the reported identity afterward.
 
 **Release status:** the published [`v1.0.0` release](https://github.com/MrGray17/Mirage/releases/tag/v1.0.0)
-predates the installer and security hardening on `main` and has no downloadable
-binary assets. Source installs from `main` are deliberately labeled
-`1.0.0-dev` and embed the exact 40-character source commit. They contain
-post-`v1.0.0` changes, but are not a new stable release. The follow-up stable
-release should wait for the documented rootless-Docker live gate and real
-Windows/WSL install/upgrade acceptance to pass.
+predates the current installer and has no downloadable binary assets. Source
+installs from `main` are labeled `1.0.0-dev` and embed the exact source commit.
+The current `main` branch passes the rootless-Docker live gate and the real
+Windows/WSL install and edit acceptance; packaged, signed binaries remain future
+release work.
 
 ### Windows 11 with WSL2
 
@@ -89,26 +88,31 @@ Prerequisites:
 - rootless Docker inside Ubuntu, using cgroup v2, the `systemd` cgroup driver,
   delegated CPU/memory/PID controllers, and built-in seccomp.
 
-From PowerShell in the repository root:
+The shortest supported Windows installation is:
 
 ```powershell
-git status --short
-git pull --ff-only
-.\scripts\install.ps1 -Distribution Ubuntu
+git clone https://github.com/MrGray17/Mirage.git
+cd Mirage
+.\scripts\install.ps1
+mirage setup
 ```
 
-`git status --short` should print nothing. The installer builds a native
+The installer selects `Ubuntu` automatically when possible; use
+`-Distribution <name>` only when several WSL distributions make the choice
+ambiguous. It builds a native
 Windows frontend and a Linux backend from the same source commit, installs them
 under `%LOCALAPPDATA%\Mirage` and the selected WSL user's home, and records the
 backend path in `%LOCALAPPDATA%\Mirage\config.json`. It does not install or
 reconfigure WSL, Docker, Go, Git, or Ollama.
 
-Open a new PowerShell window so the user PATH refreshes, then verify the exact
-frontend/backend pair and prepare the pinned demo image:
+The installer updates PATH for the current session and future PowerShell
+windows, so no restart is required. `mirage setup` downloads and verifies the
+official digest-pinned demo, Qwen, and helper images. Prepare the local model
+once, then verify the complete runtime environment:
 
 ```powershell
+ollama pull qwen2.5-coder:1.5b
 mirage version
-mirage setup
 mirage doctor
 ```
 
@@ -177,11 +181,10 @@ details.
 
 ## Quick local edit
 
-After installing MIRAGE, starting Ollama, and making a digest-pinned Qwen image
-available to rootless Docker, the normal editing command is intentionally short:
+After installing MIRAGE, running `mirage setup`, and starting Ollama, the normal
+editing command is intentionally short:
 
 ```bash
-export MIRAGE_QWEN_IMAGE="ghcr.io/mrgray17/mirage-qwen-agent@sha256:00351657c03b8cf19302b36ea554420418751cfcfe0f4aad1077085231a3faf6"
 mirage edit README.md "Add a concise verification section"
 ```
 
@@ -201,10 +204,10 @@ Qwen driver has no shell, Git, or network tools, and the
 sandbox remains network-disabled. Multi-file editing is not part of this v1
 command.
 
-Configure `MIRAGE_QWEN_IMAGE` once in your shell environment (or pass
-`--image` to an individual command). The image must be referenced by its
-immutable `name@sha256:digest`, never a mutable tag. The exact model and helper
-image are fixed defaults; there is no silent model fallback.
+The public official Qwen runtime and helper are immutable built-in defaults;
+`mirage setup` pulls and verifies them. Advanced users can override the agent
+with `MIRAGE_QWEN_IMAGE` or `--image`, but overrides must use an immutable
+`name@sha256:digest`. The exact model is fixed and there is no silent fallback.
 
 ## Real local-Qwen proof
 
@@ -240,27 +243,24 @@ This one-command acceptance performs the full local proof:
    summaries, logs, receipts, and Observatory files for inspection.
 
 The script reuses the existing rootless Docker configuration and GHCR login;
-it never asks for a token. It prints the immutable `MIRAGE_QWEN_IMAGE` value
-at the end. Set that value once in your trusted shell environment:
+it never asks for a token. It prints the immutable image value at the end for
+reproducibility. Normal users do not need to configure it because the same
+digest is built into `mirage edit`:
 
 ```bash
-export MIRAGE_QWEN_IMAGE='ghcr.io/mrgray17/mirage-qwen-agent@sha256:00351657c03b8cf19302b36ea554420418751cfcfe0f4aad1077085231a3faf6'
 mirage edit README.md "Add a concise verification section"
 ```
 
-For PowerShell, persist the same value for future sessions:
+To test a different trusted build in PowerShell, override it explicitly:
 
 ```powershell
-[Environment]::SetEnvironmentVariable(
-  "MIRAGE_QWEN_IMAGE",
-  "ghcr.io/mrgray17/mirage-qwen-agent@sha256:00351657c03b8cf19302b36ea554420418751cfcfe0f4aad1077085231a3faf6",
-  "User"
-)
+$env:MIRAGE_QWEN_IMAGE = "registry.example/your-agent@sha256:<64-hex-digest>"
+mirage edit README.md "Add a concise verification section"
 ```
 
 The Windows frontend and WSL backend must be installed from the same source
-commit. After installing or upgrading with `scripts/install.ps1`, open a new
-PowerShell window and run `mirage version` and `mirage doctor`; the latter
+commit. After installing or upgrading with `scripts/install.ps1`, run
+`mirage version` and `mirage doctor`; the latter
 must report `READY` before using `mirage edit` from Windows. The local
 acceptance script validates the Linux/WSL product path; the final platform
 release gate still includes a real PowerShell-to-WSL edit using the installed

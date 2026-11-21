@@ -120,7 +120,6 @@ For normal use, MIRAGE exposes the constrained Qwen workflow as one short
 command:
 
 ```bash
-export MIRAGE_QWEN_IMAGE="ghcr.io/mrgray17/mirage-qwen-agent@sha256:00351657c03b8cf19302b36ea554420418751cfcfe0f4aad1077085231a3faf6"
 mirage edit README.md "Add a concise verification section"
 ```
 
@@ -141,12 +140,13 @@ A single run still cannot create files or edit multiple files. The Qwen agent's
 batch mode means multiple exact replacements **within that one file**, not a
 multi-file transaction.
 
-Set `MIRAGE_QWEN_IMAGE` once in the trusted shell environment, or pass
-`--image` per invocation. The value must be an immutable
-`registry/name@sha256:digest` reference. On Windows PowerShell, set the
-environment variable in the Windows user environment; the native frontend
-passes the image reference explicitly to WSL and translates the current Windows
-directory to its WSL path. No provider credential is forwarded.
+The official public Qwen runtime is a digest-pinned built-in default and
+`mirage setup` pulls it before the first edit. Advanced users can set
+`MIRAGE_QWEN_IMAGE` or pass `--image` per invocation to select a different
+trusted build; an override must be an immutable `registry/name@sha256:digest`
+reference. On Windows, the native frontend passes an explicit override to WSL
+and translates the current Windows directory to its WSL path. No provider
+credential is forwarded.
 
 ## Advanced Run
 
