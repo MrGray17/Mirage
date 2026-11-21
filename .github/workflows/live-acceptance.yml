@@ -30,7 +30,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Check out the release target
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           # This workflow PR bootstraps the gate by testing the current base
           # application SHA. For every other PR, test the incoming head commit.
@@ -38,7 +38,7 @@ jobs:
           fetch-depth: 1
 
       - name: Set up Go 1.27.3
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
         with:
           go-version: '1.27.3'
           cache: false
@@ -71,7 +71,7 @@ jobs:
       - name: Set up rootless Docker
         uses: docker/setup-docker-action@7ec28a010822b4626af4874f9448a4b05ac6f3e5
         with:
-          version: v29.9.2
+          version: v29.9.3
           rootless: true
           set-host: true
 
@@ -156,7 +156,7 @@ jobs:
 
       - name: Upload acceptance transcript
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: mirage-live-acceptance-${{ github.run_id }}
           path: live-acceptance.log

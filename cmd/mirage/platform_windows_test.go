@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -108,6 +109,184 @@ func TestWindowsFrontendClassifiesPublicAndAdvancedRuns(t *testing.T) {
 	for _, args := range [][]string{{"run", "agent"}, {"run", "hostile-fixture"}, {"demo", "malicious"}} {
 		if isPublicRun(args) {
 			t.Fatalf("advanced run misclassified: %v", args)
+		}
+	}
+}
+
+func TestWindowsFrontendRoutesWSLReceiptPathsToBackend(t *testing.T) {
+	for _, args := range [][]string{
+		{"verify", "/home/user/.cache/mirage/runs/run/receipt.json"},
+		{"receipt", "verify", "/mnt/c/evidence/receipt.json"},
+	} {
+		if !requiresLinuxBackend(args) {
+			t.Fatalf("WSL receipt path was not routed to backend: %v", args)
+		}
+	}
+	for _, args := range [][]string{
+		{"verify", `C:\Evidence\receipt.json`},
+		{"receipt", "verify", `C:\Evidence\receipt.json`},
+		{"verify", "--help"},
+	} {
+		if requiresLinuxBackend(args) {
+			t.Fatalf("Windows receipt path was unexpectedly routed to backend: %v", args)
+		}
+	}
+}
+
+func TestWindowsEditUsesCurrentDirectoryAndImageSettings(t *testing.T) {
+	current, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := translateWindowsBridgePath
+	translateWindowsBridgePath = func(_ wsl.Config, direction, value string) (string, error) {
+		if direction != "-u" || value != current {
+			t.Fatalf("translation direction=%q path=%q; want -u %q", direction, value, current)
+		}
+		return "/mnt/c/current-project", nil
+	}
+	t.Cleanup(func() { translateWindowsBridgePath = original })
+	image := "ghcr.io/example/mirage-qwen@sha256:" + strings.Repeat("a", 64)
+	helper := "busybox@sha256:" + strings.Repeat("b", 64)
+	t.Setenv("MIRAGE_QWEN_IMAGE", image)
+	t.Setenv("MIRAGE_AGENT_IMAGE", "")
+	t.Setenv("MIRAGE_HELPER_IMAGE", helper)
+
+	got, err := prepareWindowsEditArguments(wsl.Config{Distribution: "Ubuntu"}, []string{"README.md", "Add a section"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"--workspace", "/mnt/c/current-project",
+		"--image", image,
+		"--helper-image", helper,
+		"README.md", "Add a section",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("edit args = %#v, want %#v", got, want)
+	}
+}
+
+func TestWindowsEditTranslatesExplicitWorkspaceAndPreservesImageFlags(t *testing.T) {
+	current, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedEvidence := filepath.Join(current, ".mirage-evidence")
+	original := translateWindowsBridgePath
+	translateWindowsBridgePath = func(_ wsl.Config, direction, value string) (string, error) {
+		if direction != "-u" {
+			t.Fatalf("translation direction=%q", direction)
+		}
+		switch filepath.Clean(value) {
+		case filepath.Clean("C:\\Projects\\Mirage"):
+			return "/mnt/c/Projects/Mirage", nil
+		case filepath.Clean(expectedEvidence):
+			return "/mnt/c/current-directory/.mirage-evidence", nil
+		default:
+			t.Fatalf("unexpected Windows path to translate: %q", value)
+			return "", errors.New("unexpected path")
+		}
+	}
+	t.Cleanup(func() { translateWindowsBridgePath = original })
+	args := []string{
+		"--timeout", "2m",
+		"--format", "json",
+		"--yes",
+		"--workspace", "C:\\Projects\\Mirage",
+		"--output-dir", ".\\.mirage-evidence",
+		"--image", "registry.example/qwen@sha256:" + strings.Repeat("c", 64),
+		"--helper-image", "busybox@sha256:" + strings.Repeat("d", 64),
+		"README.md", "Fix the introduction",
+	}
+	got, err := prepareWindowsEditArguments(wsl.Config{Distribution: "Ubuntu"}, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"--timeout", "2m",
+		"--format", "json",
+		"--yes",
+		"--workspace", "/mnt/c/Projects/Mirage",
+		"--output-dir", "/mnt/c/current-directory/.mirage-evidence",
+		"--image", args[10],
+		"--helper-image", args[12],
+		"README.md", "Fix the introduction",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("edit args = %#v, want %#v", got, want)
+	}
+}
+
+func TestWindowsEditDoesNotParseTaskTextAsFlags(t *testing.T) {
+	original := translateWindowsBridgePath
+	translateWindowsBridgePath = func(_ wsl.Config, direction, value string) (string, error) {
+		if direction != "-u" {
+			t.Fatalf("translation direction=%q", direction)
+		}
+		return "/mnt/c/current-project", nil
+	}
+	t.Cleanup(func() { translateWindowsBridgePath = original })
+	t.Setenv("MIRAGE_QWEN_IMAGE", "")
+	t.Setenv("MIRAGE_HELPER_IMAGE", "")
+
+	task := "Document the literal flags --output-dir and --image in the README"
+	got, err := prepareWindowsEditArguments(wsl.Config{Distribution: "Ubuntu"}, []string{"README.md", task})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"--workspace", "/mnt/c/current-project", "README.md", task}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("task text was interpreted as CLI flags: got %#v, want %#v", got, want)
+	}
+}
+
+func TestWindowsEditPreservesExplicitWSLPaths(t *testing.T) {
+	got, err := prepareWindowsEditArguments(wsl.Config{Distribution: "Ubuntu"}, []string{
+		"--workspace", "/mnt/c/Projects/Mirage",
+		"--output-dir", "/mnt/c/Projects/Mirage-evidence",
+		"README.md", "Update the file",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"--workspace", "/mnt/c/Projects/Mirage",
+		"--output-dir", "/mnt/c/Projects/Mirage-evidence",
+		"README.md", "Update the file",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("WSL paths changed during Windows argument preparation: got %#v, want %#v", got, want)
+	}
+}
+
+func TestWindowsEditRejectsDuplicateOutputDirectory(t *testing.T) {
+	original := translateWindowsBridgePath
+	translateWindowsBridgePath = func(_ wsl.Config, direction, value string) (string, error) {
+		if direction != "-u" {
+			t.Fatalf("translation direction=%q", direction)
+		}
+		return "/mnt/c/Temp/one", nil
+	}
+	t.Cleanup(func() { translateWindowsBridgePath = original })
+
+	_, err := prepareWindowsEditArguments(wsl.Config{Distribution: "Ubuntu"}, []string{
+		"--output-dir", "C:\\Temp\\one",
+		"--output-dir=C:\\Temp\\two",
+		"README.md", "Update the file",
+	})
+	if err == nil || !strings.Contains(err.Error(), "supplied only once") {
+		t.Fatalf("duplicate output directory error = %v", err)
+	}
+}
+
+func TestEditCommandRequiresLinuxBackendOnWindows(t *testing.T) {
+	if !requiresLinuxBackend([]string{"edit", "README.md", "Add a section"}) {
+		t.Fatal("edit command bypassed the WSL security backend")
+	}
+	for _, args := range [][]string{{"edit", "--help"}, {"edit", "-h"}} {
+		if requiresLinuxBackend(args) {
+			t.Fatalf("local edit help unnecessarily required WSL: %v", args)
 		}
 	}
 }

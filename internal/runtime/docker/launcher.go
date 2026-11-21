@@ -22,6 +22,11 @@ import (
 
 const (
 	DisposableMarker       = ".mirage-disposable-workspace"
+	workspaceTokenLabel    = "dev.mirage.workspace-token-sha256"
+	runtimeRoleLabel       = "dev.mirage.runtime-role"
+	hostileFixtureRole     = "hostile-fixture"
+	codingAgentRole        = "coding-agent"
+	quotaKeeperRole        = "quota-keeper"
 	defaultContainerUser   = "65532:65532"
 	defaultMemoryBytes     = int64(256 << 20)
 	defaultPIDLimit        = int64(64)
@@ -331,16 +336,24 @@ func (l *Launcher) Destroy(ctx context.Context) error {
 	if !l.createTried && l.containerID == "" {
 		return nil
 	}
-	observedID, observeErr := l.findContainerByName(ctx)
+	observedID, observeErr := l.findOwnedContainer(ctx)
 	if observeErr != nil {
-		return fmt.Errorf("resolve hostile container before cleanup: %w", observeErr)
+		return fmt.Errorf("resolve owned hostile container before cleanup: %w", observeErr)
 	}
 	if observedID == "" {
 		l.containerID = ""
 		l.createTried = false
+		l.prepared = false
+		l.started = false
 		return nil
 	}
+	if l.containerID != l.config.ContainerName && containerIDPattern.MatchString(l.containerID) && !sameContainerID(l.containerID, observedID) {
+		return fmt.Errorf("%w: owned hostile container identity changed", ErrIsolation)
+	}
 	l.containerID = observedID
+	if err := l.verifyContainerOwner(ctx, observedID); err != nil {
+		return err
+	}
 	if !l.frozen {
 		if err := l.stopAndProve(ctx); err != nil {
 			return err
@@ -366,6 +379,8 @@ func (l *Launcher) createArguments() []string {
 	return []string{
 		"create",
 		"--name", l.config.ContainerName,
+		"--label", workspaceTokenLabel + "=" + hashText(l.config.WorkspaceToken),
+		"--label", runtimeRoleLabel + "=" + hostileFixtureRole,
 		"--pull", "never",
 		"--user", l.config.ContainerUser,
 		"--workdir", containerWorkspacePath,
@@ -405,8 +420,14 @@ func (l *Launcher) verifyContainer(ctx context.Context) error {
 	if err := json.Unmarshal(output, &inspected); err != nil {
 		return fmt.Errorf("%w: decode hostile container configuration: %w", ErrIsolation, err)
 	}
+	if err := verifyContainerOwner(inspected, l.containerID, l.config.ContainerName, l.config.WorkspaceToken, hostileFixtureRole); err != nil {
+		return fmt.Errorf("%w: hostile container ownership changed: %w", ErrIsolation, err)
+	}
 
 	host := inspected.HostConfig
+	if host.hasUnapprovedHostExtensions() {
+		return fmt.Errorf("%w: unexpected device, group, namespace, cgroup, or mount extension", ErrIsolation)
+	}
 	if inspected.Config.User != l.config.ContainerUser || inspected.Config.WorkingDir != containerWorkspacePath {
 		return fmt.Errorf("%w: hostile container user or working directory changed", ErrIsolation)
 	}
@@ -419,18 +440,17 @@ func (l *Launcher) verifyContainer(ctx context.Context) error {
 	if host.Privileged || !host.ReadonlyRootfs || host.NetworkMode != "none" || !privatePIDMode(host.PidMode) || host.IpcMode != "private" || host.CgroupnsMode != "private" {
 		return fmt.Errorf("%w: namespace or root-filesystem isolation changed", ErrIsolation)
 	}
-	if !containsFold(host.CapDrop, "ALL") ||
-		!hasNoNewPrivileges(host.SecurityOpt) ||
-		!containsExactFold(host.SecurityOpt, "seccomp=builtin") {
+	if !containsFold(host.CapDrop, "ALL") || len(host.CapAdd) != 0 ||
+		!safeSecurityOptions(host.SecurityOpt) {
 		return fmt.Errorf("%w: capability or privilege isolation changed", ErrIsolation)
 	}
 	if host.PidsLimit == nil || *host.PidsLimit != l.config.PIDLimit || host.Memory != l.config.MemoryBytes || host.MemorySwap != l.config.MemoryBytes || host.NanoCPUs != l.config.NanoCPUs {
 		return fmt.Errorf("%w: resource limits changed", ErrIsolation)
 	}
-	if host.Init == nil || !*host.Init || host.AutoRemove || host.ShmSize != 16<<20 || !safeTmpfs(host.Tmpfs["/tmp"]) || !hasNoFileLimit(host.Ulimits) {
+	if host.Init == nil || !*host.Init || host.AutoRemove || host.ShmSize != 16<<20 || len(host.Tmpfs) != 1 || !safeTmpfs(host.Tmpfs["/tmp"]) || !hasNoFileLimit(host.Ulimits) {
 		return fmt.Errorf("%w: init, temporary storage, or descriptor limits changed", ErrIsolation)
 	}
-	if host.RestartPolicy.Name != "no" || host.LogConfig.Type != "none" || len(host.Devices) != 0 || host.PublishAllPorts || len(host.PortBindings) != 0 {
+	if host.RestartPolicy.Name != "no" || host.LogConfig.Type != "none" || len(host.Devices) != 0 || len(host.DeviceRequests) != 0 || host.PublishAllPorts || len(host.PortBindings) != 0 {
 		return fmt.Errorf("%w: restart, logging, device, or port isolation changed", ErrIsolation)
 	}
 	if len(inspected.Mounts) != 1 {
@@ -504,15 +524,77 @@ func (l *Launcher) inspectState(ctx context.Context) (containerState, error) {
 }
 
 func (l *Launcher) removeCreated(ctx context.Context) error {
-	if l.containerID == "" {
+	if !l.createTried && l.containerID == "" {
 		return nil
 	}
-	_, err := l.run(ctx, "rm", "--force", l.containerID)
+	observedID, err := l.findOwnedContainer(ctx)
 	if err != nil {
+		return fmt.Errorf("resolve owned rejected hostile container: %w", err)
+	}
+	if observedID == "" {
+		l.containerID = ""
+		l.createTried = false
+		return nil
+	}
+	if l.containerID != l.config.ContainerName && containerIDPattern.MatchString(l.containerID) && !sameContainerID(l.containerID, observedID) {
+		return fmt.Errorf("%w: rejected hostile container identity changed", ErrIsolation)
+	}
+	l.containerID = observedID
+	if err := l.verifyContainerOwner(ctx, observedID); err != nil {
+		return err
+	}
+	if err := l.stopAndProve(ctx); err != nil {
+		return err
+	}
+	if _, err := l.run(ctx, "rm", "--force", l.containerID); err != nil {
 		return fmt.Errorf("remove rejected hostile container: %w", err)
 	}
 	l.containerID = ""
 	l.createTried = false
+	l.prepared = false
+	l.started = false
+	return nil
+}
+
+func (l *Launcher) findOwnedContainer(ctx context.Context) (string, error) {
+	output, err := l.run(ctx,
+		"ps", "--all", "--no-trunc",
+		"--filter", "label="+workspaceTokenLabel+"="+hashText(l.config.WorkspaceToken),
+		"--filter", "label="+runtimeRoleLabel+"="+hostileFixtureRole,
+		"--format", "{{.ID}}",
+	)
+	if err != nil {
+		return "", err
+	}
+	fields := strings.Fields(string(output))
+	if len(fields) > 1 || (len(fields) == 1 && !containerIDPattern.MatchString(fields[0])) {
+		return "", fmt.Errorf("%w: Docker returned an invalid owned-container inventory", ErrIsolation)
+	}
+	if len(fields) == 1 {
+		return fields[0], nil
+	}
+	foreign, err := l.findContainerByName(ctx)
+	if err != nil {
+		return "", err
+	}
+	if foreign != "" {
+		return "", fmt.Errorf("%w: hostile container name is occupied by an unowned container", ErrIsolation)
+	}
+	return "", nil
+}
+
+func (l *Launcher) verifyContainerOwner(ctx context.Context, id string) error {
+	output, err := l.run(ctx, "inspect", "--format", "{{json .}}", id)
+	if err != nil {
+		return fmt.Errorf("%w: inspect owned hostile container: %w", ErrIsolation, err)
+	}
+	var inspected containerInspect
+	if err := json.Unmarshal(output, &inspected); err != nil {
+		return fmt.Errorf("%w: decode owned hostile container: %w", ErrIsolation, err)
+	}
+	if err := verifyContainerOwner(inspected, id, l.config.ContainerName, l.config.WorkspaceToken, hostileFixtureRole); err != nil {
+		return fmt.Errorf("%w: refuse cleanup of a container without matching Mirage ownership: %w", ErrIsolation, err)
+	}
 	return nil
 }
 
@@ -528,47 +610,22 @@ type daemonInfo struct {
 }
 
 type containerInspect struct {
+	ID     string `json:"Id"`
+	Name   string `json:"Name"`
 	Config struct {
-		User        string   `json:"User"`
-		WorkingDir  string   `json:"WorkingDir"`
-		Image       string   `json:"Image"`
-		Entrypoint  []string `json:"Entrypoint"`
-		Cmd         []string `json:"Cmd"`
-		Env         []string `json:"Env"`
+		Labels      map[string]string `json:"Labels"`
+		User        string            `json:"User"`
+		WorkingDir  string            `json:"WorkingDir"`
+		Image       string            `json:"Image"`
+		Entrypoint  []string          `json:"Entrypoint"`
+		Cmd         []string          `json:"Cmd"`
+		Env         []string          `json:"Env"`
 		Healthcheck *struct {
 			Test []string `json:"Test"`
 		} `json:"Healthcheck"`
 	} `json:"Config"`
-	HostConfig struct {
-		ReadonlyRootfs  bool              `json:"ReadonlyRootfs"`
-		Privileged      bool              `json:"Privileged"`
-		NetworkMode     string            `json:"NetworkMode"`
-		PidMode         string            `json:"PidMode"`
-		IpcMode         string            `json:"IpcMode"`
-		CgroupnsMode    string            `json:"CgroupnsMode"`
-		CapDrop         []string          `json:"CapDrop"`
-		SecurityOpt     []string          `json:"SecurityOpt"`
-		PidsLimit       *int64            `json:"PidsLimit"`
-		Memory          int64             `json:"Memory"`
-		MemorySwap      int64             `json:"MemorySwap"`
-		NanoCPUs        int64             `json:"NanoCpus"`
-		AutoRemove      bool              `json:"AutoRemove"`
-		Init            *bool             `json:"Init"`
-		ShmSize         int64             `json:"ShmSize"`
-		Tmpfs           map[string]string `json:"Tmpfs"`
-		Ulimits         []dockerUlimit    `json:"Ulimits"`
-		PublishAllPorts bool              `json:"PublishAllPorts"`
-		PortBindings    map[string][]any  `json:"PortBindings"`
-		Devices         []json.RawMessage `json:"Devices"`
-		RestartPolicy   struct {
-			Name string `json:"Name"`
-		} `json:"RestartPolicy"`
-		LogConfig struct {
-			Type   string            `json:"Type"`
-			Config map[string]string `json:"Config"`
-		} `json:"LogConfig"`
-	} `json:"HostConfig"`
-	Mounts []struct {
+	HostConfig containerHostConfig `json:"HostConfig"`
+	Mounts     []struct {
 		Type        string `json:"Type"`
 		Name        string `json:"Name"`
 		Source      string `json:"Source"`
@@ -576,6 +633,94 @@ type containerInspect struct {
 		RW          bool   `json:"RW"`
 		Propagation string `json:"Propagation"`
 	} `json:"Mounts"`
+}
+
+// verifyContainerOwner binds teardown authority to the immutable workspace
+// token hash, an explicit runtime role, and the Docker container ID. A
+// fallback name is accepted only when Docker's inspect response names exactly
+// the expected container and carries both ownership labels.
+func verifyContainerOwner(inspected containerInspect, requestedID, expectedName, token, role string) error {
+	actualID := strings.ToLower(strings.TrimSpace(inspected.ID))
+	if !containerIDPattern.MatchString(actualID) {
+		return errors.New("Docker inspect did not return a canonical container ID")
+	}
+	if requestedID != expectedName && containerIDPattern.MatchString(requestedID) {
+		if !sameContainerID(actualID, requestedID) {
+			return errors.New("Docker inspect returned a different container ID")
+		}
+	} else if inspected.Name != "/"+expectedName {
+		return errors.New("Docker inspect returned a different container name")
+	}
+	if inspected.Config.Labels[workspaceTokenLabel] != hashText(token) || inspected.Config.Labels[runtimeRoleLabel] != role {
+		return errors.New("Docker container ownership labels do not match this run and role")
+	}
+	return nil
+}
+
+func sameContainerID(first, second string) bool {
+	first = strings.ToLower(strings.TrimSpace(first))
+	second = strings.ToLower(strings.TrimSpace(second))
+	return containerIDPattern.MatchString(first) && containerIDPattern.MatchString(second) &&
+		(strings.HasPrefix(first, second) || strings.HasPrefix(second, first))
+}
+
+type containerHostConfig struct {
+	Binds             []string          `json:"Binds"`
+	ContainerIDFile   string            `json:"ContainerIDFile"`
+	VolumesFrom       []string          `json:"VolumesFrom"`
+	ReadonlyRootfs    bool              `json:"ReadonlyRootfs"`
+	Privileged        bool              `json:"Privileged"`
+	NetworkMode       string            `json:"NetworkMode"`
+	PidMode           string            `json:"PidMode"`
+	IpcMode           string            `json:"IpcMode"`
+	CgroupnsMode      string            `json:"CgroupnsMode"`
+	UsernsMode        string            `json:"UsernsMode"`
+	UTSMode           string            `json:"UTSMode"`
+	Cgroup            string            `json:"Cgroup"`
+	CgroupParent      string            `json:"CgroupParent"`
+	CapAdd            []string          `json:"CapAdd"`
+	CapDrop           []string          `json:"CapDrop"`
+	GroupAdd          []string          `json:"GroupAdd"`
+	SecurityOpt       []string          `json:"SecurityOpt"`
+	Sysctls           map[string]string `json:"Sysctls"`
+	PidsLimit         *int64            `json:"PidsLimit"`
+	Memory            int64             `json:"Memory"`
+	MemorySwap        int64             `json:"MemorySwap"`
+	NanoCPUs          int64             `json:"NanoCpus"`
+	AutoRemove        bool              `json:"AutoRemove"`
+	Init              *bool             `json:"Init"`
+	ShmSize           int64             `json:"ShmSize"`
+	Tmpfs             map[string]string `json:"Tmpfs"`
+	Ulimits           []dockerUlimit    `json:"Ulimits"`
+	PublishAllPorts   bool              `json:"PublishAllPorts"`
+	PortBindings      map[string][]any  `json:"PortBindings"`
+	Devices           []json.RawMessage `json:"Devices"`
+	DeviceRequests    []json.RawMessage `json:"DeviceRequests"`
+	DeviceCgroupRules []string          `json:"DeviceCgroupRules"`
+	RestartPolicy     struct {
+		Name string `json:"Name"`
+	} `json:"RestartPolicy"`
+	LogConfig struct {
+		Type   string            `json:"Type"`
+		Config map[string]string `json:"Config"`
+	} `json:"LogConfig"`
+}
+
+// hasUnapprovedHostExtensions rejects HostConfig settings that are not part
+// of Mirage's launch contract. This includes settings that can grant device
+// or group access, share host namespaces/cgroups, add external resources, or
+// alter the cgroup hierarchy.
+func (host containerHostConfig) hasUnapprovedHostExtensions() bool {
+	return len(host.Binds) != 0 ||
+		host.ContainerIDFile != "" ||
+		len(host.VolumesFrom) != 0 ||
+		len(host.GroupAdd) != 0 ||
+		host.UsernsMode != "" ||
+		host.UTSMode != "" ||
+		host.Cgroup != "" ||
+		host.CgroupParent != "" ||
+		len(host.Sysctls) != 0 ||
+		len(host.DeviceCgroupRules) != 0
 }
 
 type dockerUlimit struct {
@@ -787,24 +932,61 @@ func containsSecurityOption(options []string, wanted string) bool {
 	return false
 }
 
-func safeTmpfs(options string) bool {
-	required := []string{"rw", "noexec", "nosuid", "nodev", "size=16777216", "mode=1777"}
-	parts := strings.Split(strings.ToLower(options), ",")
-	for _, wanted := range required {
-		if !containsFold(parts, wanted) {
+func safeSecurityOptions(options []string) bool {
+	if len(options) != 2 {
+		return false
+	}
+	hasNoNewPrivileges, hasSeccomp := false, false
+	for _, option := range options {
+		switch strings.ToLower(strings.TrimSpace(option)) {
+		case "no-new-privileges", "no-new-privileges=true", "no-new-privileges:true":
+			if hasNoNewPrivileges {
+				return false
+			}
+			hasNoNewPrivileges = true
+		case "seccomp=builtin":
+			if hasSeccomp {
+				return false
+			}
+			hasSeccomp = true
+		default:
 			return false
 		}
 	}
-	return true
+	return hasNoNewPrivileges && hasSeccomp
+}
+
+// exactOptionSet compares comma-separated Docker option values as a multiset.
+// It rejects extra permissions, conflicting duplicates, and repeated options.
+func exactOptionSet(actual string, expected []string) bool {
+	parts := strings.Split(strings.ToLower(actual), ",")
+	if strings.TrimSpace(actual) == "" || len(parts) != len(expected) {
+		return false
+	}
+	counts := make(map[string]int, len(expected))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return false
+		}
+		counts[part]++
+	}
+	for _, wanted := range expected {
+		key := strings.ToLower(strings.TrimSpace(wanted))
+		if counts[key] != 1 {
+			return false
+		}
+		delete(counts, key)
+	}
+	return len(counts) == 0
+}
+
+func safeTmpfs(options string) bool {
+	return exactOptionSet(options, []string{"rw", "noexec", "nosuid", "nodev", "size=16777216", "mode=1777"})
 }
 
 func hasNoFileLimit(limits []dockerUlimit) bool {
-	for _, limit := range limits {
-		if limit.Name == "nofile" && limit.Soft == 256 && limit.Hard == 256 {
-			return true
-		}
-	}
-	return false
+	return len(limits) == 1 && limits[0].Name == "nofile" && limits[0].Soft == 256 && limits[0].Hard == 256
 }
 
 func formatCPUs(nanoCPUs int64) string {

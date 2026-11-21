@@ -13,6 +13,7 @@ import (
 const maxActionLogBytes = 32 << 10
 
 var actionLogLine = regexp.MustCompile(`^qwen_agent step=([1-9][0-9]*) tool=(list_files|read_file|patch_file|finish) path=("(?:[^"\\]|\\.)*")$`)
+var rejectedActionLogLine = regexp.MustCompile(`^qwen_agent step=([1-9][0-9]*) action_rejected tool=(unknown|list_files|read_file|patch_file|finish) mode=(unknown|none|append|replace|batch|invalid) fields=(unavailable|[a-z_,]*) reason=(protocol_violation|policy_violation|limit_exceeded|unknown)(?: edits_count=(?:unavailable|[0-9]+))?$`)
 
 // CompletedAction is agent-level evidence emitted only after the constrained
 // driver successfully executes an action. It is not trusted final-state proof.
@@ -23,7 +24,9 @@ type CompletedAction struct {
 }
 
 // ParseCompletedActions accepts only the exact bounded diagnostic grammar
-// emitted by logAction. Natural-language model output cannot become evidence.
+// emitted by the constrained driver. Rejected model attempts are diagnostic
+// records, not completed actions, and therefore do not enter the receipt's
+// completed-action sequence.
 func ParseCompletedActions(encoded string) ([]CompletedAction, error) {
 	if len(encoded) == 0 || len(encoded) > maxActionLogBytes {
 		return nil, fmt.Errorf("%w: action log is empty or oversized", ErrProtocol)
@@ -31,15 +34,28 @@ func ParseCompletedActions(encoded string) ([]CompletedAction, error) {
 	scanner := bufio.NewScanner(io.LimitReader(bytes.NewBufferString(encoded), maxActionLogBytes+1))
 	scanner.Buffer(make([]byte, 1024), maxActionLogBytes)
 	var actions []CompletedAction
+	lastStep := 0
 	for scanner.Scan() {
-		match := actionLogLine.FindStringSubmatch(scanner.Text())
+		line := scanner.Text()
+		if rejected := rejectedActionLogLine.FindStringSubmatch(line); rejected != nil {
+			step, err := strconv.Atoi(rejected[1])
+			if err != nil || step <= lastStep {
+				return nil, fmt.Errorf("%w: rejected-action log sequence is invalid", ErrProtocol)
+			}
+			lastStep = step
+			continue
+		}
+
+		match := actionLogLine.FindStringSubmatch(line)
 		if match == nil {
 			return nil, fmt.Errorf("%w: action log contains an unknown line", ErrProtocol)
 		}
-		sequence, err := strconv.Atoi(match[1])
-		if err != nil || sequence != len(actions)+1 {
+		step, err := strconv.Atoi(match[1])
+		if err != nil || step <= lastStep {
 			return nil, fmt.Errorf("%w: action log sequence is invalid", ErrProtocol)
 		}
+		lastStep = step
+
 		name, err := strconv.Unquote(match[3])
 		if err != nil {
 			return nil, fmt.Errorf("%w: action log path is invalid", ErrProtocol)
@@ -49,7 +65,8 @@ func ParseCompletedActions(encoded string) ([]CompletedAction, error) {
 				return nil, fmt.Errorf("%w: action log path is outside driver policy", ErrProtocol)
 			}
 		}
-		actions = append(actions, CompletedAction{Sequence: sequence, Tool: match[2], Resource: name})
+		// Receipt sequence numbers count completed actions, not model attempts.
+		actions = append(actions, CompletedAction{Sequence: len(actions) + 1, Tool: match[2], Resource: name})
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("read action log: %w", err)

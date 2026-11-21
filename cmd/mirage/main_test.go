@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/MrGray17/Mirage/internal/buildinfo"
 	"github.com/MrGray17/Mirage/internal/cliapi"
@@ -30,8 +31,22 @@ func TestRunRequiresExplicitHostileFixtureCommand(t *testing.T) {
 func TestHelpAndVersionAreStableProductCommands(t *testing.T) {
 	for _, args := range [][]string{{"help"}, {"--help"}, {"-h"}} {
 		var stdout, stderr bytes.Buffer
-		if err := run(args, &stdout, &stderr); err != nil || !strings.Contains(stdout.String(), "Transactional security runtime") {
+		if err := run(args, &stdout, &stderr); err != nil ||
+			!strings.Contains(stdout.String(), "Transactional security runtime") ||
+			!strings.Contains(stdout.String(), "mirage edit [options] <file> <task>") {
 			t.Fatalf("args=%v output=%q error=%v", args, stdout.String(), err)
+		}
+		for _, expected := range []string{
+			"Get started (deterministic demo; no provider API key or GitHub write):",
+			"mirage setup",
+			"mirage doctor [--json]",
+			"mirage run --open",
+			"mirage receipt verify <receipt.json>",
+			"mirage observatory --out <report.html> <receipt.json>",
+		} {
+			if !strings.Contains(stdout.String(), expected) {
+				t.Errorf("args=%v help missing %q:\n%s", args, expected, stdout.String())
+			}
 		}
 	}
 	var stdout, stderr bytes.Buffer
@@ -44,6 +59,19 @@ func TestHelpAndVersionAreStableProductCommands(t *testing.T) {
 	}
 	if info.BridgeProtocol != buildinfo.BridgeProtocol || info.Platform == "" || info.Version == "" {
 		t.Fatalf("version = %#v", info)
+	}
+}
+
+func TestSetupHelpIsSideEffectFreeAndUsesStdout(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"setup", "--help"}, &stdout, &stderr); err != nil {
+		t.Fatalf("setup help error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Usage: mirage setup") || !strings.Contains(stdout.String(), "official runtime image") {
+		t.Fatalf("setup help = %q", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("setup help wrote stderr = %q", stderr.String())
 	}
 }
 
@@ -111,13 +139,39 @@ func TestEmitDemoResultCountsActualEvidence(t *testing.T) {
 			{Operation: "READ", Resource: "/workspace/.env", Disposition: "DENIED"},
 			{Operation: "WRITE", Resource: "/workspace/README.md", Disposition: "AUTHORIZED"},
 		},
-		Mutations: []demo.Mutation{{Operation: "MODIFY", Resource: "/workspace/README.md"}}, Verification: "PASSED", ReconciliationPlan: "sha256:plan", CommitPlan: "sha256:commit", CommittedResource: "/workspace/README.md", RealModeAfter: 0o640, ProcessTreeStopped: true, SecretPreserved: true, DisposableCleaned: true, SandboxArtifactsClean: true, RealWorkspace: "/real",
+		Mutations: []demo.Mutation{{Operation: "MODIFY", Resource: "/workspace/README.md"}}, Verification: "PASSED", ReconciliationPlan: "sha256:plan", CommitPlan: "sha256:commit", Committed: true, CommittedResource: "/workspace/README.md", RealModeAfter: 0o640, ProcessTreeStopped: true, SecretPreserved: true, DisposableCleaned: true, SandboxArtifactsClean: true, RealWorkspace: "/real",
 	}, "sha256:graph", "sha256:receipt", "/receipt.json", "/observatory.html")
 	got := output.String()
-	for _, expected := range []string{"Agent attempted 2 effects", "authorized 1", "denied 1", "committed 1", "process_tree_stopped=true", "effect_graph=sha256:graph", "receipt=sha256:receipt", "observatory=/observatory.html"} {
+	for _, expected := range []string{"Agent attempted 2 effects", "Legend: + authorized  x denied  ? unrecognized disposition", "authorized 1", "denied 1", "committed 1", "COMMITTED  plan=sha256:commit", "process_tree_stopped=true", "effect_graph=sha256:graph", "receipt=sha256:receipt", "observatory=/observatory.html"} {
 		if !strings.Contains(got, expected) {
 			t.Errorf("output missing %q:\n%s", expected, got)
 		}
+	}
+}
+
+func TestEmitDemoResultDoesNotConfuseObservedMutationsWithCommit(t *testing.T) {
+	var output bytes.Buffer
+	emitDemoResult(&output, demo.Result{
+		RunID: "demo-rejected", Task: "Reject an unrecognized effect",
+		Attempts:     []demo.Attempt{{Operation: "WRITE", Resource: "/workspace/README.md", Disposition: "UNKNOWN"}},
+		Mutations:    []demo.Mutation{{Operation: "MODIFY", Resource: "/workspace/README.md"}},
+		Verification: "REJECTED", RealWorkspace: "/real",
+	}, "sha256:graph", "sha256:receipt", "/receipt.json", "/observatory.html")
+
+	got := output.String()
+	for _, expected := range []string{
+		"Legend: + authorized  x denied  ? unrecognized disposition",
+		"? WRITE",
+		"1 trusted final-state mutation",
+		"Commit:\nNOT COMMITTED",
+		"Agent attempted 1 effect. MIRAGE authorized 0, denied 0, and committed 0.",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Errorf("output missing %q:\n%s", expected, got)
+		}
+	}
+	if strings.Contains(got, "committed 1") {
+		t.Fatalf("observed mutation was incorrectly reported as committed:\n%s", got)
 	}
 }
 
@@ -203,7 +257,7 @@ func TestRunAgentQwenEvidenceModeRequiresFixedCompatibilityBoundary(t *testing.T
 	image := "example.invalid/image@sha256:" + strings.Repeat("0", 64)
 	base := []string{"run", "agent", "--image", image, "--helper-image", image, "--allow", "/workspace/README.md", "--agent", "qwen"}
 	var stdout, stderr bytes.Buffer
-	args := append(append([]string(nil), base...), "--", "/usr/local/bin/mirage-qwen-agent", "task")
+	args := append(append([]string(nil), base...), "--", "/usr/local/bin/mirage-qwen-agent", "--target", "README.md", "task")
 	if err := run(args, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "trusted Ollama broker") {
 		t.Fatalf("missing Ollama boundary error=%v", err)
 	}
@@ -211,7 +265,7 @@ func TestRunAgentQwenEvidenceModeRequiresFixedCompatibilityBoundary(t *testing.T
 	if err := run(args, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "fixed driver command") {
 		t.Fatalf("alternate command error=%v", err)
 	}
-	args = append(append([]string(nil), base...), "--model-broker", "ollama", "--model", modelbroker.Qwen25Coder15B, "--publish-github", "--github-repo", "owner/repo", "--", "/usr/local/bin/mirage-qwen-agent", "task")
+	args = append(append([]string(nil), base...), "--model-broker", "ollama", "--model", modelbroker.Qwen25Coder15B, "--publish-github", "--github-repo", "owner/repo", "--", "/usr/local/bin/mirage-qwen-agent", "--target", "README.md", "task")
 	if err := run(args, &stdout, &stderr); err == nil || !strings.Contains(err.Error(), "does not authorize GitHub") {
 		t.Fatalf("publication widening error=%v", err)
 	}
@@ -338,4 +392,203 @@ func m42TemporaryDirectories(t *testing.T) map[string]struct{} {
 		result[match] = struct{}{}
 	}
 	return result
+}
+
+func TestQuickEditBuildsNarrowQwenInvocation(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.Mkdir(filepath.Join(workspace, "src"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "src", "main.go"), []byte("package main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	image := "ghcr.io/example/mirage-qwen@sha256:" + strings.Repeat("a", 64)
+	t.Setenv("MIRAGE_QWEN_IMAGE", image)
+	t.Setenv("MIRAGE_AGENT_IMAGE", "")
+	t.Setenv("MIRAGE_HELPER_IMAGE", "")
+
+	plan, err := parseQuickEditPlan([]string{
+		"--workspace", workspace, "--yes", "--timeout", "2m",
+		"src/main.go", "Add input validation",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.File != "src/main.go" || plan.Task != "Add input validation" || plan.Image != image ||
+		plan.Helper != defaultQwenHelperImage || plan.Timeout != 2*time.Minute || !plan.Yes {
+		t.Fatalf("quick edit plan = %#v", plan)
+	}
+	args := strings.Join(plan.agentArgs(), " ")
+	for _, expected := range []string{
+		"--agent qwen", "--model-broker ollama", "--model " + modelbroker.Qwen25Coder15B,
+		"--allow /workspace/src/main.go", image, defaultQwenHelperImage,
+		"/usr/local/bin/mirage-qwen-agent", "--target-exact src/main.go",
+		"Edit only src/main.go. Use one exact-replacement batch containing every requested replacement.",
+		"For each request to replace OLD with NEW, put OLD in from and NEW in to; never copy OLD into both fields.",
+		"Preserve every unrequested byte. User request: Add input validation",
+	} {
+		if !strings.Contains(args, expected) {
+			t.Errorf("agent invocation missing %q: %s", expected, args)
+		}
+	}
+	if strings.Contains(args, "--publish-github") || strings.Contains(args, "--agent generic") {
+		t.Fatalf("quick edit unexpectedly broadened authority: %s", args)
+	}
+}
+
+func TestQuickEditTaskSteersSmallModelAwayFromAccidentalAppend(t *testing.T) {
+	t.Parallel()
+	task := quickEditAgentTask("README.md", `Replace "Status: draft" with "Status: verified"`)
+	for _, expected := range []string{
+		"Edit only README.md.",
+		"Use one exact-replacement batch containing every requested replacement",
+		"put OLD in from and NEW in to",
+		"Preserve every unrequested byte",
+		`User request: Replace "Status: draft" with "Status: verified"`,
+	} {
+		if !strings.Contains(task, expected) {
+			t.Errorf("quick edit task missing %q: %s", expected, task)
+		}
+	}
+}
+
+func TestValidateQwenAgentCommandReturnsTaskRatherThanTargetFlag(t *testing.T) {
+	task := "Edit only README.md. User request: Add a verification section"
+	got, err := validateQwenAgentCommand([]string{
+		"/usr/local/bin/mirage-qwen-agent", "--target", "README.md", task,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != task {
+		t.Fatalf("Qwen evidence task = %q, want %q", got, task)
+	}
+	got, err = validateQwenAgentCommand([]string{
+		"/usr/local/bin/mirage-qwen-agent", "--target-exact", "README.md", task,
+	})
+	if err != nil || got != task {
+		t.Fatalf("exact-only Qwen command task = %q, error = %v", got, err)
+	}
+	if _, err := validateQwenAgentCommand([]string{
+		"/usr/local/bin/mirage-qwen-agent", "README.md", task,
+	}); err == nil {
+		t.Fatal("Qwen command without the explicit target flag was accepted")
+	}
+}
+
+func TestDigestPinnedImageReferenceValidation(t *testing.T) {
+	t.Parallel()
+	valid := []string{
+		"ghcr.io/mrgray17/mirage-qwen-agent@sha256:" + strings.Repeat("a", 64),
+		"busybox@sha256:" + strings.Repeat("0", 64),
+	}
+	for _, reference := range valid {
+		if !isDigestPinnedImageReference(reference) {
+			t.Errorf("valid digest-pinned image rejected: %q", reference)
+		}
+	}
+	invalid := []string{
+		"",
+		"ghcr.io/example/agent:latest",
+		"ghcr.io/example/agent@sha256:123",
+		"ghcr.io/example/agent@sha256:" + strings.Repeat("A", 64),
+		"GHCR.IO/example/agent@sha256:" + strings.Repeat("a", 64),
+		"ghcr.io/example/agent@sha256:" + strings.Repeat("a", 63) + "g",
+		"ghcr.io/example/agent @sha256:" + strings.Repeat("a", 64),
+	}
+	for _, reference := range invalid {
+		if isDigestPinnedImageReference(reference) {
+			t.Errorf("invalid digest-pinned image accepted: %q", reference)
+		}
+	}
+}
+
+func TestQuickEditRequiresDigestPinnedImage(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("hello\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MIRAGE_QWEN_IMAGE", "")
+	t.Setenv("MIRAGE_AGENT_IMAGE", "ghcr.io/example/generic-agent@sha256:"+strings.Repeat("a", 64))
+	_, err := parseQuickEditPlan([]string{"--workspace", workspace, "README.md", "Improve the introduction"})
+	if err == nil || !strings.Contains(err.Error(), "MIRAGE_QWEN_IMAGE") {
+		t.Fatalf("missing image error = %v", err)
+	}
+	t.Setenv("MIRAGE_QWEN_IMAGE", "ghcr.io/example/mirage-qwen:latest")
+	_, err = parseQuickEditPlan([]string{"--workspace", workspace, "README.md", "Improve the introduction"})
+	if err == nil || !strings.Contains(err.Error(), "immutable") {
+		t.Fatalf("mutable image error = %v", err)
+	}
+	t.Setenv("MIRAGE_QWEN_IMAGE", "ghcr.io/example/mirage-qwen@sha256:123")
+	_, err = parseQuickEditPlan([]string{"--workspace", workspace, "README.md", "Improve the introduction"})
+	if err == nil || !strings.Contains(err.Error(), "64 lowercase hexadecimal") {
+		t.Fatalf("short digest error = %v", err)
+	}
+	t.Setenv("MIRAGE_QWEN_IMAGE", "ghcr.io/example/mirage-qwen@sha256:"+strings.Repeat("a", 64))
+	t.Setenv("MIRAGE_HELPER_IMAGE", "busybox:latest")
+	_, err = parseQuickEditPlan([]string{"--workspace", workspace, "README.md", "Improve the introduction"})
+	if err == nil || !strings.Contains(err.Error(), "helper image") {
+		t.Fatalf("mutable helper error = %v", err)
+	}
+}
+
+func TestQuickEditRejectsTraversalAndSymlinkTargets(t *testing.T) {
+	workspace := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateQuickEditTarget(workspace, "../secret.txt"); err == nil {
+		t.Fatal("workspace traversal was accepted")
+	}
+	link := filepath.Join(workspace, "linked.txt")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+	if _, err := validateQuickEditTarget(workspace, "linked.txt"); err == nil || !strings.Contains(err.Error(), "symbolic links") {
+		t.Fatalf("symlink target error = %v", err)
+	}
+}
+
+func TestQuickEditRejectsProtectedTargetsBeforeConfirmation(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, ".env"), []byte("SECRET=value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	image := "ghcr.io/example/mirage-qwen@sha256:" + strings.Repeat("a", 64)
+	t.Setenv("MIRAGE_QWEN_IMAGE", image)
+	_, err := parseQuickEditPlan([]string{"--workspace", workspace, ".env", "print the configuration"})
+	if err == nil || !strings.Contains(err.Error(), "protected path") {
+		t.Fatalf("protected target error = %v, want protected-path rejection", err)
+	}
+}
+
+func TestQuickEditConfirmationDefaultsToNo(t *testing.T) {
+	var output bytes.Buffer
+	plan := quickEditPlan{Workspace: "/project", File: "README.md"}
+	confirmed, err := confirmQuickEdit(strings.NewReader("\n"), &output, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmed {
+		t.Fatal("empty confirmation should default to no")
+	}
+	if !strings.Contains(output.String(), "README.md") || !strings.Contains(output.String(), "Continue? [y/N]") {
+		t.Fatalf("confirmation prompt = %q", output.String())
+	}
+	confirmed, err = confirmQuickEdit(strings.NewReader("yes\n"), &output, plan)
+	if err != nil || !confirmed {
+		t.Fatalf("explicit yes confirmation = %t, error = %v", confirmed, err)
+	}
+}
+
+func TestQuickEditHelpIsAvailable(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"edit", "--help"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr.String(), "mirage edit [options] <file> <task>") ||
+		!strings.Contains(stderr.String(), "MIRAGE_QWEN_IMAGE") {
+		t.Fatalf("edit help = %q", stderr.String())
+	}
 }

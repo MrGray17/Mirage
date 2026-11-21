@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -36,6 +37,13 @@ func runEntrypoint(args []string, stdout, stderr io.Writer) error {
 	if isPublicRun(args) {
 		return runWindowsPublicDemo(config, args, stdout, stderr)
 	}
+	if len(args) > 0 && args[0] == "edit" {
+		backendArgs, err := prepareWindowsEditArguments(config, args[1:])
+		if err != nil {
+			return err
+		}
+		return invokeWSL(config, append([]string{"edit"}, backendArgs...), stdout, stderr)
+	}
 	return invokeWSL(config, args, stdout, stderr)
 }
 
@@ -46,6 +54,13 @@ func requiresLinuxBackend(args []string) bool {
 	switch args[0] {
 	case "run", "demo", "doctor", "setup":
 		return true
+	case "edit":
+		// Help is local and must remain available even before WSL is configured.
+		return len(args) < 2 || (args[1] != "--help" && args[1] != "-h")
+	case "verify":
+		return len(args) == 2 && strings.HasPrefix(args[1], "/")
+	case "receipt":
+		return len(args) == 3 && args[1] == "verify" && strings.HasPrefix(args[2], "/")
 	default:
 		return false
 	}
@@ -137,6 +152,117 @@ func validateBackendInfo(backend buildinfo.Info) error {
 		)
 	}
 	return nil
+}
+
+func prepareWindowsEditArguments(config wsl.Config, args []string) ([]string, error) {
+	workspaceSet, imageSet, helperSet, outputDirSet := false, false, false, false
+	rewritten := append([]string(nil), args...)
+	for index := 0; index < len(rewritten); index++ {
+		argument := rewritten[index]
+		if argument == "--" || !strings.HasPrefix(argument, "-") {
+			break
+		}
+		switch {
+		case argument == "--workspace":
+			if workspaceSet || index+1 >= len(rewritten) {
+				return nil, errors.New("--workspace must be supplied once with a path")
+			}
+			workspaceSet = true
+			translated, err := translateEditWorkspace(config, rewritten[index+1])
+			if err != nil {
+				return nil, err
+			}
+			rewritten[index+1] = translated
+			index++
+		case strings.HasPrefix(argument, "--workspace="):
+			if workspaceSet {
+				return nil, errors.New("--workspace must be supplied only once")
+			}
+			workspaceSet = true
+			translated, err := translateEditWorkspace(config, strings.TrimPrefix(argument, "--workspace="))
+			if err != nil {
+				return nil, err
+			}
+			rewritten[index] = "--workspace=" + translated
+		case argument == "--output-dir":
+			if outputDirSet || index+1 >= len(rewritten) {
+				return nil, errors.New("--output-dir must be supplied once with a path")
+			}
+			outputDirSet = true
+			translated, err := translateEditWorkspace(config, rewritten[index+1])
+			if err != nil {
+				return nil, err
+			}
+			rewritten[index+1] = translated
+			index++
+		case strings.HasPrefix(argument, "--output-dir="):
+			if outputDirSet {
+				return nil, errors.New("--output-dir must be supplied only once")
+			}
+			outputDirSet = true
+			translated, err := translateEditWorkspace(config, strings.TrimPrefix(argument, "--output-dir="))
+			if err != nil {
+				return nil, err
+			}
+			rewritten[index] = "--output-dir=" + translated
+		case argument == "--image" || strings.HasPrefix(argument, "--image="):
+			imageSet = true
+			if argument == "--image" && index+1 < len(rewritten) {
+				index++
+			}
+		case argument == "--helper-image" || strings.HasPrefix(argument, "--helper-image="):
+			helperSet = true
+			if argument == "--helper-image" && index+1 < len(rewritten) {
+				index++
+			}
+		case argument == "--timeout" || argument == "--format":
+			if index+1 < len(rewritten) {
+				index++
+			}
+		}
+	}
+
+	prefix := make([]string, 0, 6)
+	if !workspaceSet {
+		current, err := os.Getwd()
+		if err != nil {
+			return nil, fmt.Errorf("resolve current Windows directory: %w", err)
+		}
+		translated, err := translateWindowsBridgePath(config, "-u", current)
+		if err != nil {
+			return nil, err
+		}
+		prefix = append(prefix, "--workspace", translated)
+	}
+	if !imageSet {
+		image := strings.TrimSpace(os.Getenv("MIRAGE_QWEN_IMAGE"))
+		if image != "" {
+			prefix = append(prefix, "--image", image)
+		}
+	}
+	if !helperSet {
+		helper := strings.TrimSpace(os.Getenv("MIRAGE_HELPER_IMAGE"))
+		if helper != "" {
+			prefix = append(prefix, "--helper-image", helper)
+		}
+	}
+	return append(prefix, rewritten...), nil
+}
+
+func translateEditWorkspace(config wsl.Config, value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", errors.New("--workspace path must not be empty")
+	}
+	// An absolute POSIX path is already expressed in the WSL filesystem.
+	if strings.HasPrefix(value, "/") && filepath.VolumeName(value) == "" {
+		return path.Clean(value), nil
+	}
+	absolute, err := filepath.Abs(value)
+	if err != nil {
+		return "", fmt.Errorf("resolve Windows workspace path: %w", err)
+	}
+	return translateWindowsBridgePath(config, "-u", absolute)
 }
 
 func runWindowsPublicDemo(config wsl.Config, args []string, stdout, stderr io.Writer) error {

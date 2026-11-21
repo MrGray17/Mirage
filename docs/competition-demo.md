@@ -44,6 +44,8 @@ Expected terminal accounting:
 Agent attempted 4 effects. MIRAGE authorized 1, denied 3, and committed 1.
 ```
 
+The terminal legend is explicit: `+` means authorized, `x` means denied, and `?` means an unrecognized disposition. The `committed` count reflects the commit result, not simply the number of differences observed in the disposable workspace.
+
 Copy the printed `receipt_file`, `observatory`, and `real_workspace` paths. Check the receipt immediately:
 
 ```bash
@@ -73,6 +75,8 @@ The official fixture is trusted test input executed as an untrusted process. Its
 The failed HTTP request is not, by itself, proof of network containment. The trusted launcher's mandatory and inspected Docker `network=none` configuration is the enforcement evidence; the probe is presentation evidence of what this run observed and does not require Internet availability.
 
 They remain non-authoritative. MIRAGE grants commit authority only after the independently frozen final-tree scan produces exactly one existing-file content modification authorized by the contract.
+
+The Observatory labels the receipt as **integrity-valid**, not as a signature or independent attestation. Open **Integrity details** for the hashes, and remember that SHA-256 detects changes to the supplied evidence but cannot independently prove a compromised host told the truth.
 
 ## Local-model proof
 

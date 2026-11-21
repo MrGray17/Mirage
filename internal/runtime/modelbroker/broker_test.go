@@ -183,6 +183,95 @@ func TestBrokerForwardsOnlyBoundedAuthorizedResponsesRequests(t *testing.T) {
 	}
 }
 
+func TestBrokerCloseCanBeRetriedAfterGracefulShutdownTimeout(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		close(entered)
+		<-release
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"id":"close-retry"}`))
+	}))
+	defer upstream.Close()
+
+	broker, err := newResponses(Config{
+		APIKey: "host-only-secret", Model: "gpt-test", RunID: "close-retry",
+		TempRoot: shortTempRoot(t), MaxRequests: 1,
+	}, "test-responses", upstream.Client(), upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := broker.Start(); err != nil {
+		t.Fatal(err)
+	}
+	directory := broker.Directory()
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := broker.Close(ctx); err != nil {
+			t.Errorf("final broker cleanup: %v", err)
+		}
+	}()
+
+	requestDone := make(chan error, 1)
+	go func() {
+		response, requestErr := unixHTTPClient(filepath.Join(directory, SocketName)).Post(
+			"http://mirage/v1/responses",
+			"application/json",
+			strings.NewReader(`{"model":"gpt-test","input":"exercise close retry"}`),
+		)
+		if requestErr == nil {
+			_, requestErr = io.Copy(io.Discard, response.Body)
+			requestErr = errors.Join(requestErr, response.Body.Close())
+		}
+		requestDone <- requestErr
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("upstream request did not become active")
+	}
+
+	firstContext, cancelFirst := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	firstErr := broker.Close(firstContext)
+	cancelFirst()
+	if !errors.Is(firstErr, ErrCleanup) {
+		t.Fatalf("first close error = %v, want retryable ErrCleanup", firstErr)
+	}
+	if _, err := os.Stat(directory); err != nil {
+		t.Fatalf("broker directory was removed before active request drained: %v", err)
+	}
+
+	close(release)
+	select {
+	case err := <-requestDone:
+		if err != nil {
+			t.Fatalf("complete in-flight broker request: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("in-flight broker request did not finish")
+	}
+
+	secondContext, cancelSecond := context.WithTimeout(context.Background(), 5*time.Second)
+	secondErr := broker.Close(secondContext)
+	cancelSecond()
+	if secondErr != nil {
+		t.Fatalf("retry close: %v", secondErr)
+	}
+	if _, err := os.Lstat(directory); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("broker directory survived successful retry: %v", err)
+	}
+	if err := broker.Close(context.Background()); err != nil {
+		t.Fatalf("idempotent close after success: %v", err)
+	}
+}
+
 func TestBrokerRejectsPathAndModelWithoutUpstreamCall(t *testing.T) {
 	var upstreamCalls atomic.Int32
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { upstreamCalls.Add(1) }))

@@ -23,15 +23,28 @@ func printHelp(writer io.Writer) {
 	fmt.Fprintln(writer, `MIRAGE
 Transactional security runtime for AI agents
 
+Get started (deterministic demo; no provider API key or GitHub write):
+  mirage setup
+  mirage doctor
+  mirage run --open
+
+Edit one existing file with local Qwen:
+  mirage edit [options] <file> <task>
+  Set MIRAGE_QWEN_IMAGE to a digest-pinned image before the first edit.
+
 Usage:
   mirage run [malicious|benign] [--open] [--json]
-  mirage doctor
+  mirage edit [options] <file> <task>
   mirage setup
+  mirage doctor [--json]
   mirage verify <receipt.json>
-  mirage version
+  mirage receipt verify <receipt.json>
+  mirage observatory --out <report.html> <receipt.json>
+  mirage version [--json]
 
-Run the verified security demo:
-  mirage run --open
+After a run:
+  mirage verify <receipt_file>
+  Open the printed Observatory path to inspect verified evidence.
 
 Advanced compatibility commands:
   mirage demo malicious|benign [options]
@@ -121,11 +134,14 @@ func runDoctor(args []string, stdout, stderr io.Writer) error {
 
 func runSetup(args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("setup", flag.ContinueOnError)
-	flags.SetOutput(stderr)
+	flags.SetOutput(io.Discard)
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
+			fmt.Fprintln(stdout, "Usage: mirage setup")
+			fmt.Fprintln(stdout, "\nVerifies the official runtime image and prepares the local evidence directory.")
 			return nil
 		}
+		fmt.Fprintln(stderr, err)
 		return err
 	}
 	if flags.NArg() != 0 {

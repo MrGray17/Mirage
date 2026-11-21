@@ -1,14 +1,17 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -32,9 +35,10 @@ import (
 )
 
 const (
-	defaultRunDuration  = 8 * time.Second
-	operationTimeout    = 30 * time.Second
-	brokerPreflightExit = 78
+	defaultRunDuration     = 8 * time.Second
+	operationTimeout       = 30 * time.Second
+	brokerPreflightExit    = 78
+	defaultQwenHelperImage = "busybox@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0"
 )
 
 func main() {
@@ -50,6 +54,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return nil
 	}
 	switch args[0] {
+	case "edit":
+		return runQuickEdit(args[1:], stdout, stderr)
 	case "run":
 		if len(args) == 1 || strings.HasPrefix(args[1], "-") {
 			return runPublicDemo(demo.ScenarioMalicious, args[1:], stdout, stderr)
@@ -96,7 +102,242 @@ func run(args []string, stdout, stderr io.Writer) error {
 }
 
 func usageError() error {
-	return errors.New("usage: mirage run [malicious|benign] [options]; try 'mirage help'")
+	return errors.New("usage: mirage edit <file> <task> | mirage run [malicious|benign] [options]; try 'mirage help'")
+}
+
+func printQuickEditHelp(writer io.Writer) {
+	fmt.Fprintln(writer, "Quick local edit:")
+	fmt.Fprintln(writer, "  mirage edit [options] <file> <task>")
+	fmt.Fprintln(writer, "  MIRAGE_QWEN_IMAGE=<registry/image@sha256:digest> configures the Qwen agent image.")
+	fmt.Fprintln(writer, "  The target must be one existing regular file inside --workspace.")
+	fmt.Fprintln(writer, "  Options: --workspace, --image, --helper-image, --timeout, --format, --output-dir, --open, --yes")
+}
+
+type quickEditPlan struct {
+	Workspace string
+	File      string
+	Task      string
+	Image     string
+	Helper    string
+	Timeout   time.Duration
+	Format    string
+	OutputDir string
+	Open      bool
+	Yes       bool
+}
+
+func isDigestPinnedImageReference(reference string) bool {
+	if reference == "" || reference != strings.TrimSpace(reference) {
+		return false
+	}
+	const marker = "@sha256:"
+	index := strings.LastIndex(reference, marker)
+	if index <= 0 || index+len(marker)+64 != len(reference) {
+		return false
+	}
+	name := reference[:index]
+	if name != strings.ToLower(name) || strings.ContainsAny(name, "@ \t\r\n") || strings.HasSuffix(name, "/") {
+		return false
+	}
+	for _, character := range reference[index+len(marker):] {
+		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+func parseQuickEditPlan(args []string) (quickEditPlan, error) {
+	flags := flag.NewFlagSet("edit", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	workspaceRoot := flags.String("workspace", ".", "project directory; defaults to the current directory")
+	imageDefault := strings.TrimSpace(os.Getenv("MIRAGE_QWEN_IMAGE"))
+	image := flags.String("image", imageDefault, "digest-pinned Qwen agent image (or set MIRAGE_QWEN_IMAGE)")
+	helperDefault := strings.TrimSpace(os.Getenv("MIRAGE_HELPER_IMAGE"))
+	if helperDefault == "" {
+		helperDefault = defaultQwenHelperImage
+	}
+	helper := flags.String("helper-image", helperDefault, "digest-pinned helper image")
+	timeout := flags.Duration("timeout", 10*time.Minute, "maximum agent execution time")
+	format := flags.String("format", "text", "summary format: text or json")
+	outputDir := flags.String("output-dir", "", "directory for this run's evidence")
+	open := flags.Bool("open", false, "open the verified Observatory after the run")
+	yes := flags.Bool("yes", false, "skip the interactive confirmation prompt")
+	if err := flags.Parse(args); err != nil {
+		return quickEditPlan{}, err
+	}
+	positionals := flags.Args()
+	if len(positionals) < 2 {
+		return quickEditPlan{}, errors.New("usage: mirage edit [options] <file> <task>; the file must be inside the selected workspace")
+	}
+	if strings.TrimSpace(*image) == "" {
+		return quickEditPlan{}, errors.New("Qwen image is not configured; pass --image <registry/image@sha256:digest> or set MIRAGE_QWEN_IMAGE once")
+	}
+	if !isDigestPinnedImageReference(*image) {
+		return quickEditPlan{}, errors.New("Qwen image must use an immutable name@sha256: reference with 64 lowercase hexadecimal characters")
+	}
+	if !isDigestPinnedImageReference(*helper) {
+		return quickEditPlan{}, errors.New("helper image must use an immutable name@sha256: reference with 64 lowercase hexadecimal characters")
+	}
+	if *timeout < time.Second || *timeout > 30*time.Minute {
+		return quickEditPlan{}, errors.New("--timeout must be between 1s and 30m")
+	}
+	if *format != "text" && *format != "json" {
+		return quickEditPlan{}, errors.New("--format must be text or json")
+	}
+	if strings.TrimSpace(*outputDir) != "" && strings.TrimSpace(*outputDir) == strings.TrimSpace(*workspaceRoot) {
+		return quickEditPlan{}, errors.New("--output-dir must be separate from the project workspace")
+	}
+	file, err := validateQuickEditTarget(*workspaceRoot, positionals[0])
+	if err != nil {
+		return quickEditPlan{}, err
+	}
+	if err := qwenagent.ValidateTargetPath(file); err != nil {
+		return quickEditPlan{}, fmt.Errorf("target file is not supported for Qwen editing: %w", err)
+	}
+	task := strings.TrimSpace(strings.Join(positionals[1:], " "))
+	if task == "" {
+		return quickEditPlan{}, errors.New("edit task must not be empty")
+	}
+	if len(task) > 16<<10 {
+		return quickEditPlan{}, errors.New("edit task exceeds the 16 KiB limit")
+	}
+	workspaceAbs, err := filepath.Abs(*workspaceRoot)
+	if err != nil {
+		return quickEditPlan{}, fmt.Errorf("resolve project workspace: %w", err)
+	}
+	workspaceReal, err := filepath.EvalSymlinks(workspaceAbs)
+	if err != nil {
+		return quickEditPlan{}, fmt.Errorf("resolve project workspace: %w", err)
+	}
+	return quickEditPlan{
+		Workspace: workspaceReal, File: file, Task: task, Image: strings.TrimSpace(*image),
+		Helper: strings.TrimSpace(*helper), Timeout: *timeout, Format: *format,
+		OutputDir: strings.TrimSpace(*outputDir), Open: *open, Yes: *yes,
+	}, nil
+}
+
+func validateQuickEditTarget(workspaceRoot, file string) (string, error) {
+	if file == "" || strings.ContainsAny(file, "\x00\r\n") {
+		return "", errors.New("target file path is empty or contains control characters")
+	}
+	file = strings.ReplaceAll(file, "\\", "/")
+	if path.IsAbs(file) || strings.Contains(file, ":") {
+		return "", errors.New("target file must be a relative path inside the project workspace")
+	}
+	for _, component := range strings.Split(file, "/") {
+		if component == ".." {
+			return "", errors.New("target file path cannot traverse outside the project workspace")
+		}
+	}
+	clean := path.Clean(file)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || !fs.ValidPath(clean) {
+		return "", errors.New("target file must be a valid relative path inside the project workspace")
+	}
+	rootAbs, err := filepath.Abs(workspaceRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve project workspace: %w", err)
+	}
+	root, err := filepath.EvalSymlinks(rootAbs)
+	if err != nil {
+		return "", fmt.Errorf("resolve project workspace: %w", err)
+	}
+	rootInfo, err := os.Stat(root)
+	if err != nil || !rootInfo.IsDir() {
+		return "", errors.Join(errors.New("project workspace must be an existing directory"), err)
+	}
+	current := root
+	components := strings.Split(clean, "/")
+	for index, component := range components {
+		current = filepath.Join(current, component)
+		info, statErr := os.Lstat(current)
+		if statErr != nil {
+			return "", fmt.Errorf("target file %q is unavailable inside the project workspace: %w", clean, statErr)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", errors.New("target file path cannot contain symbolic links")
+		}
+		if index == len(components)-1 {
+			if !info.Mode().IsRegular() {
+				return "", errors.New("target must be an existing regular file")
+			}
+		} else if !info.IsDir() {
+			return "", errors.New("target path contains a non-directory component")
+		}
+	}
+	return clean, nil
+}
+
+func (plan quickEditPlan) agentArgs() []string {
+	args := []string{
+		"--agent", "qwen",
+		"--model-broker", "ollama",
+		"--model", modelbroker.Qwen25Coder15B,
+		"--workspace", plan.Workspace,
+		"--allow", "/workspace/" + plan.File,
+		"--image", plan.Image,
+		"--helper-image", plan.Helper,
+		"--timeout", plan.Timeout.String(),
+		"--format", plan.Format,
+	}
+	if plan.OutputDir != "" {
+		args = append(args, "--output-dir", plan.OutputDir)
+	}
+	if plan.Open {
+		args = append(args, "--open")
+	}
+	task := quickEditAgentTask(plan.File, plan.Task)
+	return append(args, "--", "/usr/local/bin/mirage-qwen-agent", "--target-exact", plan.File, task)
+}
+
+func quickEditAgentTask(file, request string) string {
+	return fmt.Sprintf(
+		"Edit only %s. Use one exact-replacement batch containing every requested replacement. "+
+			"For each request to replace OLD with NEW, put OLD in from and NEW in to; never copy OLD into both fields. "+
+			"Preserve every unrequested byte. User request: %s",
+		file, request,
+	)
+}
+
+func runQuickEdit(args []string, stdout, stderr io.Writer) error {
+	plan, err := parseQuickEditPlan(args)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			printQuickEditHelp(stderr)
+			return nil
+		}
+		return err
+	}
+	if !plan.Yes {
+		confirmed, err := confirmQuickEdit(os.Stdin, stderr, plan)
+		if err != nil {
+			return err
+		}
+		if !confirmed {
+			fmt.Fprintln(stderr, "Cancelled. The project workspace was not changed.")
+			return nil
+		}
+	}
+	return runAgent(plan.agentArgs(), stdout, stderr)
+}
+
+func confirmQuickEdit(reader io.Reader, writer io.Writer, plan quickEditPlan) (bool, error) {
+	fmt.Fprintf(writer,
+		"MIRAGE will give local Qwen permission to propose changes to exactly one existing file.\n"+
+			"  Workspace: %s\n  File:      %s\n  Model:     %s (local Ollama)\n  Network:   disabled inside the agent sandbox\n"+
+			"Continue? [y/N] ",
+		plan.Workspace, plan.File, modelbroker.Qwen25Coder15B,
+	)
+	answer, readErr := bufio.NewReader(reader).ReadString('\n')
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return false, fmt.Errorf("read confirmation: %w", readErr)
+	}
+	switch strings.ToLower(strings.TrimSpace(answer)) {
+	case "y", "yes":
+		return true, nil
+	default:
+		return false, nil
+	}
 }
 
 func runDemo(scenario string, args []string, stdout, stderr io.Writer) error {
@@ -293,25 +534,43 @@ func emitDemoResult(writer io.Writer, result demo.Result, graphHash, receiptHash
 	fmt.Fprintf(writer, "Task:\n%s\n\n", result.Task)
 	fmt.Fprintf(writer, "Sandbox:\nREADY  uid=%s  network=%s  quota=%d bytes\n\n", result.SandboxUID, result.SandboxNetwork, result.WorkspaceQuotaBytes)
 	fmt.Fprintln(writer, "Agent Effects:")
+	fmt.Fprintln(writer, "Legend: + authorized  x denied  ? unrecognized disposition")
 	authorized, denied := 0, 0
 	for _, attempt := range result.Attempts {
-		marker := "+"
-		if attempt.Disposition == "DENIED" {
+		marker := "?"
+		switch attempt.Disposition {
+		case "DENIED":
 			marker = "x"
 			denied++
-		} else if attempt.Disposition == "AUTHORIZED" {
+		case "AUTHORIZED":
+			marker = "+"
 			authorized++
 		}
 		fmt.Fprintf(writer, "%s %-6s %-31s %s\n", marker, attempt.Operation, attempt.Resource, attempt.Disposition)
 	}
-	fmt.Fprintf(writer, "\nObserved:\n%d trusted final-state mutation\n\n", len(result.Mutations))
+	mutationWord := "mutations"
+	if len(result.Mutations) == 1 {
+		mutationWord = "mutation"
+	}
+	fmt.Fprintf(writer, "\nObserved:\n%d trusted final-state %s\n\n", len(result.Mutations), mutationWord)
 	fmt.Fprintf(writer, "Verification:\n%s  plan=%s\n\n", result.Verification, result.ReconciliationPlan)
-	fmt.Fprintf(writer, "Commit:\n%s  resource=%s  mode=%04o\n\n", result.CommitPlan, result.CommittedResource, result.RealModeAfter)
+	committed := 0
+	if result.Committed {
+		committed = len(result.Mutations)
+		fmt.Fprintf(writer, "Commit:\nCOMMITTED  plan=%s  resource=%s  mode=%04o\n\n", result.CommitPlan, result.CommittedResource, result.RealModeAfter)
+	} else {
+		fmt.Fprintln(writer, "Commit:\nNOT COMMITTED")
+		fmt.Fprintln(writer)
+	}
 	fmt.Fprintf(writer, "Evidence:\nprocess_tree_stopped=%t  secret_preserved=%t  cleanup_complete=%t\n", result.ProcessTreeStopped, result.SecretPreserved, result.DisposableCleaned && result.SandboxArtifactsClean)
 	fmt.Fprintf(writer, "effect_graph=%s\nreceipt=%s\nreceipt_file=%s\n", graphHash, receiptHash, receiptPath)
 	fmt.Fprintf(writer, "observatory=%s\n", observatoryPath)
 	fmt.Fprintf(writer, "real_workspace=%s\n\n", result.RealWorkspace)
-	fmt.Fprintf(writer, "RESULT:\nAgent attempted %d effects. MIRAGE authorized %d, denied %d, and committed %d.\n", len(result.Attempts), authorized, denied, len(result.Mutations))
+	effectWord := "effects"
+	if len(result.Attempts) == 1 {
+		effectWord = "effect"
+	}
+	fmt.Fprintf(writer, "RESULT:\nAgent attempted %d %s. MIRAGE authorized %d, denied %d, and committed %d.\n", len(result.Attempts), effectWord, authorized, denied, committed)
 }
 
 func buildDemoEvidence(result demo.Result) (*effectgraph.Graph, *receipt.Receipt, error) {
@@ -594,6 +853,20 @@ func runHostileFixture(args []string, stdout, stderr io.Writer) error {
 	return nil
 }
 
+func validateQwenAgentCommand(command []string) (string, error) {
+	if len(command) != 4 || command[0] != "/usr/local/bin/mirage-qwen-agent" ||
+		(command[1] != "--target" && command[1] != "--target-exact") || strings.TrimSpace(command[2]) == "" ||
+		command[2] == "." || command[2] != path.Clean(command[2]) ||
+		!fs.ValidPath(command[2]) || strings.Contains(command[2], "\\") ||
+		strings.TrimSpace(command[3]) == "" {
+		return "", errors.New("--agent qwen requires the fixed driver command, one relative --target path, and one non-empty task argument")
+	}
+	if err := qwenagent.ValidateTargetPath(command[2]); err != nil {
+		return "", fmt.Errorf("--agent qwen target is not allowed: %w", err)
+	}
+	return command[3], nil
+}
+
 func runAgent(args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("run agent", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -617,8 +890,11 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	command := flags.Args()
-	if *agentImage == "" || *helperImage == "" {
-		return errors.New("--image and --helper-image are required and must be digest-pinned")
+	if !isDigestPinnedImageReference(*agentImage) {
+		return errors.New("--image is required and must use name@sha256: followed by 64 lowercase hexadecimal characters")
+	}
+	if !isDigestPinnedImageReference(*helperImage) {
+		return errors.New("--helper-image is required and must use name@sha256: followed by 64 lowercase hexadecimal characters")
 	}
 	if strings.TrimSpace(*allowedResource) == "" {
 		return errors.New("--allow is required and must identify exactly one existing /workspace file")
@@ -653,12 +929,15 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 	if *brokerKind == "ollama" && *agentMode != "qwen" {
 		return errors.New("--model-broker ollama is reserved for the constrained --agent qwen workflow")
 	}
+	qwenTask := ""
 	if *agentMode == "qwen" {
 		if *brokerKind != "ollama" || strings.TrimSpace(*model) != modelbroker.Qwen25Coder15B {
 			return fmt.Errorf("--agent qwen requires the trusted Ollama broker and exact model %s", modelbroker.Qwen25Coder15B)
 		}
-		if len(command) != 2 || command[0] != "/usr/local/bin/mirage-qwen-agent" || strings.TrimSpace(command[1]) == "" {
-			return errors.New("--agent qwen requires the fixed driver command and exactly one non-empty task argument")
+		var commandErr error
+		qwenTask, commandErr = validateQwenAgentCommand(command)
+		if commandErr != nil {
+			return commandErr
 		}
 		if *publishGitHub {
 			return errors.New("--agent qwen evidence mode does not authorize GitHub publication")
@@ -907,7 +1186,7 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 		}
 		if *agentMode == "qwen" {
 			summary, evidenceErr := persistQwenProductEvidence(qwenProductSpec{
-				RunID: runID, Task: command[1], ContractHash: contract.Hash(), ManifestHash: manifest.Identity(),
+				RunID: runID, Task: qwenTask, ContractHash: contract.Hash(), ManifestHash: manifest.Identity(),
 				StartedAt: issuedAt, CompletedAt: time.Now().UTC(), AgentImage: *agentImage, SandboxIdentity: launcher.Identity(),
 				Actions: qwenActions, Plan: plan, Decision: decision, RealWorkspace: disposable.RealWorkspace(), CleanupComplete: true,
 				ProcessTreeStopped: true, Reality: "M4_VISIBLE_BASELINE_UNCHANGED",
@@ -977,7 +1256,7 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 				return err
 			}
 			summary, err := persistQwenProductEvidence(qwenProductSpec{
-				RunID: runID, Task: command[1], ContractHash: contract.Hash(), ManifestHash: manifest.Identity(),
+				RunID: runID, Task: qwenTask, ContractHash: contract.Hash(), ManifestHash: manifest.Identity(),
 				StartedAt: issuedAt, CompletedAt: time.Now().UTC(), AgentImage: *agentImage, SandboxIdentity: launcher.Identity(),
 				Actions: qwenActions, Plan: plan, Decision: decision, Committed: true, CommitPlan: commitPlan.Hash(),
 				RealWorkspace: disposable.RealWorkspace(), CleanupComplete: true,

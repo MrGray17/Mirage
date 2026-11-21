@@ -220,6 +220,8 @@ func TestPrepareCreatesAndRevalidatesLockedDownContainer(t *testing.T) {
 		{"--security-opt", "no-new-privileges=true"},
 		{"--security-opt", "seccomp=builtin"},
 		{"--no-healthcheck"},
+		{"--label", workspaceTokenLabel + "=" + hashText(config.WorkspaceToken)},
+		{"--label", runtimeRoleLabel + "=" + hostileFixtureRole},
 		{"--pids-limit", "64"},
 		{"--memory", "268435456"},
 		{"--memory-swap", "268435456"},
@@ -257,7 +259,10 @@ func TestPrepareRemovesContainerWhenEffectiveIsolationDiffers(t *testing.T) {
 		{output: nil},
 		{output: []byte("0123456789ab\n")},
 		{output: mustJSON(t, inspect)},
-		{output: []byte("0123456789ab\n")},
+		{output: []byte("0123456789ab\n")}, // run/role inventory
+		{output: mustJSON(t, inspect)},     // ownership inspection
+		{output: mustJSON(t, containerState{Status: "created", PID: 0})},
+		{output: nil}, // remove
 	}}
 	launcher, err := newWithRunner(config, runner)
 	if err != nil {
@@ -269,6 +274,144 @@ func TestPrepareRemovesContainerWhenEffectiveIsolationDiffers(t *testing.T) {
 	last := runner.calls[len(runner.calls)-1]
 	if !containsSequence(last, []string{"rm", "--force", "0123456789ab"}) {
 		t.Fatalf("cleanup call = %v", last)
+	}
+}
+
+func TestPrepareRejectsCapabilityDeviceAndConflictingOptionExtensions(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*containerInspect)
+	}{
+		{name: "added capability", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.CapAdd = []string{"NET_ADMIN"}
+		}},
+		{name: "device request", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.DeviceRequests = []json.RawMessage{json.RawMessage(`{"Driver":"nvidia","Count":-1}`)}
+		}},
+		{name: "conflicting no-new-privileges", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.SecurityOpt = []string{"no-new-privileges=true", "no-new-privileges=false", "seccomp=builtin"}
+		}},
+		{name: "conflicting seccomp", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.SecurityOpt = []string{"no-new-privileges=true", "seccomp=builtin", "seccomp=unconfined"}
+		}},
+		{name: "extra tmpfs permission", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Tmpfs["/tmp"] += ",exec"
+		}},
+		{name: "additional tmpfs mount", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Tmpfs["/run"] = "rw,nosuid,nodev,size=1048576,mode=1777"
+		}},
+		{name: "additional ulimit", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Ulimits = append(inspect.HostConfig.Ulimits, dockerUlimit{Name: "core", Soft: 0, Hard: 0})
+		}},
+		{name: "conflicting tmpfs mode", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Tmpfs["/tmp"] += ",mode=0777"
+		}},
+		{name: "device cgroup rule", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.DeviceCgroupRules = []string{"c *:* rwm"}
+		}},
+		{name: "supplementary group", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.GroupAdd = []string{"0"}
+		}},
+		{name: "host user namespace", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.UsernsMode = "host"
+		}},
+		{name: "host UTS namespace", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.UTSMode = "host"
+		}},
+		{name: "namespace sysctl", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Sysctls = map[string]string{"net.ipv4.ip_forward": "1"}
+		}},
+		{name: "shared cgroup", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Cgroup = "container:0123456789ab"
+		}},
+		{name: "custom cgroup parent", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.CgroupParent = "mirage.slice"
+		}},
+		{name: "inherited volume", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.VolumesFrom = []string{"host-secrets:ro"}
+		}},
+		{name: "legacy bind", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Binds = []string{"/etc:/host-etc:ro"}
+		}},
+		{name: "container ID file", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.ContainerIDFile = "/tmp/mirage-container-id"
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := dockerTestConfig(t)
+			inspect := secureContainerInspect(t, config)
+			test.mutate(&inspect)
+			runner := securePrepareRunner(t, config)
+			runner.responses[len(runner.responses)-1].output = mustJSON(t, inspect)
+			runner.responses = append(runner.responses,
+				fakeResponse{output: []byte("0123456789ab\n")}, // run/role inventory
+				fakeResponse{output: mustJSON(t, inspect)},     // ownership inspection
+				fakeResponse{output: mustJSON(t, containerState{Status: "created", PID: 0})},
+				fakeResponse{output: nil}, // remove
+			)
+			launcher, err := newWithRunner(config, runner)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := launcher.Prepare(context.Background()); !errors.Is(err, ErrIsolation) {
+				t.Fatalf("prepare error = %v, want ErrIsolation", err)
+			}
+			if len(runner.responses) != 0 {
+				t.Fatalf("rejected container cleanup left %d fake responses unconsumed", len(runner.responses))
+			}
+			if len(runner.calls) < 4 {
+				t.Fatalf("rejected container cleanup issued only %d commands: %v", len(runner.calls), runner.calls)
+			}
+			cleanup := runner.calls[len(runner.calls)-4:]
+			if !containsSequence(cleanup[0], []string{
+				"ps", "--all", "--no-trunc",
+				"--filter", "label=" + workspaceTokenLabel + "=" + hashText(config.WorkspaceToken),
+				"--filter", "label=" + runtimeRoleLabel + "=" + hostileFixtureRole,
+				"--format", "{{.ID}}",
+			}) ||
+				!containsSequence(cleanup[1], []string{"inspect", "--format", "{{json .}}", "0123456789ab"}) ||
+				!containsSequence(cleanup[2], []string{"inspect", "--format", "{{json .State}}", "0123456789ab"}) ||
+				!containsSequence(cleanup[3], []string{"rm", "--force", "0123456789ab"}) {
+				t.Fatalf("rejected container cleanup sequence = %v", cleanup)
+			}
+		})
+	}
+}
+
+func TestSafeTmpfsRejectsExtrasAndDuplicateOptions(t *testing.T) {
+	valid := "rw,noexec,nosuid,nodev,size=16777216,mode=1777"
+	if !safeTmpfs(valid) {
+		t.Fatal("canonical tmpfs options were rejected")
+	}
+	for _, invalid := range []string{
+		valid + ",exec",
+		valid + ",rw",
+		valid + ",mode=0777",
+		"rw,nosuid,nodev,size=16777216,mode=1777",
+		"",
+	} {
+		if safeTmpfs(invalid) {
+			t.Errorf("unsafe tmpfs options accepted: %q", invalid)
+		}
+	}
+}
+
+func TestSafeSecurityOptionsRequireExactlyOneEnabledPolicyPair(t *testing.T) {
+	if !safeSecurityOptions([]string{"no-new-privileges=true", "seccomp=builtin"}) ||
+		!safeSecurityOptions([]string{"no-new-privileges", "seccomp=builtin"}) {
+		t.Fatal("valid security option pair was rejected")
+	}
+	for _, invalid := range [][]string{
+		{"no-new-privileges=true", "no-new-privileges=false", "seccomp=builtin"},
+		{"no-new-privileges=true", "seccomp=builtin", "seccomp=unconfined"},
+		{"no-new-privileges=false", "seccomp=builtin"},
+		{"no-new-privileges=true", "seccomp=unconfined"},
+		{"no-new-privileges=true", "seccomp=builtin", "unexpected=option"},
+	} {
+		if safeSecurityOptions(invalid) {
+			t.Errorf("unsafe security options accepted: %#v", invalid)
+		}
 	}
 }
 
@@ -285,6 +428,9 @@ func TestPrepareRejectsSharedPIDNamespace(t *testing.T) {
 		{output: []byte("0123456789ab\n")},
 		{output: mustJSON(t, inspect)},
 		{output: []byte("0123456789ab\n")},
+		{output: mustJSON(t, secureContainerInspect(t, config))},
+		{output: mustJSON(t, containerState{Status: "created", PID: 0})},
+		{output: nil},
 	}}
 	launcher, err := newWithRunner(config, runner)
 	if err != nil {
@@ -308,6 +454,9 @@ func TestPrepareRejectsUnconfinedEffectiveSeccomp(t *testing.T) {
 		{output: []byte("0123456789ab\n")},
 		{output: mustJSON(t, inspect)},
 		{output: []byte("0123456789ab\n")},
+		{output: mustJSON(t, secureContainerInspect(t, config))},
+		{output: mustJSON(t, containerState{Status: "created", PID: 0})},
+		{output: nil},
 	}}
 	launcher, err := newWithRunner(config, runner)
 	if err != nil {
@@ -337,6 +486,9 @@ func TestPrepareRejectsDisabledEffectiveNoNewPrivileges(t *testing.T) {
 				{output: []byte("0123456789ab\n")},
 				{output: mustJSON(t, inspect)},
 				{output: []byte("0123456789ab\n")},
+				{output: mustJSON(t, secureContainerInspect(t, config))},
+				{output: mustJSON(t, containerState{Status: "created", PID: 0})},
+				{output: nil},
 			}}
 			launcher, err := newWithRunner(config, runner)
 			if err != nil {
@@ -387,6 +539,9 @@ func TestPrepareRejectsEnabledImageHealthcheck(t *testing.T) {
 		{output: []byte("0123456789ab\n")},
 		{output: mustJSON(t, inspect)},
 		{output: []byte("0123456789ab\n")},
+		{output: mustJSON(t, secureContainerInspect(t, config))},
+		{output: mustJSON(t, containerState{Status: "created", PID: 0})},
+		{output: nil},
 	}}
 	launcher, err := newWithRunner(config, runner)
 	if err != nil {
@@ -394,6 +549,34 @@ func TestPrepareRejectsEnabledImageHealthcheck(t *testing.T) {
 	}
 	if err := launcher.Prepare(context.Background()); !errors.Is(err, ErrIsolation) {
 		t.Fatalf("prepare error = %v", err)
+	}
+}
+
+func TestDestroyDoesNotRemoveSameNameContainerOwnedByAnotherRun(t *testing.T) {
+	config := dockerTestConfig(t)
+	runner := &fakeRunner{responses: []fakeResponse{
+		{output: nil},                      // no container has this run's ownership labels
+		{output: []byte("0123456789ab\n")}, // reserved name belongs to another run
+	}}
+	launcher, err := newWithRunner(config, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launcher.createTried = true
+	launcher.containerID = "0123456789ab"
+	if err := launcher.Destroy(context.Background()); !errors.Is(err, ErrIsolation) {
+		t.Fatalf("foreign name collision error = %v, want ErrIsolation", err)
+	}
+	if launcher.containerID == "" || !launcher.createTried {
+		t.Fatalf("cleanup forgot unresolved ownership conflict: id=%q createTried=%t", launcher.containerID, launcher.createTried)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("foreign container received destructive commands: %v", runner.calls)
+	}
+	if !containsSequence(runner.calls[0], []string{"--filter", "label=" + workspaceTokenLabel + "=" + hashText(config.WorkspaceToken)}) ||
+		!containsSequence(runner.calls[0], []string{"--filter", "label=" + runtimeRoleLabel + "=" + hostileFixtureRole}) ||
+		!containsSequence(runner.calls[1], []string{"--filter", "name=^/" + config.ContainerName + "$"}) {
+		t.Fatalf("cleanup did not distinguish ownership from name collision: %v", runner.calls)
 	}
 }
 
@@ -406,10 +589,11 @@ func TestUncertainCreateRemainsDiscoverableForCleanup(t *testing.T) {
 		{output: []byte(`"sha256:image"`)},
 		{output: nil},
 		{err: errors.New("client response lost")},
-		{output: []byte("0123456789ab\n")},
-		{output: []byte("0123456789ab\n")},
+		{output: []byte("0123456789ab\n")},                       // uncertain create name lookup
+		{output: []byte("0123456789ab\n")},                       // run/role inventory
+		{output: mustJSON(t, secureContainerInspect(t, config))}, // owner inspection
 		{output: mustJSON(t, containerState{Status: "created", PID: 0})},
-		{output: []byte("0123456789ab\n")},
+		{output: nil}, // remove
 	}}
 	launcher, err := newWithRunner(config, runner)
 	if err != nil {
@@ -437,8 +621,9 @@ func TestFreezeRequiresDockerStopProof(t *testing.T) {
 		fakeResponse{output: []byte("0123456789ab\n")},
 		fakeResponse{output: []byte("137\n")},
 		fakeResponse{output: mustJSON(t, containerState{Status: "exited", PID: 0})},
-		fakeResponse{output: []byte("0123456789ab\n")},
-		fakeResponse{output: []byte("0123456789ab\n")},
+		fakeResponse{output: []byte("0123456789ab\n")},                       // run/role inventory
+		fakeResponse{output: mustJSON(t, secureContainerInspect(t, config))}, // owner inspection
+		fakeResponse{output: nil},                                            // remove
 	)
 	launcher, err := newWithRunner(config, runner)
 	if err != nil {
@@ -456,7 +641,7 @@ func TestFreezeRequiresDockerStopProof(t *testing.T) {
 	if err := launcher.Destroy(context.Background()); err != nil {
 		t.Fatalf("destroy: %v", err)
 	}
-	if got := runner.calls[len(runner.calls)-3]; !containsSequence(got, []string{"inspect", "--format", "{{json .State}}", "0123456789ab"}) {
+	if got := runner.calls[len(runner.calls)-4]; !containsSequence(got, []string{"inspect", "--format", "{{json .State}}", "0123456789ab"}) {
 		t.Fatalf("stop proof call = %v", got)
 	}
 }
@@ -551,6 +736,12 @@ func secureContainerInspect(t *testing.T, config Config) containerInspect {
 	}
 	pids := normalized.PIDLimit
 	var inspected containerInspect
+	inspected.ID = "0123456789ab"
+	inspected.Name = "/" + normalized.ContainerName
+	inspected.Config.Labels = map[string]string{
+		workspaceTokenLabel: hashText(normalized.WorkspaceToken),
+		runtimeRoleLabel:    hostileFixtureRole,
+	}
 	inspected.Config.User = normalized.ContainerUser
 	inspected.Config.WorkingDir = containerWorkspacePath
 	inspected.Config.Image = normalized.Image

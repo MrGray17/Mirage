@@ -61,6 +61,7 @@ type Config struct {
 }
 
 type Broker struct {
+	lifecycleMu          sync.Mutex
 	mu                   sync.Mutex
 	config               Config
 	identity             string
@@ -223,6 +224,8 @@ func (b *Broker) Diagnostics() DiagnosticSnapshot {
 }
 
 func (b *Broker) Start() error {
+	b.lifecycleMu.Lock()
+	defer b.lifecycleMu.Unlock()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.started || b.closed || b.listener != nil || b.directory != "" {
@@ -270,41 +273,48 @@ func (b *Broker) Start() error {
 	return nil
 }
 
+// Close releases the broker's listener and protected socket directory.
+//
+// A failed graceful shutdown or filesystem cleanup is retryable. The broker
+// is marked closed only after every owned resource has been removed, so a
+// later call with a fresh context can finish cleanup after in-flight requests
+// have drained.
 func (b *Broker) Close(ctx context.Context) error {
+	b.lifecycleMu.Lock()
+	defer b.lifecycleMu.Unlock()
+
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
 		return nil
 	}
-	b.closed = true
 	server := b.server
 	listener := b.listener
 	directory := b.directory
 	b.mu.Unlock()
 
-	var result error
 	if server != nil {
 		if err := server.Shutdown(ctx); err != nil {
-			result = errors.Join(result, fmt.Errorf("%w: stop HTTP server: %v", ErrCleanup, err))
+			return fmt.Errorf("%w: stop HTTP server: %w", ErrCleanup, err)
 		}
 	} else if listener != nil {
 		if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-			result = errors.Join(result, fmt.Errorf("%w: close listener: %v", ErrCleanup, err))
+			return fmt.Errorf("%w: close listener: %w", ErrCleanup, err)
 		}
 	}
 	if directory != "" {
 		if err := removeDirectory(directory); err != nil {
-			result = errors.Join(result, fmt.Errorf("%w: %v", ErrCleanup, err))
+			return fmt.Errorf("%w: remove broker directory: %w", ErrCleanup, err)
 		}
 	}
-	if result == nil {
-		b.mu.Lock()
-		b.listener = nil
-		b.server = nil
-		b.directory = ""
-		b.mu.Unlock()
-	}
-	return result
+
+	b.mu.Lock()
+	b.listener = nil
+	b.server = nil
+	b.directory = ""
+	b.closed = true
+	b.mu.Unlock()
+	return nil
 }
 
 func (b *Broker) handle(writer http.ResponseWriter, request *http.Request) {

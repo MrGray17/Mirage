@@ -5,24 +5,55 @@ MIRAGE includes a deliberately narrow local-model agent for validating
 does not change filesystem authorization or commit semantics.
 
 The agent image contains one static binary in a scratch filesystem. It has no
-shell, package manager, Git client, network client, or subprocess tool. The
-only model actions are a bounded sequence:
+shell, package manager, Git client, network client, or subprocess tool. The model actions are a bounded sequence. The trusted host passes one
+relative `--target` path to the Qwen driver. The model can list and read only
+that configured target; the schema does not offer any other workspace path:
 
 ```text
-list_files
-→ read_file (one rooted regular file)
-→ patch_file (append to that same rooted file)
+list_files (configured target only)
+→ read_file (the exact target)
+→ patch_file (append, exact search/replace, or bounded edit batch)
 → finish
 ```
 
-Qwen chooses the file and appended text. The driver applies those choices only
-inside `/workspace`. Go's rooted filesystem API rejects absolute paths,
-traversal, and symlink escapes. `.env` and `.git` are unavailable through the
+Qwen proposes the edit, but it does not choose which file to inspect. The
+driver applies the proposed change only to the preselected target inside
+`/workspace`. Every `patch_file` action declares an explicit `mode`:
+`append`, `replace`, or `batch`. Those modes have disjoint argument shapes,
+and the driver rejects a mode/field mismatch. An action may append, perform one
+exact replacement, or apply up to 16 exact replacements to that same file.
+Each replacement requires a non-empty literal search string that matches
+exactly once in the current UTF-8 content. Missing, duplicate, overlapping, non-UTF-8, and no-op
+replacements fail closed; search is not a regular expression. Batch edits run
+in order in memory and are written only after every edit succeeds and each
+intermediate result remains within the existing write bound. A batch that
+returns the file to its original contents is rejected. If a proposed action
+fails local protocol validation, it is not executed; the model receives bounded
+validation feedback and may try a corrected action within the existing step
+limit. Three semantically identical rejected model actions stop the run early;
+valid JSON actions are compared canonically so key order and whitespace do not
+evade the cutoff. The last validation reason is included in the diagnostic.
+This recovery never bypasses validation and does not retry
+filesystem execution failures. This all-or-nothing guarantee applies to
+validation and size failures; it does not make the underlying filesystem write
+crash-atomic.
+Append remains available for end-of-file insertions. Go's rooted filesystem operations reject absolute paths, traversal, and
+symlink components, including links that resolve elsewhere inside the workspace. `.env` and `.git` are unavailable through the
 driver, file and transcript sizes are bounded, and malformed or repeated
 actions fail closed.
 
-This sequence is intentionally not a general coding environment. It is the
-smallest reproducible agent loop needed to demonstrate a real local model edit.
+This sequence is intentionally not a general coding environment. It is a
+bounded local coding loop: Qwen can append or make up to 16 exact, unique
+replacements in one previously read existing file. Creating files, editing
+multiple files, shell access, and arbitrary tool use remain outside this v1
+integration's scope.
+
+The fixed CLI limits are 16 model steps, 256 KiB per target-file read, 256 KiB
+for the resulting write, 256 KiB per model response, and 512 KiB for the
+action/history transcript. A batch is limited to 16 replacement operations.
+The trusted host also applies its separate full-project snapshot and
+reconciliation budgets; the one-file tool boundary does not replace that
+whole-workspace integrity check.
 MIRAGE's trusted frozen-tree scan, canonical diff, contract verifier, freshness
 checks, and real commit engine remain the only authority over reality.
 
@@ -53,7 +84,71 @@ pulled from a registry. Mirage requires a repository-qualified immutable
 accepted. Keep the registry reference private or public according to your
 needs, and ensure the rootless Docker user can pull it.
 
-## Run
+## One-command local acceptance
+
+From a clean Linux or WSL2 checkout, run:
+
+```bash
+./scripts/test-qwen-local.sh
+```
+
+The script uses the `rootless` Docker context and Buildx builder by default.
+It automatically uses `~/.docker-wsl` when that directory exists and no
+`DOCKER_CONFIG` is set. Override the context, builder, or registry repository
+with `MIRAGE_DOCKER_CONTEXT`, `MIRAGE_DOCKER_BUILDER`, or
+`MIRAGE_QWEN_REPO`. It expects an existing GHCR login with package write
+permission; it never prompts for or stores a token.
+
+The acceptance script checks the exact local Ollama model, builds and pushes a
+commit-specific image without provenance attestations, pulls it back by its
+immutable digest, and exercises the **easy CLI** on a disposable workspace.
+It then runs a deliberate unauthorized-edit scenario, checks that both trusted
+files remain byte-for-byte unchanged, and verifies the committed and rejected
+receipts independently. Workspaces, summaries, logs, receipts, and Observatory
+files are preserved under temporary directories in your home so failures can
+be diagnosed rather than erased.
+
+A successful run prints the image digest and the one-time environment
+configuration for Bash and PowerShell. The script tests the Linux/WSL backend;
+the final Windows release gate must still install the matching native
+frontend/backend pair and repeat the short `mirage edit` workflow from
+PowerShell.
+
+## Easy CLI
+
+For normal use, MIRAGE exposes the constrained Qwen workflow as one short
+command:
+
+```bash
+export MIRAGE_QWEN_IMAGE="ghcr.io/mrgray17/mirage-qwen-agent@sha256:00351657c03b8cf19302b36ea554420418751cfcfe0f4aad1077085231a3faf6"
+mirage edit README.md "Add a concise verification section"
+```
+
+The command defaults to the current project directory, the pinned BusyBox
+helper image, the local `qwen2.5-coder:1.5b` model, and the trusted Ollama
+broker. It prints the project, target file, model, and sandbox network posture,
+then asks for confirmation. Pass `--yes` to skip the prompt intentionally.
+Useful options include `--workspace`, `--image`, `--helper-image`,
+`--timeout`, `--format json`, `--output-dir`, and `--open`.
+
+The first positional argument is the one existing regular file the contract
+authorizes; the remaining arguments form the task. Paths must be relative to
+the workspace, and symbolic links or paths escaping the workspace are refused.
+A quick edit exposes one bounded batch of exact replacements to the local
+model; append and the more flexible action schema remain available only
+through the advanced command.
+A single run still cannot create files or edit multiple files. The Qwen agent's
+batch mode means multiple exact replacements **within that one file**, not a
+multi-file transaction.
+
+Set `MIRAGE_QWEN_IMAGE` once in the trusted shell environment, or pass
+`--image` per invocation. The value must be an immutable
+`registry/name@sha256:digest` reference. On Windows PowerShell, set the
+environment variable in the Windows user environment; the native frontend
+passes the image reference explicitly to WSL and translates the current Windows
+directory to its WSL path. No provider credential is forwarded.
+
+## Advanced Run
 
 Ollama must already be serving the exact installed model on its standard local
 endpoint. MIRAGE does not pull models. On native Linux, the trusted broker uses
@@ -71,7 +166,7 @@ mirage run agent \
   --allow /workspace/README.md \
   --model-broker ollama \
   --model qwen2.5-coder:1.5b \
-  -- /usr/local/bin/mirage-qwen-agent \
+  -- /usr/local/bin/mirage-qwen-agent --target README.md \
   "Append one short verification line to README.md."
 ```
 
@@ -137,7 +232,7 @@ all other arguments identical to the command above, changing only:
 --workspace /trusted/rejected-workspace \
 --allow /workspace/protected.txt \
 --output-dir /trusted/evidence-rejected \
--- /usr/local/bin/mirage-qwen-agent \
+-- /usr/local/bin/mirage-qwen-agent --target README.md \
 "Append one short verification line to README.md."
 ```
 

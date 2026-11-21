@@ -13,6 +13,241 @@ import (
 	"github.com/MrGray17/Mirage/internal/runtime/diagnostics"
 )
 
+func TestVerifyContainerOwnerTreatsHexOnlyNameAsName(t *testing.T) {
+	const name = "0123456789abcdef"
+	inspected := containerInspect{}
+	inspected.ID = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	inspected.Name = "/" + name
+	inspected.Config.Labels = map[string]string{
+		workspaceTokenLabel: hashText("workspace-token"),
+		runtimeRoleLabel:    codingAgentRole,
+	}
+	if err := verifyContainerOwner(inspected, name, name, "workspace-token", codingAgentRole); err != nil {
+		t.Fatalf("hex-only Docker name was treated as a container ID: %v", err)
+	}
+}
+
+func TestSameOptionSetRejectsDuplicatesAndConflicts(t *testing.T) {
+	if !sameOptionSet("size=67108864,mode=0777,nosuid,nodev", "size=67108864,mode=0777,nosuid,nodev") {
+		t.Fatal("identical volume options were rejected")
+	}
+	for _, actual := range []string{
+		"size=67108864,mode=0777,nosuid,nodev,nosuid",
+		"size=67108864,mode=0777,nosuid,nodev,exec",
+		"size=67108864,mode=0777,suid,nodev",
+	} {
+		if sameOptionSet(actual, "size=67108864,mode=0777,nosuid,nodev") {
+			t.Errorf("non-exact quota-volume options accepted: %q", actual)
+		}
+	}
+}
+
+func TestVerifyAgentContainerRejectsCapabilityAndDeviceExtensions(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*containerInspect)
+	}{
+		{name: "added capability", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.CapAdd = []string{"SYS_ADMIN"}
+		}},
+		{name: "device request", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.DeviceRequests = []json.RawMessage{json.RawMessage(`{"Driver":"nvidia","Count":-1}`)}
+		}},
+		{name: "conflicting security options", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.SecurityOpt = []string{"no-new-privileges=true", "no-new-privileges=false", "seccomp=builtin"}
+		}},
+		{name: "tmpfs execution permission", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Tmpfs["/tmp"] += ",exec"
+		}},
+		{name: "additional tmpfs mount", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Tmpfs["/run"] = "rw,nosuid,nodev,size=1048576,mode=1777"
+		}},
+		{name: "additional ulimit", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Ulimits = append(inspect.HostConfig.Ulimits, dockerUlimit{Name: "core", Soft: 0, Hard: 0})
+		}},
+		{name: "device cgroup rule", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.DeviceCgroupRules = []string{"c *:* rwm"}
+		}},
+		{name: "supplementary group", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.GroupAdd = []string{"0"}
+		}},
+		{name: "host user namespace", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.UsernsMode = "host"
+		}},
+		{name: "host UTS namespace", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.UTSMode = "host"
+		}},
+		{name: "namespace sysctl", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Sysctls = map[string]string{"net.ipv4.ip_forward": "1"}
+		}},
+		{name: "shared cgroup", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Cgroup = "container:0123456789ab"
+		}},
+		{name: "custom cgroup parent", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.CgroupParent = "mirage.slice"
+		}},
+		{name: "inherited volume", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.VolumesFrom = []string{"host-secrets:ro"}
+		}},
+		{name: "legacy bind", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Binds = []string{"/etc:/host-etc:ro"}
+		}},
+		{name: "container ID file", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.ContainerIDFile = "/tmp/mirage-container-id"
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			launcher, err := NewAgent(agentTestConfig(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			inspect := secureAgentInspect(t, launcher)
+			test.mutate(&inspect)
+			launcher.runner = &fakeRunner{responses: []fakeResponse{{output: mustJSON(t, inspect)}}}
+			launcher.containerID = "0123456789ab"
+			if err := launcher.verifyAgentContainer(context.Background()); !errors.Is(err, ErrIsolation) {
+				t.Fatalf("verifyAgentContainer error = %v, want ErrIsolation", err)
+			}
+		})
+	}
+}
+
+func TestVerifySeedContainerRejectsCapabilityAndDeviceExtensions(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*containerInspect)
+	}{
+		{name: "added capability", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.CapAdd = []string{"SYS_ADMIN"}
+		}},
+		{name: "device request", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.DeviceRequests = []json.RawMessage{json.RawMessage(`{"Driver":"nvidia","Count":-1}`)}
+		}},
+		{name: "extra tmpfs permission", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Tmpfs = map[string]string{"/tmp": "rw,noexec,nosuid,nodev,size=1048576,mode=1777,exec"}
+		}},
+		{name: "additional tmpfs mount", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Tmpfs["/run"] = "rw,nosuid,nodev,size=1048576,mode=1777"
+		}},
+		{name: "additional ulimit", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Ulimits = append(inspect.HostConfig.Ulimits, dockerUlimit{Name: "core", Soft: 0, Hard: 0})
+		}},
+		{name: "device cgroup rule", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.DeviceCgroupRules = []string{"c *:* rwm"}
+		}},
+		{name: "supplementary group", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.GroupAdd = []string{"0"}
+		}},
+		{name: "host user namespace", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.UsernsMode = "host"
+		}},
+		{name: "host UTS namespace", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.UTSMode = "host"
+		}},
+		{name: "namespace sysctl", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Sysctls = map[string]string{"net.ipv4.ip_forward": "1"}
+		}},
+		{name: "shared cgroup", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Cgroup = "container:0123456789ab"
+		}},
+		{name: "custom cgroup parent", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.CgroupParent = "mirage.slice"
+		}},
+		{name: "inherited volume", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.VolumesFrom = []string{"host-secrets:ro"}
+		}},
+		{name: "legacy bind", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.Binds = []string{"/etc:/host-etc:ro"}
+		}},
+		{name: "container ID file", mutate: func(inspect *containerInspect) {
+			inspect.HostConfig.ContainerIDFile = "/tmp/mirage-container-id"
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			launcher, err := NewAgent(agentTestConfig(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var inspect containerInspect
+			inspect.ID = "0123456789ab"
+			inspect.Name = "/" + launcher.seedName
+			inspect.Config.Labels = map[string]string{
+				workspaceTokenLabel: hashText(launcher.config.WorkspaceToken),
+				runtimeRoleLabel:    quotaKeeperRole,
+			}
+			inspect.Config.User = "0:0"
+			inspect.Config.WorkingDir = containerWorkspacePath
+			inspect.Config.Image = launcher.config.HelperImage
+			inspect.Config.Entrypoint = []string{"/bin/sh"}
+			inspect.Config.Cmd = []string{"-c", "exec sleep " + seedSleepSeconds}
+			inspect.Config.Healthcheck = &struct {
+				Test []string `json:"Test"`
+			}{Test: []string{"NONE"}}
+			inspect.HostConfig.ReadonlyRootfs = true
+			inspect.HostConfig.NetworkMode = "none"
+			inspect.HostConfig.IpcMode = "private"
+			inspect.HostConfig.CgroupnsMode = "private"
+			inspect.HostConfig.CapDrop = []string{"ALL"}
+			inspect.HostConfig.SecurityOpt = []string{"no-new-privileges=true", "seccomp=builtin"}
+			inspect.HostConfig.PidsLimit = int64Pointer(8)
+			inspect.HostConfig.Memory = 32 << 20
+			inspect.HostConfig.MemorySwap = 32 << 20
+			inspect.HostConfig.NanoCPUs = 250_000_000
+			enabled := true
+			inspect.HostConfig.Init = &enabled
+			inspect.HostConfig.ShmSize = 4 << 20
+			inspect.HostConfig.Tmpfs = map[string]string{"/tmp": "rw,noexec,nosuid,nodev,size=1048576,mode=1777"}
+			inspect.HostConfig.Ulimits = []dockerUlimit{{Name: "nofile", Soft: 64, Hard: 64}}
+			inspect.HostConfig.RestartPolicy.Name = "no"
+			inspect.HostConfig.LogConfig.Type = "none"
+			inspect.Mounts = append(inspect.Mounts, struct {
+				Type        string `json:"Type"`
+				Name        string `json:"Name"`
+				Source      string `json:"Source"`
+				Destination string `json:"Destination"`
+				RW          bool   `json:"RW"`
+				Propagation string `json:"Propagation"`
+			}{Type: "volume", Name: launcher.volumeName, Destination: containerWorkspacePath, RW: true})
+			test.mutate(&inspect)
+			launcher.runner = &fakeRunner{responses: []fakeResponse{{output: mustJSON(t, inspect)}}}
+			launcher.seedID = "0123456789ab"
+			if err := launcher.verifySeedContainer(context.Background()); !errors.Is(err, ErrIsolation) {
+				t.Fatalf("verifySeedContainer error = %v, want ErrIsolation", err)
+			}
+		})
+	}
+}
+
+func TestAgentDestroyDoesNotRemoveSameNameContainerOwnedByAnotherRun(t *testing.T) {
+	launcher, err := NewAgent(agentTestConfig(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{responses: []fakeResponse{
+		{output: nil},                      // no agent container has this run's labels
+		{output: []byte("0123456789ab\n")}, // same agent name belongs to another run
+	}}
+	launcher.runner = runner
+	launcher.containerCreateTried = true
+	launcher.containerID = "0123456789ab"
+	if err := launcher.Destroy(context.Background()); !errors.Is(err, ErrIsolation) {
+		t.Fatalf("foreign name collision error = %v, want ErrIsolation", err)
+	}
+	if launcher.containerID == "" || !launcher.containerCreateTried {
+		t.Fatalf("cleanup forgot unresolved ownership conflict: agent=%q tried=%t", launcher.containerID, launcher.containerCreateTried)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("foreign container received destructive commands: %v", runner.calls)
+	}
+	if !containsSequence(runner.calls[0], []string{"--filter", "label=" + workspaceTokenLabel + "=" + hashText(launcher.config.WorkspaceToken)}) ||
+		!containsSequence(runner.calls[0], []string{"--filter", "label=" + runtimeRoleLabel + "=" + codingAgentRole}) ||
+		!containsSequence(runner.calls[1], []string{"--filter", "name=^/" + launcher.config.ContainerName + "$"}) {
+		t.Fatalf("cleanup did not distinguish ownership from name collision: %v", runner.calls)
+	}
+}
+
 func TestAgentLauncherUsesQuotaVolumeAndExactArgv(t *testing.T) {
 	config := agentTestConfig(t)
 	launcher, err := NewAgent(config)
@@ -26,6 +261,8 @@ func TestAgentLauncherUsesQuotaVolumeAndExactArgv(t *testing.T) {
 	}
 	for _, required := range [][]string{
 		{"--network", "none"},
+		{"--label", workspaceTokenLabel + "=" + hashText(config.WorkspaceToken)},
+		{"--label", runtimeRoleLabel + "=" + codingAgentRole},
 		{"--read-only"},
 		{"--cap-drop", "ALL"},
 		{"--security-opt", "no-new-privileges=true"},
@@ -38,6 +275,11 @@ func TestAgentLauncherUsesQuotaVolumeAndExactArgv(t *testing.T) {
 		if !containsSequence(arguments, required) {
 			t.Errorf("agent create arguments are missing %v: %v", required, arguments)
 		}
+	}
+	seedArgs := launcher.seedCreateArguments()
+	if !containsSequence(seedArgs, []string{"--label", workspaceTokenLabel + "=" + hashText(config.WorkspaceToken)}) ||
+		!containsSequence(seedArgs, []string{"--label", runtimeRoleLabel + "=" + quotaKeeperRole}) {
+		t.Fatalf("quota keeper create command lacks run/role ownership labels: %v", seedArgs)
 	}
 	if !strings.Contains(joined, "type=volume,src="+launcher.volumeName+",dst=/workspace,volume-nocopy") {
 		t.Fatalf("agent command lacks the hard-quota volume: %v", arguments)
@@ -318,16 +560,25 @@ func agentTestConfig(t *testing.T) AgentConfig {
 	}
 }
 
+func int64Pointer(value int64) *int64 { return &value }
+
 func secureAgentInspect(t *testing.T, launcher *AgentLauncher) containerInspect {
 	t.Helper()
 	config := launcher.config
 	pids := config.PIDLimit
 	var inspected containerInspect
+	inspected.ID = "0123456789ab"
+	inspected.Name = "/" + config.ContainerName
+	inspected.Config.Labels = map[string]string{
+		workspaceTokenLabel: hashText(config.WorkspaceToken),
+		runtimeRoleLabel:    codingAgentRole,
+	}
 	inspected.Config.User = config.ContainerUser
 	inspected.Config.WorkingDir = containerWorkspacePath
 	inspected.Config.Image = config.AgentImage
 	inspected.Config.Entrypoint = []string{config.Command[0]}
 	inspected.Config.Cmd = append([]string(nil), config.Command[1:]...)
+	inspected.Config.Env = []string{"HOME=/tmp/mirage-home"}
 	inspected.Config.Healthcheck = &struct {
 		Test []string `json:"Test"`
 	}{Test: []string{"NONE"}}
@@ -343,6 +594,11 @@ func secureAgentInspect(t *testing.T, launcher *AgentLauncher) containerInspect 
 	inspected.HostConfig.NanoCPUs = config.NanoCPUs
 	init := true
 	inspected.HostConfig.Init = &init
+	inspected.HostConfig.ShmSize = 16 << 20
+	inspected.HostConfig.Tmpfs = map[string]string{
+		"/tmp": "rw,noexec,nosuid,nodev,size=16777216,mode=1777",
+	}
+	inspected.HostConfig.Ulimits = []dockerUlimit{{Name: "nofile", Soft: 256, Hard: 256}}
 	inspected.HostConfig.RestartPolicy.Name = "no"
 	inspected.HostConfig.LogConfig.Type = "local"
 	inspected.HostConfig.LogConfig.Config = map[string]string{
