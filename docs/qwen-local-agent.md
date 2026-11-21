@@ -120,7 +120,7 @@ For normal use, MIRAGE exposes the constrained Qwen workflow as one short
 command:
 
 ```bash
-export MIRAGE_QWEN_IMAGE="ghcr.io/your-namespace/mirage-qwen-agent@sha256:<image-digest>"
+export MIRAGE_QWEN_IMAGE="ghcr.io/mrgray17/mirage-qwen-agent@sha256:00351657c03b8cf19302b36ea554420418751cfcfe0f4aad1077085231a3faf6"
 mirage edit README.md "Add a concise verification section"
 ```
 

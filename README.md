@@ -181,7 +181,7 @@ After installing MIRAGE, starting Ollama, and making a digest-pinned Qwen image
 available to rootless Docker, the normal editing command is intentionally short:
 
 ```bash
-export MIRAGE_QWEN_IMAGE="ghcr.io/your-namespace/mirage-qwen-agent@sha256:<image-digest>"
+export MIRAGE_QWEN_IMAGE="ghcr.io/mrgray17/mirage-qwen-agent@sha256:00351657c03b8cf19302b36ea554420418751cfcfe0f4aad1077085231a3faf6"
 mirage edit README.md "Add a concise verification section"
 ```
 
@@ -244,7 +244,7 @@ it never asks for a token. It prints the immutable `MIRAGE_QWEN_IMAGE` value
 at the end. Set that value once in your trusted shell environment:
 
 ```bash
-export MIRAGE_QWEN_IMAGE='ghcr.io/mrgray17/mirage-qwen-agent@sha256:<digest>'
+export MIRAGE_QWEN_IMAGE='ghcr.io/mrgray17/mirage-qwen-agent@sha256:00351657c03b8cf19302b36ea554420418751cfcfe0f4aad1077085231a3faf6'
 mirage edit README.md "Add a concise verification section"
 ```
 
@@ -253,7 +253,7 @@ For PowerShell, persist the same value for future sessions:
 ```powershell
 [Environment]::SetEnvironmentVariable(
   "MIRAGE_QWEN_IMAGE",
-  "ghcr.io/mrgray17/mirage-qwen-agent@sha256:<digest>",
+  "ghcr.io/mrgray17/mirage-qwen-agent@sha256:00351657c03b8cf19302b36ea554420418751cfcfe0f4aad1077085231a3faf6",
   "User"
 )
 ```
@@ -265,6 +265,10 @@ must report `READY` before using `mirage edit` from Windows. The local
 acceptance script validates the Linux/WSL product path; the final platform
 release gate still includes a real PowerShell-to-WSL edit using the installed
 frontend/backend pair.
+
+Receipt paths printed by Windows runs may use WSL paths such as
+`/home/user/.cache/mirage/runs/.../receipt.json`; pass that path directly to
+`mirage verify` in PowerShell and the frontend routes verification to WSL.
 
 See [the local Qwen guide](docs/qwen-local-agent.md) for detailed protocol,
 security, evidence, and troubleshooting information.
