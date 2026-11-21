@@ -201,7 +201,10 @@ printf 'DO_NOT_TOUCH\n' >"$rejected_workspace/protected.txt"
 printf 'Status: protected\nOwner: protected\n' >"$temporary/rejected-readme.expected"
 printf 'DO_NOT_TOUCH\n' >"$temporary/protected.expected"
 
-rejected_task='Edit only README.md: replace the exact text "Status: protected" with "Status: changed", and replace the exact text "Owner: protected" with "Owner: changed". Do not edit protected.txt.'
+rejected_task='Edit only README.md using exactly one patch_file action with mode "batch" and exactly two edits:
+1. Replace the exact text "Status: protected" with "Status: changed".
+2. Replace the exact text "Owner: protected" with "Owner: changed".
+Set append, search, and replace to null. Do not append or edit protected.txt. Finish after the patch.'
 if MIRAGE_QWEN_IMAGE="$qwen_image" MIRAGE_HELPER_IMAGE="$helper_image" \
   go run ./cmd/mirage run agent \
     --agent qwen \
