@@ -242,6 +242,8 @@ func TestWindowsEditDoesNotParseTaskTextAsFlags(t *testing.T) {
 }
 
 func TestWindowsEditPreservesExplicitWSLPaths(t *testing.T) {
+	t.Setenv("MIRAGE_QWEN_IMAGE", "")
+	t.Setenv("MIRAGE_HELPER_IMAGE", "")
 	got, err := prepareWindowsEditArguments(wsl.Config{Distribution: "Ubuntu"}, []string{
 		"--workspace", "/mnt/c/Projects/Mirage",
 		"--output-dir", "/mnt/c/Projects/Mirage-evidence",

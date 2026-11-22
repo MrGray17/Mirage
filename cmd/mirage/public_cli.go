@@ -75,6 +75,7 @@ func runVersion(args []string, stdout, stderr io.Writer) error {
 
 type doctorReport struct {
 	Ready                bool                            `json:"ready"`
+	EditReady            bool                            `json:"edit_ready"`
 	Environment          runtimedocker.EnvironmentReport `json:"environment"`
 	OfficialImage        string                          `json:"official_image"`
 	ImageAvailable       bool                            `json:"image_available"`
@@ -105,23 +106,20 @@ func runDoctor(args []string, stdout, stderr io.Writer) error {
 		QwenImage:     defaultQwenImage,
 		HelperImage:   defaultQwenHelperImage,
 	}
-	var err error
-	report.Environment, err = runtimedocker.CheckEnvironment(ctx, "docker")
-	if err == nil {
-		err = runtimedocker.ImageAvailable(ctx, "docker", demo.OfficialImage)
-		report.ImageAvailable = err == nil
+	var coreErr error
+	report.Environment, coreErr = runtimedocker.CheckEnvironment(ctx, "docker")
+	if coreErr == nil {
+		coreErr = runtimedocker.ImageAvailable(ctx, "docker", demo.OfficialImage)
+		report.ImageAvailable = coreErr == nil
 	}
-	if err == nil {
-		err = runtimedocker.ImageAvailable(ctx, "docker", defaultQwenImage)
-		report.QwenImageAvailable = err == nil
+	if report.Environment.DockerEndpoint != "" {
+		report.QwenImageAvailable = runtimedocker.ImageAvailable(ctx, "docker", defaultQwenImage) == nil
+		report.HelperImageAvailable = runtimedocker.ImageAvailable(ctx, "docker", defaultQwenHelperImage) == nil
 	}
-	if err == nil {
-		err = runtimedocker.ImageAvailable(ctx, "docker", defaultQwenHelperImage)
-		report.HelperImageAvailable = err == nil
-	}
-	report.Ready = err == nil
-	if err != nil {
-		report.Error = err.Error()
+	report.Ready = coreErr == nil
+	report.EditReady = report.Ready && report.QwenImageAvailable && report.HelperImageAvailable
+	if coreErr != nil {
+		report.Error = coreErr.Error()
 	}
 	if *jsonOutput {
 		if encodeErr := json.NewEncoder(stdout).Encode(report); encodeErr != nil {
@@ -140,12 +138,17 @@ func runDoctor(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stdout, "  Helper image               %s\n", passFail(report.HelperImageAvailable))
 		if report.Ready {
 			fmt.Fprintln(stdout, "\nREADY")
+			if report.EditReady {
+				fmt.Fprintln(stdout, "EDIT READY")
+			} else {
+				fmt.Fprintln(stdout, "EDIT NOT READY — run: mirage setup")
+			}
 		} else {
 			fmt.Fprintf(stdout, "\nNOT READY\n%s\n", report.Error)
 		}
 	}
-	if err != nil {
-		return fmt.Errorf("environment is not ready: %w", err)
+	if coreErr != nil {
+		return fmt.Errorf("environment is not ready: %w", coreErr)
 	}
 	return nil
 }

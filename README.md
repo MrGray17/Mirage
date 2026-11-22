@@ -118,8 +118,8 @@ mirage doctor
 
 `mirage version` must report `mirage 1.0.0-dev`, a full 40-character lowercase Git
 commit, bridge protocol 1, and `platform=windows`. `mirage doctor` checks that
-the WSL backend has the same version, commit, and bridge protocol and must finish
-with `READY`; do not run an agent if it reports `NOT READY`.
+the WSL backend has the same version, commit, and bridge protocol. It must report
+both `READY` and `EDIT READY` before the first local edit.
 
 To upgrade later, fetch the desired clean source revision and rerun the same
 PowerShell installer. Never update only the frontend or only the WSL backend;
@@ -260,8 +260,8 @@ mirage edit README.md "Add a concise verification section"
 
 The Windows frontend and WSL backend must be installed from the same source
 commit. After installing or upgrading with `scripts/install.ps1`, run
-`mirage version` and `mirage doctor`; the latter
-must report `READY` before using `mirage edit` from Windows. The local
+`mirage version` and `mirage doctor`; the latter must report both `READY` and
+`EDIT READY` before using `mirage edit` from Windows. The local
 acceptance script validates the Linux/WSL product path; the final platform
 release gate still includes a real PowerShell-to-WSL edit using the installed
 frontend/backend pair.
