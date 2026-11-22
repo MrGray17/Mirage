@@ -38,6 +38,7 @@ const (
 	defaultRunDuration     = 8 * time.Second
 	operationTimeout       = 30 * time.Second
 	brokerPreflightExit    = 78
+	defaultQwenImage       = "ghcr.io/mrgray17/mirage-qwen-agent@sha256:00351657c03b8cf19302b36ea554420418751cfcfe0f4aad1077085231a3faf6"
 	defaultQwenHelperImage = "busybox@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0"
 )
 
@@ -152,6 +153,9 @@ func parseQuickEditPlan(args []string) (quickEditPlan, error) {
 	flags.SetOutput(io.Discard)
 	workspaceRoot := flags.String("workspace", ".", "project directory; defaults to the current directory")
 	imageDefault := strings.TrimSpace(os.Getenv("MIRAGE_QWEN_IMAGE"))
+	if imageDefault == "" {
+		imageDefault = defaultQwenImage
+	}
 	image := flags.String("image", imageDefault, "digest-pinned Qwen agent image (or set MIRAGE_QWEN_IMAGE)")
 	helperDefault := strings.TrimSpace(os.Getenv("MIRAGE_HELPER_IMAGE"))
 	if helperDefault == "" {
@@ -169,9 +173,6 @@ func parseQuickEditPlan(args []string) (quickEditPlan, error) {
 	positionals := flags.Args()
 	if len(positionals) < 2 {
 		return quickEditPlan{}, errors.New("usage: mirage edit [options] <file> <task>; the file must be inside the selected workspace")
-	}
-	if strings.TrimSpace(*image) == "" {
-		return quickEditPlan{}, errors.New("Qwen image is not configured; pass --image <registry/image@sha256:digest> or set MIRAGE_QWEN_IMAGE once")
 	}
 	if !isDigestPinnedImageReference(*image) {
 		return quickEditPlan{}, errors.New("Qwen image must use an immutable name@sha256: reference with 64 lowercase hexadecimal characters")
