@@ -57,6 +57,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 	switch args[0] {
 	case "edit":
 		return runQuickEdit(args[1:], stdout, stderr)
+	case "mcp":
+		return runMCP(args[1:], stdout, stderr)
 	case "run":
 		if len(args) == 1 || strings.HasPrefix(args[1], "-") {
 			return runPublicDemo(demo.ScenarioMalicious, args[1:], stdout, stderr)

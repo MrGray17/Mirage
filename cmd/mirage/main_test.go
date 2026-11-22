@@ -591,3 +591,13 @@ func TestQuickEditHelpIsAvailable(t *testing.T) {
 		t.Fatalf("edit help = %q", stderr.String())
 	}
 }
+
+func TestMCPHelpIsAvailableWithoutStartingTransport(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"mcp", "--help"}, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "mirage mcp") || !strings.Contains(stdout.String(), "stdio") {
+		t.Fatalf("MCP help = %q", stdout.String())
+	}
+}

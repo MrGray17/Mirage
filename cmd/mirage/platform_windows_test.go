@@ -293,6 +293,12 @@ func TestEditCommandRequiresLinuxBackendOnWindows(t *testing.T) {
 	}
 }
 
+func TestMCPServerStaysNativeAndDispatchesItsToolsThroughEntrypoint(t *testing.T) {
+	if requiresLinuxBackend([]string{"mcp"}) {
+		t.Fatal("native stdio MCP server was incorrectly routed wholesale into WSL")
+	}
+}
+
 func TestLoadWSLConfigFailsClearlyWhenAbsent(t *testing.T) {
 	t.Setenv("LOCALAPPDATA", t.TempDir())
 	if _, err := loadWSLConfig(); err == nil || !strings.Contains(err.Error(), "run the MIRAGE installer") {

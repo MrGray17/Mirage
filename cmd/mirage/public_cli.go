@@ -32,9 +32,14 @@ Edit one existing file with local Qwen:
   mirage edit [options] <file> <task>
   The official digest-pinned Qwen runtime is the default.
 
+Connect any MCP-compatible coding agent:
+  mirage mcp
+  Register it with your harness as the local stdio command: mirage mcp
+
 Usage:
   mirage run [malicious|benign] [--open] [--json]
   mirage edit [options] <file> <task>
+  mirage mcp
   mirage setup
   mirage doctor [--json]
   mirage verify <receipt.json>
@@ -209,6 +214,7 @@ func runSetup(args []string, stdout, stderr io.Writer) error {
 	fmt.Fprintln(stdout, "\nRUNTIME READY")
 	fmt.Fprintln(stdout, "Next: ensure Ollama is running with qwen2.5-coder:1.5b, then run:")
 	fmt.Fprintln(stdout, "  mirage edit README.md \"Improve the introduction\"")
+	fmt.Fprintln(stdout, "Coding-agent integration: register the local stdio command 'mirage mcp'.")
 	return nil
 }
 

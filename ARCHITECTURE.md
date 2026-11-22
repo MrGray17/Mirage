@@ -994,6 +994,25 @@ Shadow Result or Deferred Intent
 
 ## 12.1 MCP integration
 
+MIRAGE v1 implements a local stdio MCP **control adapter** so an external
+coding-agent harness can invoke the existing product boundary without a
+vendor-specific model protocol. It exposes only `mirage_doctor`,
+`mirage_edit_file`, and `mirage_verify_receipt`. The adapter validates typed
+inputs and strict versioned CLI output; on Windows it remains native while each
+runtime operation crosses the commit-bound WSL backend. Backend children receive
+closed automation stdin and can never inherit the MCP protocol stream.
+
+The control adapter does not grant authority itself. `mirage_edit_file` maps to
+the same one-existing-file Qwen contract, frozen-tree reconciliation, and
+trusted commit path as `mirage edit --yes --format json`. MCP annotations and
+the required `approved` input support client approval UX but are not enforcement
+facts. A harness's separate built-in filesystem tools are outside this adapter
+and are not transparently intercepted.
+
+The broader MCP proxy described below remains a future architecture for agents
+inside MIRAGE that need mediated access to external MCP tools. It is distinct
+from exposing MIRAGE itself as an MCP server.
+
 For MCP-capable agents:
 
 ```text
@@ -2035,7 +2054,9 @@ The v1 release supports exactly one compelling end-to-end workflow.
 - self-hashed receipt v1/v2 verification,
 - read-only, evidence-only interactive Observatory,
 - Windows frontend with a commit-bound WSL2 backend,
-- constrained local Qwen execution through a trusted Ollama broker.
+- constrained local Qwen execution through a trusted Ollama broker,
+- local stdio MCP control adapter with structured readiness, one-file edit, and
+  receipt-verification tools.
 
 ## Explicitly not in MVP
 
