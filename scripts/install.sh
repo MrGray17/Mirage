@@ -14,7 +14,7 @@ cleanup() {
 trap cleanup EXIT
 
 if ! command -v go >/dev/null 2>&1; then
-  echo "MIRAGE requires Go 1.27.3 or newer to install from source." >&2
+  echo "MIRAGE requires Go 1.27.4 or newer to install from source." >&2
   exit 1
 fi
 if ! go_version_output="$(go version 2>&1)"; then
@@ -26,9 +26,9 @@ if [[ -z "$go_version" ]]; then
   echo "MIRAGE could not parse the Go toolchain version: $go_version_output" >&2
   exit 1
 fi
-minimum_version="$(printf '%s\n' "$go_version" "1.27.3" | sort -V | head -n 1)"
-if [[ "$minimum_version" != "1.27.3" ]]; then
-  echo "MIRAGE requires Go 1.27.3 or newer; found $go_version. Nothing was installed." >&2
+minimum_version="$(printf '%s\n' "$go_version" "1.27.4" | sort -V | head -n 1)"
+if [[ "$minimum_version" != "1.27.4" ]]; then
+  echo "MIRAGE requires Go 1.27.4 or newer; found $go_version. Nothing was installed." >&2
   exit 1
 fi
 if ! command -v git >/dev/null 2>&1; then

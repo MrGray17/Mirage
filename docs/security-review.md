@@ -149,7 +149,7 @@ These limits are part of the security contract, not embarrassing footnotes. Do n
 
 The hardening branch is validated by two distinct gates:
 
-- **Standard CI:** formatting, `go vet ./...`, the full race-enabled `go test -race -count=1 -cover ./...` suite, Linux installer failure-safety checks, pinned Qwen image build, Linux build, and Windows CLI frontend tests/build.
+- **Standard CI:** formatting, `go vet ./...`, a pinned `govulncheck` scan, the full race-enabled `go test -race -count=1 -cover ./...` suite, Linux installer failure-safety checks, pinned Qwen image build, Linux build, and Windows CLI frontend tests/build.
 - **Live Linux acceptance:** rootless Docker preflight with cgroup v2/systemd and delegated controllers, immutable fixture images, the real runtime release acceptance gate, evidence transcript upload, and temporary registry cleanup.
 
 The separate local provider-backed Qwen test and the external GitHub publication test are intentionally not implied by these gates. Their prerequisites and commands are documented in [the Qwen agent guide](qwen-local-agent.md), [the release acceptance guide](release-acceptance.md), and [the security regression matrix](security-regression-matrix.md).

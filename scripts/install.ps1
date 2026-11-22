@@ -92,15 +92,15 @@ function Assert-MirageBuildPair {
 
 try {
     if (-not (Get-Command go.exe -ErrorAction SilentlyContinue)) {
-        throw "Go 1.27.3 or newer is required to install MIRAGE from source."
+        throw "Go 1.27.4 or newer is required to install MIRAGE from source."
     }
     $goVersionOutput = & go.exe version
     if ($LASTEXITCODE -ne 0 -or (($goVersionOutput -join " ") -notmatch 'go(\d+\.\d+(?:\.\d+)?)')) {
         throw "Could not establish the installed Go toolchain version."
     }
     $goVersion = [version]$Matches[1]
-    if ($goVersion -lt [version]"1.27.3") {
-        throw "Go 1.27.3 or newer is required; found Go $goVersion."
+    if ($goVersion -lt [version]"1.27.4") {
+        throw "Go 1.27.4 or newer is required; found Go $goVersion."
     }
     if (-not (Get-Command git.exe -ErrorAction SilentlyContinue)) {
         throw "Git is required to establish MIRAGE's source commit identity. No installed files were changed."

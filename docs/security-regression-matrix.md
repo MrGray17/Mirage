@@ -6,8 +6,8 @@
 
 | Level | What runs | Meaning |
 |---|---|---|
-| Standard CI | `gofmt`, `go vet ./...`, `go test -race -count=1 -cover ./...`; Windows CLI frontend tests/build | Reproducible unit, state-machine, policy, parser, installer, and platform checks. Opt-in runtime tests are not automatically enabled by the ordinary Go suite. |
-| Live Linux acceptance | `./scripts/test-live.sh` with digest-pinned fixture images and rootless Docker | The script repeats standard checks, then enables the real-runtime Docker and demo acceptance tests. Requires Go 1.27.3+, rootless Docker, cgroup v2/systemd, seccomp, and delegated resource controllers. |
+| Standard CI | `gofmt`, `go vet ./...`, pinned `govulncheck`, `go test -race -count=1 -cover ./...`; Windows CLI frontend tests/build | Reproducible unit, state-machine, policy, dependency-vulnerability, parser, installer, and platform checks. Opt-in runtime tests are not automatically enabled by the ordinary Go suite. |
+| Live Linux acceptance | `./scripts/test-live.sh` with digest-pinned fixture images and rootless Docker | The script repeats standard checks, then enables the real-runtime Docker and demo acceptance tests. Requires Go 1.27.4+, rootless Docker, cgroup v2/systemd, seccomp, and delegated resource controllers. |
 | Separate external-effect acceptance | `MIRAGE_M53_LIVE=1 go test -race -count=1 -v -run '^TestM53LiveGitHubCreateOnlyPublication$' ./internal/runtime` | Creates a real branch in a disposable remote repository. This is intentionally outside the default/live runtime gate and is **not marked passed** by the current evidence. |
 | Separate provider-backed run | A deliberately configured agent/provider request in a throwaway workspace | May use external credentials or incur cost. It is not run by `scripts/test-live.sh`; unit tests of the broker do not substitute for a live provider-backed run. |
 
