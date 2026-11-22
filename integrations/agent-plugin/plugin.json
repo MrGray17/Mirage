@@ -1,0 +1,22 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "mirage",
+  "version": "1.0.0",
+  "description": "Transactional, evidence-backed single-file editing for coding agents.",
+  "skills": "./skills/",
+  "mcpServers": "./mcp.json",
+  "extensions": {
+    "com.openai": {
+      "requires_local_executor": true,
+      "interface": {
+        "displayName": "Mirage",
+        "shortDescription": "Safely edit one authorized file with verified evidence",
+        "longDescription": "Use the local Mirage security runtime to make a transactional edit to exactly one existing file, then return a verified execution receipt.",
+        "developerName": "Mirage",
+        "category": "Developer Tools",
+        "capabilities": ["Read", "Write"],
+        "websiteURL": "https://github.com/MrGray17/Mirage"
+      }
+    }
+  }
+}

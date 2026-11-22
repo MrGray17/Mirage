@@ -59,6 +59,8 @@ CPU/memory/PIDs/time/output, and a hard writable-workspace quota.
 - compatible receipt v1/v2 verification, deterministic Effect Graphs, and a
   read-only Observatory evidence view;
 - a product CLI with a Windows frontend and WSL2 security backend;
+- a local stdio MCP server that exposes narrow, structured tools to any
+  compatible coding-agent harness;
 - deterministic Git commit and create-only GitHub branch-publication
   foundations.
 
@@ -208,6 +210,34 @@ The public official Qwen runtime and helper are immutable built-in defaults;
 `mirage setup` pulls and verifies them. Advanced users can override the agent
 with `MIRAGE_QWEN_IMAGE` or `--image`, but overrides must use an immutable
 `name@sha256:digest`. The exact model is fixed and there is no silent fallback.
+
+## Use Mirage from Claude Code, Codex, OpenCode, or any MCP client
+
+Mirage includes a local stdio MCP server. Register the installed executable
+once with the coding-agent CLI you use:
+
+```text
+claude mcp add --transport stdio --scope user mirage -- mirage mcp
+codex mcp add mirage -- mirage mcp
+opencode mcp add mirage --global -- mirage mcp
+```
+
+The server exposes three tools:
+
+- `mirage_doctor` checks runtime and edit readiness;
+- `mirage_edit_file` transactionally edits exactly one explicitly authorized
+  existing regular file and returns structured verified evidence;
+- `mirage_verify_receipt` independently verifies a Mirage receipt.
+
+The write tool requires `approved: true`, is marked as a destructive MCP tool
+for clients that present approval UI, and still passes through Mirage's
+rootless, network-disabled, exact-file transactional boundary. MCP annotations
+are only UI hints and do not replace runtime enforcement.
+
+Portable configuration examples and an Agent Plugins package are in
+[`integrations/`](integrations/). See the complete
+[coding-agent harness guide](docs/agent-harnesses.md) for schemas, behavior, and
+security boundaries.
 
 ## Real local-Qwen proof
 

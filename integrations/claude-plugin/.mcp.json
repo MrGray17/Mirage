@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "mirage": {
+      "command": "mirage",
+      "args": ["mcp"]
+    }
+  }
+}

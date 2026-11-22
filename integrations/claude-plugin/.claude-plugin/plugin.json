@@ -1,0 +1,8 @@
+{
+  "name": "mirage",
+  "version": "1.0.0",
+  "description": "Transactional, evidence-backed single-file editing through the local Mirage MCP server.",
+  "author": {
+    "name": "Mirage"
+  }
+}

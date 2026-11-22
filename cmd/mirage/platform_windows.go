@@ -24,6 +24,14 @@ const bridgeOutputLimit = 1 << 20
 var translateWindowsBridgePath = translateWSLPath
 
 func runEntrypoint(args []string, stdout, stderr io.Writer) error {
+	return runEntrypointWithStdin(args, os.Stdin, stdout, stderr)
+}
+
+func runAutomationEntrypoint(args []string, stdout, stderr io.Writer) error {
+	return runEntrypointWithStdin(args, strings.NewReader(""), stdout, stderr)
+}
+
+func runEntrypointWithStdin(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if !requiresLinuxBackend(args) {
 		return run(args, stdout, stderr)
 	}
@@ -42,9 +50,9 @@ func runEntrypoint(args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return err
 		}
-		return invokeWSL(config, append([]string{"edit"}, backendArgs...), stdout, stderr)
+		return invokeWSL(config, append([]string{"edit"}, backendArgs...), stdin, stdout, stderr)
 	}
-	return invokeWSL(config, args, stdout, stderr)
+	return invokeWSL(config, args, stdin, stdout, stderr)
 }
 
 func requiresLinuxBackend(args []string) bool {
@@ -388,13 +396,13 @@ func translateWSLPath(config wsl.Config, direction, path string) (string, error)
 	return translated, nil
 }
 
-func invokeWSL(config wsl.Config, backendArgs []string, stdout, stderr io.Writer) error {
+func invokeWSL(config wsl.Config, backendArgs []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	args, err := wsl.Invocation(config, backendArgs)
 	if err != nil {
 		return err
 	}
 	command := exec.Command("wsl.exe", args...)
-	command.Env, command.Stdout, command.Stderr, command.Stdin = windowsBridgeEnvironment(), stdout, stderr, os.Stdin
+	command.Env, command.Stdout, command.Stderr, command.Stdin = windowsBridgeEnvironment(), stdout, stderr, stdin
 	return command.Run()
 }
 

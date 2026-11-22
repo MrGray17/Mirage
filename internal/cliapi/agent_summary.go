@@ -1,8 +1,11 @@
 package cliapi
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 )
 
@@ -26,6 +29,28 @@ type AgentRunSummary struct {
 	ObservatoryPath string `json:"observatory_path"`
 	WorkspacePath   string `json:"workspace_path"`
 	CleanupComplete bool   `json:"cleanup_complete"`
+}
+
+// ParseAgentRunSummary accepts exactly one versioned agent-run summary and
+// validates the evidence invariants before a frontend or integration trusts it.
+func ParseAgentRunSummary(encoded []byte) (AgentRunSummary, error) {
+	var summary AgentRunSummary
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&summary); err != nil {
+		return AgentRunSummary{}, fmt.Errorf("decode agent run summary: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			err = errors.New("multiple JSON values")
+		}
+		return AgentRunSummary{}, fmt.Errorf("decode agent run summary: %w", err)
+	}
+	if err := summary.Validate(); err != nil {
+		return AgentRunSummary{}, err
+	}
+	return summary, nil
 }
 
 func (s AgentRunSummary) Validate() error {

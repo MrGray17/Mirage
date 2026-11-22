@@ -1,0 +1,3 @@
+[mcp_servers.mirage]
+command = "mirage"
+args = ["mcp"]
