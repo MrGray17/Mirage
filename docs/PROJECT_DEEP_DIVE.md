@@ -806,7 +806,7 @@ Those checks catch a lot of regressions, but normal CI does not start the full r
 
 ### 17.2 Rootless-Docker live acceptance
 
-The opt-in [scripts/test-live.sh](../scripts/test-live.sh) runs in a prepared Linux environment, including WSL2's Linux filesystem when configured properly. It expects Go 1.27.3 or newer, Docker, and the required preloaded digest-pinned image references.
+The opt-in [scripts/test-live.sh](../scripts/test-live.sh) runs in a prepared Linux environment, including WSL2's Linux filesystem when configured properly. It expects Go 1.27.4 or newer, Docker, and the required preloaded digest-pinned image references.
 
 It runs the standard checks first, then enables the hostile fixture, coding-agent/broker, and demo integration suites. These exercise the effective runtime, quota, process-tree, broker-socket and deterministic-demo boundaries under real Docker execution.
 

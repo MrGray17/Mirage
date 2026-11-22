@@ -21,13 +21,13 @@ if [[ -z "${MIRAGE_AGENT_IMAGE:-}" ]]; then
 fi
 export MIRAGE_AGENT_IMAGE
 
-command -v go >/dev/null 2>&1 || fail "Go 1.27.3 or newer is required."
+command -v go >/dev/null 2>&1 || fail "Go 1.27.4 or newer is required."
 command -v docker >/dev/null 2>&1 || fail "Docker CLI is required."
 go_version_output="$(go version 2>&1)" || fail "could not run the Go toolchain."
 go_version="$(sed -nE 's/^go version go([0-9]+\.[0-9]+\.[0-9]+)([[:space:]]|$).*/\1/p' <<< "$go_version_output")"
 [[ -n "$go_version" ]] || fail "could not parse Go version: $go_version_output"
-minimum_version="$(printf '%s\n' "$go_version" "1.27.3" | sort -V | head -n 1)"
-[[ "$minimum_version" == "1.27.3" ]] || fail "Go 1.27.3 or newer is required; found $go_version."
+minimum_version="$(printf '%s\n' "$go_version" "1.27.4" | sort -V | head -n 1)"
+[[ "$minimum_version" == "1.27.4" ]] || fail "Go 1.27.4 or newer is required; found $go_version."
 
 check_pinned_image() {
   local variable_name="$1"
@@ -58,6 +58,7 @@ if [[ -n "$unformatted" ]]; then
   fail "Go source formatting is not clean."
 fi
 go vet ./...
+go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...
 go test -race -count=1 ./...
 
 printf '\n== Rootless Docker integration acceptance ==\n'

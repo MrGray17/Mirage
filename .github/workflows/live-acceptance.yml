@@ -37,10 +37,10 @@ jobs:
           ref: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.ref == 'ci/rootless-live-acceptance' && github.event.pull_request.base.sha || github.event.pull_request.head.sha) || inputs.target_ref || github.sha }}
           fetch-depth: 1
 
-      - name: Set up Go 1.27.3
+      - name: Set up Go 1.27.4
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
         with:
-          go-version: '1.27.3'
+          go-version: '1.27.4'
           cache: false
 
       - name: Prepare the rootless systemd user session and delegate resource controllers

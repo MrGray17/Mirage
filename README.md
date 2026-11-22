@@ -85,7 +85,7 @@ release work.
 
 Prerequisites:
 
-- Git and Go 1.27.3 or newer on Windows;
+- Git and Go 1.27.4 or newer on Windows;
 - WSL2 with an Ubuntu distribution;
 - rootless Docker inside Ubuntu, using cgroup v2, the `systemd` cgroup driver,
   delegated CPU/memory/PID controllers, and built-in seccomp.
@@ -129,7 +129,7 @@ the frontend intentionally refuses a mismatched commit identity.
 
 ### Native Linux
 
-Prerequisites are Git, Go 1.27.3 or newer, and the same rootless-Docker security
+Prerequisites are Git, Go 1.27.4 or newer, and the same rootless-Docker security
 properties listed above. From the repository root:
 
 ```bash
@@ -253,7 +253,7 @@ ollama pull qwen2.5-coder:1.5b
 ollama list
 ```
 
-From a clean Linux or WSL2 checkout with Go 1.27.3+, rootless Docker, and an
+From a clean Linux or WSL2 checkout with Go 1.27.4+, rootless Docker, and an
 existing GHCR login that can publish to the configured package, run:
 
 ```bash

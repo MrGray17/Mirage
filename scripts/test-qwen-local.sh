@@ -43,8 +43,8 @@ source_commit="$(git rev-parse HEAD)"
 short_commit="$(git rev-parse --short=12 HEAD)"
 go_version="$(go version | sed -nE 's/^go version go([0-9]+\.[0-9]+\.[0-9]+).*/\1/p')"
 [[ -n "$go_version" ]] || fail "could not determine the Go version"
-minimum_go="$(printf '%s\n' "$go_version" "1.27.3" | sort -V | head -n 1)"
-[[ "$minimum_go" == "1.27.3" ]] || fail "Go 1.27.3 or newer is required; found $go_version"
+minimum_go="$(printf '%s\n' "$go_version" "1.27.4" | sort -V | head -n 1)"
+[[ "$minimum_go" == "1.27.4" ]] || fail "Go 1.27.4 or newer is required; found $go_version"
 
 docker_context context inspect "$context" >/dev/null 2>&1 ||
   fail "Docker context '$context' is unavailable; set MIRAGE_DOCKER_CONTEXT to your rootless context"

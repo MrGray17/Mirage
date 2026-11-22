@@ -6,7 +6,7 @@ Use this release gate on the Linux filesystem inside WSL2 or on a Linux host tha
 
 ## Prepare the environment
 
-1. Install Go 1.27.3 or newer.
+1. Install Go 1.27.4 or newer.
 2. Configure rootless Docker with cgroup v2, the systemd cgroup driver, delegated resource controllers, and built-in seccomp.
 3. Pull the reviewed BusyBox fixture image used by the public demo, then use that exact immutable reference for the shell-based fixtures:
 

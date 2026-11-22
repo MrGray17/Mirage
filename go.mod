@@ -2,7 +2,7 @@ module github.com/MrGray17/Mirage
 
 go 1.27
 
-toolchain go1.27.3
+toolchain go1.27.4
 
 require github.com/modelcontextprotocol/go-sdk v1.8.0
 
