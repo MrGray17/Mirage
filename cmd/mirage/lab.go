@@ -27,13 +27,13 @@ type labTrial struct {
 }
 
 type labReport struct {
-	Schema     string     `json:"schema"`
-	Platform   string     `json:"platform"`
-	Image      string     `json:"image"`
-	StartedAt  time.Time  `json:"started_at"`
-	Planned    int        `json:"planned"`
-	Passed     int        `json:"passed"`
-	Trials     []labTrial `json:"trials"`
+	Schema    string     `json:"schema"`
+	Platform  string     `json:"platform"`
+	Image     string     `json:"image"`
+	StartedAt time.Time  `json:"started_at"`
+	Planned   int        `json:"planned"`
+	Passed    int        `json:"passed"`
+	Trials    []labTrial `json:"trials"`
 }
 
 type labRunner func(string, []string, io.Writer, io.Writer) error
