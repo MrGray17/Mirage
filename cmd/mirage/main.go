@@ -88,6 +88,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 			return usageError()
 		}
 		return runReceiptVerify(args[2:], stdout, stderr)
+	case "attest":
+		return runAttest(args[1:], stdout, stderr)
 	case "observatory":
 		return runObservatory(args[1:], stdout, stderr)
 	case "doctor":

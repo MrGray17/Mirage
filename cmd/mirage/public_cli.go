@@ -43,6 +43,8 @@ Usage:
   mirage setup
   mirage doctor [--json]
   mirage verify <receipt.json>
+  mirage attest sign --key PRIVATE.pem --out PROOF.json RECEIPT.json
+  mirage attest verify --key PUBLIC.pem --proof PROOF.json RECEIPT.json
   mirage receipt verify <receipt.json>
   mirage observatory --out <report.html> <receipt.json>
   mirage version [--json]
