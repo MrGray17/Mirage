@@ -42,6 +42,7 @@ Usage:
   mirage mcp
   mirage setup
   mirage doctor [--json]
+  mirage lab --scenario benign|malicious|both --trials 1..10
   mirage verify <receipt.json>
   mirage receipt verify <receipt.json>
   mirage observatory --out <report.html> <receipt.json>

@@ -57,6 +57,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 	switch args[0] {
 	case "edit":
 		return runQuickEdit(args[1:], stdout, stderr)
+	case "lab":
+		return runLab(args[1:], stdout, stderr)
 	case "mcp":
 		return runMCP(args[1:], stdout, stderr)
 	case "run":
