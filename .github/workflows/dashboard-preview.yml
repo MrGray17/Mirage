@@ -1,0 +1,54 @@
+name: dashboard-preview
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/dashboard-preview.yml'
+      - 'internal/observatory/**'
+      - 'cmd/mirage/lab*.go'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preview:
+    name: Render offline dashboard previews
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - name: Export synthetic fixture reports
+        shell: bash
+        run: |
+          set -euo pipefail
+          export MIRAGE_DASHBOARD_PREVIEW_DIR="$RUNNER_TEMP/mirage-dashboard-preview"
+          go test -count=1 ./internal/observatory ./cmd/mirage -run '^TestExport(DashboardPreviews|LabDashboardPreview)$'
+          for report in committed rejected lab; do
+            test -s "$MIRAGE_DASHBOARD_PREVIEW_DIR/$report.html"
+          done
+      - name: Capture desktop and mobile screenshots
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/mirage-dashboard-preview"
+          chrome="$(command -v google-chrome || command -v chromium)"
+          for report in committed rejected lab; do
+            "$chrome" --headless --no-sandbox --disable-dev-shm-usage --disable-gpu --hide-scrollbars --window-size=1440,1100 --screenshot="$dir/$report-light.png" "file://$dir/$report.html"
+            "$chrome" --headless --no-sandbox --disable-dev-shm-usage --disable-gpu --hide-scrollbars --force-dark-mode --window-size=1440,1100 --screenshot="$dir/$report-dark.png" "file://$dir/$report.html"
+            test -s "$dir/$report-light.png"
+            test -s "$dir/$report-dark.png"
+          done
+          "$chrome" --headless --no-sandbox --disable-dev-shm-usage --disable-gpu --hide-scrollbars --force-dark-mode --window-size=480,1400 --screenshot="$dir/committed-mobile.png" "file://$dir/committed.html"
+          test -s "$dir/committed-mobile.png"
+      - name: Upload synthetic design previews
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: dashboard-synthetic-previews
+          path: ${{ runner.temp }}/mirage-dashboard-preview
+          if-no-files-found: error
+          retention-days: 14
