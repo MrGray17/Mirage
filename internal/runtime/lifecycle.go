@@ -946,6 +946,21 @@ func (l *Lifecycle) Commit() error {
 		return err
 	}
 	l.state = StateCommitting
+	if l.manifest == nil {
+		l.state = StateFailed
+		return ErrInvalidManifest
+	}
+	// Serialize independent cooperative Mirage commits before re-observing
+	// the complete baseline. Lock the directory inode, not a workspace file.
+	lock, err := acquireWorkspaceCommitLock(l.manifest.workspace.RealWorkspace())
+	if err != nil {
+		l.state = StateFailed
+		if errors.Is(err, ErrWorkspaceCommitBusy) {
+			l.state = StateConflicted
+		}
+		return err
+	}
+	defer lock.Close()
 	fresh, err := l.deriveRealCommitPlan()
 	if err != nil {
 		l.state = commitFailureState(err)
