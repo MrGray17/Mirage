@@ -77,7 +77,7 @@ func FuzzVerifyExactAuthorization(f *testing.F) {
 			expires = now
 		}
 		contract, err := contracts.New(contracts.Spec{
-			RunID: "fuzz-run", ActorID: "fuzz-agent", ExpiresAt: expires,
+			Version: contracts.VersionV1, RunID: "fuzz-run", ActorID: "fuzz-agent", ExpiresAt: expires,
 			Filesystem: contracts.FilesystemPolicy{Write: contracts.AccessRules{Allow: allow, Deny: deny}},
 		})
 		if err != nil {
