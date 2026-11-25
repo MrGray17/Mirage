@@ -17,6 +17,7 @@ import (
 	"github.com/MrGray17/Mirage/internal/buildinfo"
 	"github.com/MrGray17/Mirage/internal/demo"
 	runtimedocker "github.com/MrGray17/Mirage/internal/runtime/docker"
+	"github.com/MrGray17/Mirage/internal/runtime/modelbroker"
 )
 
 func printHelp(writer io.Writer) {
@@ -88,6 +89,8 @@ type doctorReport struct {
 	QwenImageAvailable   bool                            `json:"qwen_image_available"`
 	HelperImage          string                          `json:"helper_image"`
 	HelperImageAvailable bool                            `json:"helper_image_available"`
+	OllamaModelAvailable bool                            `json:"ollama_model_available"`
+	OllamaError          string                          `json:"ollama_error,omitempty"`
 	Error                string                          `json:"error,omitempty"`
 }
 
@@ -122,7 +125,14 @@ func runDoctor(args []string, stdout, stderr io.Writer) error {
 		report.HelperImageAvailable = runtimedocker.ImageAvailable(ctx, "docker", defaultQwenHelperImage) == nil
 	}
 	report.Ready = coreErr == nil
-	report.EditReady = report.Ready && report.QwenImageAvailable && report.HelperImageAvailable
+	if report.Ready && report.QwenImageAvailable && report.HelperImageAvailable {
+		if err := modelbroker.CheckOllamaModel(ctx); err != nil {
+			report.OllamaError = err.Error()
+		} else {
+			report.OllamaModelAvailable = true
+		}
+	}
+	report.EditReady = report.Ready && report.QwenImageAvailable && report.HelperImageAvailable && report.OllamaModelAvailable
 	if coreErr != nil {
 		report.Error = coreErr.Error()
 	}
@@ -141,12 +151,16 @@ func runDoctor(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stdout, "  Demo image                 %s\n", passFail(report.ImageAvailable))
 		fmt.Fprintf(stdout, "  Qwen runtime               %s\n", passFail(report.QwenImageAvailable))
 		fmt.Fprintf(stdout, "  Helper image               %s\n", passFail(report.HelperImageAvailable))
+		fmt.Fprintf(stdout, "  Ollama model               %s\n", passFail(report.OllamaModelAvailable))
+		if report.OllamaError != "" {
+			fmt.Fprintf(stdout, "  %s\n", report.OllamaError)
+		}
 		if report.Ready {
 			fmt.Fprintln(stdout, "\nREADY")
 			if report.EditReady {
 				fmt.Fprintln(stdout, "EDIT READY")
 			} else {
-				fmt.Fprintln(stdout, "EDIT NOT READY — run: mirage setup")
+				fmt.Fprintln(stdout, "EDIT NOT READY — check runtime images and local Ollama")
 			}
 		} else {
 			fmt.Fprintf(stdout, "\nNOT READY\n%s\n", report.Error)
