@@ -109,7 +109,10 @@ func newMirageMCPServer(runner mcpCommandRunner) *mcp.Server {
 		// not a transport failure. Never accept truncated output or a failed
 		// command claiming a successful commit.
 		if commandErr != nil {
-			if !errors.Is(commandErr, errMCPOutputOverflow) && parseErr == nil && summary.Outcome == "REJECTED" {
+			if errors.Is(commandErr, errMCPOutputOverflow) {
+				return nil, cliapi.AgentRunSummary{}, commandErr
+			}
+			if parseErr == nil && summary.Outcome == "REJECTED" {
 				return nil, summary, nil
 			}
 			return nil, cliapi.AgentRunSummary{}, commandToolError("Mirage edit failed", commandErr, stderr)
@@ -179,18 +182,20 @@ func parseDoctorReport(encoded []byte) (doctorReport, error) {
 }
 
 type mcpLimitedBuffer struct {
-	bytes.Buffer
+	buffer    bytes.Buffer
 	truncated bool
 }
 
+func (b *mcpLimitedBuffer) Bytes() []byte { return b.buffer.Bytes() }
+
 func (b *mcpLimitedBuffer) Write(value []byte) (int, error) {
 	original := len(value)
-	remaining := mcpCommandOutputLimit - b.Len()
+	remaining := mcpCommandOutputLimit - b.buffer.Len()
 	if remaining > 0 {
 		if remaining > len(value) {
 			remaining = len(value)
 		}
-		_, _ = b.Buffer.Write(value[:remaining])
+		_, _ = b.buffer.Write(value[:remaining])
 	}
 	if remaining < len(value) {
 		b.truncated = true
