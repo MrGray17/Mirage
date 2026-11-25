@@ -71,10 +71,7 @@ go test -race -count=1 -v ./internal/runtime/docker
 go test -race -count=1 -v ./internal/demo
 
 printf '\n== Lab and portable proof end-to-end acceptance ==\n'
-go test -race -count=1 -v ./cmd/mirage -run '^TestLiveLabAndProofPipeline
-printf '\nPASS: standard checks and opt-in rootless runtime integration tests completed.\n'
-printf 'Note: this script does not make GitHub writes or run a paid live-provider request.\n'
-
+go test -race -count=1 -v ./cmd/mirage -run '^TestLiveLabAndProofPipeline$'
 
 printf '\nPASS: standard checks and opt-in rootless runtime integration tests completed.\n'
 printf 'Note: this script does not make GitHub writes or run a paid live-provider request.\n'
