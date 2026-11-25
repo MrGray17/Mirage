@@ -96,7 +96,7 @@ func Parse(data []byte) (*Policy, error) {
 	}
 	_, err = contracts.New(contracts.Spec{
 		Version: contracts.VersionV1, RunID: "policy-validation", ActorID: "operator",
-		ExpiresAt: time.Unix(1, 0),
+		ExpiresAt:  time.Unix(1, 0),
 		Filesystem: contracts.FilesystemPolicy{Write: contracts.AccessRules{Allow: allow, Deny: deny}},
 	})
 	if err != nil {
