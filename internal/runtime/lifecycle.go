@@ -52,6 +52,7 @@ const (
 	StateCommitReady
 	StateCommitting
 	StateCommitted
+	StateRecoveryRequired
 	StatePublishing
 	StatePublished
 	StatePublicationUncertain
@@ -84,6 +85,8 @@ func (s State) String() string {
 		return "COMMITTING"
 	case StateCommitted:
 		return "COMMITTED"
+	case StateRecoveryRequired:
+		return "RECOVERY_REQUIRED"
 	case StatePublishing:
 		return "PUBLISHING"
 	case StatePublished:
@@ -128,6 +131,7 @@ type Lifecycle struct {
 	decision             reconcile.Decision
 	manifest             *RunManifest
 	commitPlan           *realcommit.Plan
+	commitJournal        *realcommit.JournalStore
 	gitBinding           *gitbinding.Binding
 	gitPlan              *gitplan.Plan
 	gitArtifact          *gitcommit.Artifact
@@ -250,6 +254,11 @@ func NewLifecycleWithClock(sandbox Sandbox, now func() time.Time) (*Lifecycle, e
 // NewBoundLifecycle creates the authority-bearing M4.3 lifecycle. All later
 // security operations derive their inputs exclusively from the manifest.
 func NewBoundLifecycle(manifest *RunManifest) (*Lifecycle, error) {
+	return NewBoundLifecycleWithJournal(manifest, nil)
+}
+
+// NewBoundLifecycleWithJournal binds durable intent recovery to local commits.
+func NewBoundLifecycleWithJournal(manifest *RunManifest, journal *realcommit.JournalStore) (*Lifecycle, error) {
 	if manifest == nil || manifest.identity == "" || manifest.clock == nil || manifest.sandbox == nil {
 		return nil, fmt.Errorf("%w: complete run manifest is required", ErrInvalidRuntime)
 	}
@@ -257,10 +266,11 @@ func NewBoundLifecycle(manifest *RunManifest) (*Lifecycle, error) {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidRuntime, err)
 	}
 	return &Lifecycle{
-		sandbox:  manifest.sandbox,
-		clock:    manifest.clock,
-		state:    StateCreated,
-		manifest: manifest,
+		sandbox:       manifest.sandbox,
+		clock:         manifest.clock,
+		state:         StateCreated,
+		manifest:      manifest,
+		commitJournal: journal,
 	}, nil
 }
 
@@ -646,7 +656,19 @@ func (l *Lifecycle) PublishGitHub(ctx context.Context, engine GitPublicationEngi
 		if authorityErr := l.revalidatePublicationAuthority(callbackContext, at, true); authorityErr != nil {
 			return time.Time{}, authorityErr
 		}
-		return at, nil
+		// Remote observation and artifact revalidation can take time. Do not
+		// authorize dispatch using the instant observed before those checks.
+		dispatch, observeErr := l.clock.Observe()
+		if observeErr != nil {
+			return time.Time{}, fmt.Errorf("observe final publication dispatch time: %w", observeErr)
+		}
+		if l.manifest.contract.ExpiredAt(dispatch) {
+			return time.Time{}, fmt.Errorf("%w: authority expired during publication revalidation", ErrContractExpired)
+		}
+		if err := callbackContext.Err(); err != nil {
+			return time.Time{}, err
+		}
+		return dispatch, nil
 	})
 	if result.Attempted {
 		l.publicationAttempted = true
@@ -940,12 +962,36 @@ func (l *Lifecycle) PreCommit() (*realcommit.Plan, error) {
 // Commit repeats every authority and freshness check immediately before the
 // first real mutation, then applies only the derived single-file plan.
 func (l *Lifecycle) Commit() error {
+	return l.CommitContext(context.Background())
+}
+
+// CommitContext observes cancellation before the real replacement.
+func (l *Lifecycle) CommitContext(ctx context.Context) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err := l.require(StateCommitReady, "commit"); err != nil {
 		return err
 	}
 	l.state = StateCommitting
+	if err := ctx.Err(); err != nil {
+		l.state = StateFailed
+		return err
+	}
+	if l.manifest == nil {
+		l.state = StateFailed
+		return ErrInvalidManifest
+	}
+	// Serialize independent cooperative Mirage commits before re-observing
+	// the complete baseline. Lock the directory inode, not a workspace file.
+	lock, err := acquireWorkspaceCommitLock(l.manifest.workspace.RealWorkspace())
+	if err != nil {
+		l.state = StateFailed
+		if errors.Is(err, ErrWorkspaceCommitBusy) {
+			l.state = StateConflicted
+		}
+		return err
+	}
+	defer lock.Close()
 	fresh, err := l.deriveRealCommitPlan()
 	if err != nil {
 		l.state = commitFailureState(err)
@@ -955,9 +1001,21 @@ func (l *Lifecycle) Commit() error {
 		l.state = StateRejected
 		return fmt.Errorf("%w: precommit plan identity changed", ErrCommitAuthority)
 	}
-	if err := realcommit.Apply(fresh, func() error { return l.finalCommitAuthority(fresh) }); err != nil {
-		l.state = commitFailureState(err)
-		return fmt.Errorf("apply real commit plan: %w", err)
+	finalAuthority := func() error {
+		if err := l.finalCommitAuthority(fresh); err != nil {
+			return err
+		}
+		return ctx.Err()
+	}
+	var applyErr error
+	if l.commitJournal != nil {
+		applyErr = realcommit.ApplyWithJournal(fresh, finalAuthority, l.commitJournal)
+	} else {
+		applyErr = realcommit.Apply(fresh, finalAuthority)
+	}
+	if applyErr != nil {
+		l.state = commitFailureState(applyErr)
+		return fmt.Errorf("apply real commit plan: %w", applyErr)
 	}
 	l.state = StateCommitted
 	return nil
@@ -1079,6 +1137,8 @@ func snapshotEntry(snapshot *tree.Snapshot, resource string) (tree.Entry, bool) 
 
 func commitFailureState(err error) State {
 	switch {
+	case errors.Is(err, realcommit.ErrOutcomeUncertain):
+		return StateRecoveryRequired
 	case errors.Is(err, realcommit.ErrCleanup), errors.Is(err, realcommit.ErrRevalidation):
 		return StateFailed
 	case errors.Is(err, ErrRealStateConflict), errors.Is(err, realcommit.ErrConflict):

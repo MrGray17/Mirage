@@ -63,3 +63,5 @@ On **2026-10-27**, [hosted live acceptance run #33](https://github.com/MrGray17/
 ## Change policy
 
 When a security claim changes, update the relevant row and add or strengthen a test in the same change. A regression is not considered covered merely because an adjacent test passes. When an anchor is renamed or removed, update this matrix. Keep unit/CI results, live-runtime results, live external-effect results, and provider-backed results clearly separate in review notes and competition material.
+
+Cooperative local M4 commit operations targeting the same Linux directory inode take an exclusive nonblocking advisory lock before final baseline revalidation. Contention produces a conflict and no mutation. This does not serialize non-cooperating host writers, nested workspaces, or remote Git operations; unsupported filesystem locking fails closed. A durable journal remains separate.

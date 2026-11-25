@@ -1521,3 +1521,26 @@ func runLifecycleGit(t *testing.T, root string, args ...string) string {
 	}
 	return strings.TrimSpace(string(output))
 }
+
+func TestM53PublicationRechecksTimeAfterRemoteObservation(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		delta time.Duration
+		want  error
+		state State
+	}{
+		{name: "expiry during observation", delta: time.Hour, want: ErrContractExpired, state: StateRejected},
+		{name: "rollback during observation", delta: -time.Second, want: ErrClockRollback, state: StateFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			current := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+			lifecycle, _, client := preparedPublicationLifecycle(t, func() time.Time { return current }, current.Add(time.Hour))
+			client.beforeRef = func() { current = current.Add(tc.delta) }
+			engine := &m53LifecycleEngine{}
+			record, err := lifecycle.PublishGitHub(context.Background(), engine)
+			if !errors.Is(err, tc.want) || record != nil || engine.pushes != 0 || lifecycle.State() != tc.state {
+				t.Fatalf("record=%#v err=%v pushes=%d state=%s", record, err, engine.pushes, lifecycle.State())
+			}
+		})
+	}
+}

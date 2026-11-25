@@ -139,6 +139,9 @@ jobs:
       - name: Test with race detector
         run: go test -race -count=1 -cover ./...
 
+      - name: Fuzz the authorization invariant
+        run: go test ./internal/runtime/reconcile -run '^$' -fuzz '^FuzzVerifyExactAuthorization$' -fuzztime 15s -parallel 2
+
   windows-cli:
     name: Windows CLI frontend
     runs-on: windows-latest

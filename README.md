@@ -70,6 +70,8 @@ its requested edit inside the disposable workspace.
 
 ## Install or upgrade MIRAGE v1
 
+Source installers require a clean Git checkout and compile an exported snapshot of the exact named commit, rather than the mutable working tree. Local ignored or uncommitted files are not build inputs.
+
 MIRAGE installs from a Git checkout and embeds the checkout's complete commit
 identity in the binary. Install only from the commit you intend to run, and
 verify the reported identity afterward.
@@ -327,9 +329,7 @@ MIRAGE v1 intentionally does **not** provide:
   or special-object commits;
 - a general shell-capable Qwen agent or extensible tool framework;
 - complete ACL/xattr/ownership preservation;
-- crash-durable evidence or intent recovery;
-- guaranteed evidence persistence if the process crashes after a successful
-  real commit;
+- full receipt reconstruction after a host crash or an authenticated durable audit log;
 - the M5.4 exact GitHub pull-request effect;
 - a complete signed/hash-chained durable audit log;
 - universal syscall monitoring or syscall-perfect observation.
@@ -356,3 +356,10 @@ commit authority.
 For a full end-to-end explanation of the implementation, security model, lifecycle, evidence, CLI, testing strategy, and current limits, read the [MIRAGE Project Deep Dive](docs/PROJECT_DEEP_DIVE.md). Detailed guarantees, designs, and operator instructions live in [`docs/`](docs/).
 
 The [release acceptance guide](docs/release-acceptance.md) documents the opt-in rootless-Docker integration gate that should pass before cutting a release.
+
+### Local crash recovery
+
+The local commit path records durable metadata-only intent before replacement.
+After interruption, use `mirage recover` to classify pending transactions without
+replaying changes. Ambiguous attribution is reported as uncertain. See
+[the transaction journal design](docs/crash-safe-commit-journal.md).

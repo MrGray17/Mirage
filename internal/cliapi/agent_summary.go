@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/MrGray17/Mirage/internal/limits"
 )
 
 const AgentRunSchemaV2 = "mirage.agent-run/v2"
@@ -57,7 +59,7 @@ func (s AgentRunSummary) Validate() error {
 	if s.Schema != AgentRunSchemaV2 || !runIDPattern.MatchString(s.RunID) || s.Agent != "structured-qwen-agent" {
 		return errors.New("invalid agent run summary: identity")
 	}
-	if s.Attempted != 1 || s.Authorized+s.Denied != s.Attempted || s.Observed < 0 || s.Observed > 1 || !s.ReceiptValid || !s.CleanupComplete {
+	if s.Attempted != 1 || s.Authorized+s.Denied != s.Attempted || s.Observed < 0 || s.Observed > limits.MaxTreeMutations || !s.ReceiptValid || !s.CleanupComplete {
 		return errors.New("invalid agent run summary: evidence accounting")
 	}
 	switch s.Outcome {

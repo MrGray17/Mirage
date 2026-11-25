@@ -37,6 +37,9 @@ const (
 	defaultMaxOutputTokens   = 32768
 	defaultUpstreamTimeout   = 5 * time.Minute
 	defaultReadHeaderTimeout = 5 * time.Second
+	defaultReadTimeout       = 15 * time.Second
+	defaultWriteTimeout      = defaultUpstreamTimeout + 30*time.Second
+	defaultIdleTimeout       = 15 * time.Second
 )
 
 var (
@@ -154,6 +157,7 @@ func newResponses(config Config, provider string, client *http.Client, upstream 
 	}
 	if client == nil {
 		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.Proxy = nil
 		client = &http.Client{
 			Transport: transport,
 			Timeout:   defaultUpstreamTimeout,
@@ -263,6 +267,9 @@ func (b *Broker) Start() error {
 	b.server = &http.Server{
 		Handler:           http.HandlerFunc(b.handle),
 		ReadHeaderTimeout: defaultReadHeaderTimeout,
+		ReadTimeout:       defaultReadTimeout,
+		WriteTimeout:      defaultWriteTimeout,
+		IdleTimeout:       defaultIdleTimeout,
 		MaxHeaderBytes:    16 << 10,
 	}
 	b.started = true
