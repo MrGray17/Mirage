@@ -139,7 +139,6 @@ func (buffer *boundedOllamaBuffer) Write(value []byte) (int, error) {
 	return original, nil
 }
 
-
 // CheckOllamaModel performs a bounded, read-only probe of the same local Ollama
 // installation used by the runtime. It never pulls a model or generates tokens.
 func CheckOllamaModel(ctx context.Context) error {
