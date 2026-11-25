@@ -940,12 +940,22 @@ func (l *Lifecycle) PreCommit() (*realcommit.Plan, error) {
 // Commit repeats every authority and freshness check immediately before the
 // first real mutation, then applies only the derived single-file plan.
 func (l *Lifecycle) Commit() error {
+	return l.CommitContext(context.Background())
+}
+
+// CommitContext observes cancellation before replacement. Cancellation after
+// the commit point cannot roll back a successful mutation.
+func (l *Lifecycle) CommitContext(ctx context.Context) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err := l.require(StateCommitReady, "commit"); err != nil {
 		return err
 	}
 	l.state = StateCommitting
+	if err := ctx.Err(); err != nil {
+		l.state = StateFailed
+		return err
+	}
 	fresh, err := l.deriveRealCommitPlan()
 	if err != nil {
 		l.state = commitFailureState(err)
@@ -955,7 +965,12 @@ func (l *Lifecycle) Commit() error {
 		l.state = StateRejected
 		return fmt.Errorf("%w: precommit plan identity changed", ErrCommitAuthority)
 	}
-	if err := realcommit.Apply(fresh, func() error { return l.finalCommitAuthority(fresh) }); err != nil {
+	if err := realcommit.Apply(fresh, func() error {
+		if err := l.finalCommitAuthority(fresh); err != nil {
+			return err
+		}
+		return ctx.Err()
+	}); err != nil {
 		l.state = commitFailureState(err)
 		return fmt.Errorf("apply real commit plan: %w", err)
 	}

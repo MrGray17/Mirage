@@ -303,6 +303,13 @@ func quickEditAgentTask(file, request string) string {
 }
 
 func runQuickEdit(args []string, stdout, stderr io.Writer) error {
+	return runQuickEditContext(context.Background(), args, stdout, stderr)
+}
+
+func runQuickEditContext(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	plan, err := parseQuickEditPlan(args)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -321,7 +328,7 @@ func runQuickEdit(args []string, stdout, stderr io.Writer) error {
 			return nil
 		}
 	}
-	return runAgent(plan.agentArgs(), stdout, stderr)
+	return runAgentContext(ctx, plan.agentArgs(), stdout, stderr)
 }
 
 func confirmQuickEdit(reader io.Reader, writer io.Writer, plan quickEditPlan) (bool, error) {
@@ -870,7 +877,16 @@ func validateQwenAgentCommand(command []string) (string, error) {
 	return command[3], nil
 }
 
-func runAgent(args []string, stdout, stderr io.Writer) (returnErr error) {
+func runAgent(args []string, stdout, stderr io.Writer) error {
+	return runAgentContext(context.Background(), args, stdout, stderr)
+}
+
+func runAgentContext(parent context.Context, args []string, stdout, stderr io.Writer) (returnErr error) {
+	if err := parent.Err(); err != nil {
+		return err
+	}
+	commandCtx, cancelSignal := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
+	defer cancelSignal()
 	flags := flag.NewFlagSet("run agent", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	agentImage := flags.String("image", strings.TrimSpace(os.Getenv("MIRAGE_AGENT_IMAGE")), "preloaded digest-pinned coding-agent image")
@@ -1101,7 +1117,7 @@ func runAgent(args []string, stdout, stderr io.Writer) (returnErr error) {
 		if _, err := lifecycle.BindGitRepository(); err != nil {
 			return errors.Join(err, closeBroker())
 		}
-		bindCtx, cancelBind := context.WithTimeout(context.Background(), operationTimeout)
+		bindCtx, cancelBind := context.WithTimeout(commandCtx, operationTimeout)
 		_, err = lifecycle.BindGitHubRepository(bindCtx, *githubRepository, githubClient)
 		cancelBind()
 		if err != nil {
@@ -1113,8 +1129,6 @@ func runAgent(args []string, stdout, stderr io.Writer) (returnErr error) {
 	// broker rather than letting a defer erase evidence or a live mount.
 	cleanupDisposable = false
 
-	commandCtx, cancelSignal := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancelSignal()
 	prepareCtx, cancelPrepare := context.WithTimeout(commandCtx, operationTimeout)
 	err = lifecycle.Prepare(prepareCtx)
 	cancelPrepare()
@@ -1134,6 +1148,7 @@ func runAgent(args []string, stdout, stderr io.Writer) (returnErr error) {
 	waitCtx, cancelWait := context.WithTimeout(commandCtx, *timeout)
 	waitErr := launcher.Wait(waitCtx)
 	cancelWait()
+	waitErr = errors.Join(waitErr, commandCtx.Err())
 	if waitErr != nil {
 		fmt.Fprintf(progress, "agent completion unavailable: %v; freezing without commit authority\n", waitErr)
 	}
@@ -1144,6 +1159,7 @@ func runAgent(args []string, stdout, stderr io.Writer) (returnErr error) {
 		return errors.Join(freezeErr, waitErr, cleanupAgentRuntime(lifecycle, disposable, closeBroker))
 	}
 	fmt.Fprintf(progress, "runtime=%s process_tree=stopped frozen_tree=exported\n", lifecycle.State())
+	waitErr = errors.Join(waitErr, commandCtx.Err())
 	var brokerDiagnostic modelbroker.DiagnosticSnapshot
 	if broker != nil {
 		brokerDiagnostic = broker.Diagnostics()
@@ -1247,7 +1263,7 @@ func runAgent(args []string, stdout, stderr io.Writer) (returnErr error) {
 		if err != nil {
 			return errors.Join(err, cleanupAgentRuntime(lifecycle, disposable, closeBroker))
 		}
-		if err := lifecycle.Commit(); err != nil {
+		if err := lifecycle.CommitContext(commandCtx); err != nil {
 			return errors.Join(err, cleanupAgentRuntime(lifecycle, disposable, closeBroker))
 		}
 		// A completed replacement cannot be rolled back by a later evidence

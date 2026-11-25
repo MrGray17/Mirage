@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,6 +30,15 @@ func runEntrypoint(args []string, stdout, stderr io.Writer) error {
 
 func runAutomationEntrypoint(args []string, stdout, stderr io.Writer) error {
 	return runEntrypointWithStdin(args, strings.NewReader(""), stdout, stderr)
+}
+
+// Do not kill a mutating WSL backend on MCP cancellation: closing the
+// frontend process is not proof that the backend stopped or cleaned up.
+func runAutomationEntrypointContext(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return runAutomationEntrypoint(args, stdout, stderr)
 }
 
 func runEntrypointWithStdin(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
@@ -383,9 +393,17 @@ func emitSummary(writer io.Writer, summary cliapi.RunSummary) {
 
 func translateWSLPath(config wsl.Config, direction, path string) (string, error) {
 	args := []string{"-d", config.Distribution, "--exec", "wslpath", "-a", direction, path}
-	command := exec.Command("wsl.exe", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), operationTimeout)
+	defer cancel()
+	command := exec.CommandContext(ctx, "wsl.exe", args...)
 	command.Env = windowsBridgeEnvironment()
-	output, err := command.Output()
+	var outputBuffer boundedBridgeBuffer
+	command.Stdout = &outputBuffer
+	err := command.Run()
+	output := outputBuffer.Bytes()
+	if outputBuffer.truncated {
+		return "", errors.New("WSL path translation exceeded the bridge output limit")
+	}
 	if err != nil {
 		return "", fmt.Errorf("translate output path through WSL: %w", err)
 	}
@@ -411,7 +429,9 @@ func captureWSL(config wsl.Config, backendArgs []string) ([]byte, string, error)
 	if err != nil {
 		return nil, "", err
 	}
-	command := exec.Command("wsl.exe", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), operationTimeout)
+	defer cancel()
+	command := exec.CommandContext(ctx, "wsl.exe", args...)
 	command.Env = windowsBridgeEnvironment()
 	var stdout, stderr boundedBridgeBuffer
 	command.Stdout, command.Stderr = &stdout, &stderr

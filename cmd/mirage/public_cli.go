@@ -92,6 +92,10 @@ type doctorReport struct {
 }
 
 func runDoctor(args []string, stdout, stderr io.Writer) error {
+	return runDoctorContext(context.Background(), args, stdout, stderr)
+}
+
+func runDoctorContext(parent context.Context, args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	jsonOutput := flags.Bool("json", false, "emit the observational report as JSON")
@@ -104,7 +108,7 @@ func runDoctor(args []string, stdout, stderr io.Writer) error {
 	if flags.NArg() != 0 {
 		return errors.New("usage: mirage doctor [--json]")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), operationTimeout)
+	ctx, cancel := context.WithTimeout(parent, operationTimeout)
 	defer cancel()
 	report := doctorReport{
 		OfficialImage: demo.OfficialImage,

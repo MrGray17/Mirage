@@ -74,3 +74,5 @@ Mirage remains the advanced `mirage run agent` path and requires a separately
 built, digest-pinned, acceptance-tested agent image.
 
 A verified policy rejection returns a structured `REJECTED` result over MCP, even though the direct CLI uses a nonzero exit. `COMMITTED_INCOMPLETE` means a real file replacement succeeded but a subsequent operation failed; inspect reality and evidence before retrying. The MCP `approved` field is a caller assertion, not independent proof of human consent. Only connect trusted harnesses that enforce explicit user approval.
+
+Native Linux MCP edits propagate request cancellation to the runtime, preserve independent cleanup deadlines, and check cancellation before the final file replacement. A cancellation after replacement cannot undo it. Windows/WSL still requires a cooperative backend cancellation protocol; the frontend does not kill a mutating backend merely because the MCP request was canceled. Read-only WSL probes have bounded deadlines.
