@@ -126,6 +126,8 @@ type boundedOllamaBuffer struct {
 
 func (buffer *boundedOllamaBuffer) Bytes() []byte { return buffer.buffer.Bytes() }
 
+func (buffer *boundedOllamaBuffer) String() string { return buffer.buffer.String() }
+
 func (buffer *boundedOllamaBuffer) Write(value []byte) (int, error) {
 	original := len(value)
 	remaining := buffer.limit - buffer.buffer.Len()
