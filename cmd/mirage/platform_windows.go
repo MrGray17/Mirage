@@ -163,7 +163,7 @@ func validateBackendInfo(backend buildinfo.Info) error {
 }
 
 func prepareWindowsEditArguments(config wsl.Config, args []string) ([]string, error) {
-	workspaceSet, imageSet, helperSet, outputDirSet := false, false, false, false
+	workspaceSet, imageSet, helperSet, outputDirSet, policySet := false, false, false, false, false
 	rewritten := append([]string(nil), args...)
 	for index := 0; index < len(rewritten); index++ {
 		argument := rewritten[index]
@@ -213,6 +213,27 @@ func prepareWindowsEditArguments(config wsl.Config, args []string) ([]string, er
 				return nil, err
 			}
 			rewritten[index] = "--output-dir=" + translated
+		case argument == "--policy":
+			if policySet || index+1 >= len(rewritten) {
+				return nil, errors.New("--policy must be supplied once with a path")
+			}
+			policySet = true
+			translated, err := translateEditWorkspace(config, rewritten[index+1])
+			if err != nil {
+				return nil, err
+			}
+			rewritten[index+1] = translated
+			index++
+		case strings.HasPrefix(argument, "--policy="):
+			if policySet {
+				return nil, errors.New("--policy must be supplied only once")
+			}
+			policySet = true
+			translated, err := translateEditWorkspace(config, strings.TrimPrefix(argument, "--policy="))
+			if err != nil {
+				return nil, err
+			}
+			rewritten[index] = "--policy=" + translated
 		case argument == "--image" || strings.HasPrefix(argument, "--image="):
 			imageSet = true
 			if argument == "--image" && index+1 < len(rewritten) {

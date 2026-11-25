@@ -113,7 +113,7 @@ func printQuickEditHelp(writer io.Writer) {
 	fmt.Fprintln(writer, "  mirage edit [options] <file> <task>")
 	fmt.Fprintln(writer, "  MIRAGE_QWEN_IMAGE=<registry/image@sha256:digest> configures the Qwen agent image.")
 	fmt.Fprintln(writer, "  The target must be one existing regular file inside --workspace.")
-	fmt.Fprintln(writer, "  Options: --workspace, --image, --helper-image, --timeout, --format, --output-dir, --open, --yes")
+	fmt.Fprintln(writer, "  Options: --workspace, --image, --helper-image, --timeout, --format, --output-dir, --policy, --open, --yes")
 }
 
 type quickEditPlan struct {
@@ -125,6 +125,7 @@ type quickEditPlan struct {
 	Timeout   time.Duration
 	Format    string
 	OutputDir string
+	Policy    string
 	Open      bool
 	Yes       bool
 }
@@ -167,6 +168,7 @@ func parseQuickEditPlan(args []string) (quickEditPlan, error) {
 	timeout := flags.Duration("timeout", 10*time.Minute, "maximum agent execution time")
 	format := flags.String("format", "text", "summary format: text or json")
 	outputDir := flags.String("output-dir", "", "directory for this run's evidence")
+	policyPath := flags.String("policy", "", "trusted operator write policy JSON outside the workspace")
 	open := flags.Bool("open", false, "open the verified Observatory after the run")
 	yes := flags.Bool("yes", false, "skip the interactive confirmation prompt")
 	if err := flags.Parse(args); err != nil {
@@ -216,7 +218,7 @@ func parseQuickEditPlan(args []string) (quickEditPlan, error) {
 	return quickEditPlan{
 		Workspace: workspaceReal, File: file, Task: task, Image: strings.TrimSpace(*image),
 		Helper: strings.TrimSpace(*helper), Timeout: *timeout, Format: *format,
-		OutputDir: strings.TrimSpace(*outputDir), Open: *open, Yes: *yes,
+		OutputDir: strings.TrimSpace(*outputDir), Policy: *policyPath, Open: *open, Yes: *yes,
 	}, nil
 }
 
@@ -285,6 +287,9 @@ func (plan quickEditPlan) agentArgs() []string {
 	}
 	if plan.OutputDir != "" {
 		args = append(args, "--output-dir", plan.OutputDir)
+	}
+	if plan.Policy != "" {
+		args = append(args, "--policy", plan.Policy)
 	}
 	if plan.Open {
 		args = append(args, "--open")
@@ -877,6 +882,7 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 	helperImage := flags.String("helper-image", strings.TrimSpace(os.Getenv("MIRAGE_HELPER_IMAGE")), "preloaded digest-pinned helper image containing /bin/sh, cat, df, tail, and sleep")
 	realWorkspace := flags.String("workspace", ".", "trusted real repository used only as the bounded snapshot source")
 	allowedResource := flags.String("allow", "", "the one existing file the M4.3 boundary may modify (for example /workspace/README.md)")
+	policyPath := flags.String("policy", "", "trusted operator write policy JSON outside the workspace")
 	timeout := flags.Duration("timeout", 10*time.Minute, "maximum coding-agent execution time")
 	quota := flags.Int64("workspace-quota-bytes", 64<<20, "hard writable disposable-workspace capacity")
 	agentMode := flags.String("agent", "generic", "coding-agent evidence mode: generic or qwen")
@@ -960,6 +966,22 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 	}
 	if *publishGitHub && strings.TrimSpace(*githubRepository) == "" {
 		return errors.New("--publish-github requires exact --github-repo owner/repo authority")
+	}
+	writeRules := contracts.AccessRules{Allow: []string{*allowedResource}}
+	authorityDuration := *timeout + 3*operationTimeout
+	if *policyPath != "" {
+		if *publishGitHub {
+			return errors.New("local write policy does not authorize GitHub publication")
+		}
+		operatorPolicy, err := loadWritePolicy(*realWorkspace, *policyPath)
+		if err != nil {
+			return err
+		}
+		writeRules, authorityDuration, err = operatorPolicy.Restrict(*allowedResource, authorityDuration)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(progress, "operator_policy=restricted authority_seconds=%d\n", int(authorityDuration/time.Second))
 	}
 	githubToken := ""
 	if *publishGitHub {
@@ -1071,10 +1093,8 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 		Version:   contractVersion,
 		RunID:     runID,
 		ActorID:   "coding-agent",
-		ExpiresAt: issuedAt.Add(*timeout + 3*operationTimeout),
-		Filesystem: contracts.FilesystemPolicy{Write: contracts.AccessRules{
-			Allow: []string{*allowedResource},
-		}},
+		ExpiresAt: issuedAt.Add(authorityDuration),
+		Filesystem: contracts.FilesystemPolicy{Write: writeRules},
 		GitHub: publicationPolicy,
 	})
 	if err != nil {
