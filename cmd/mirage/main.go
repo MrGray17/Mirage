@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -31,6 +32,7 @@ import (
 	"github.com/MrGray17/Mirage/internal/runtime/gitpublication"
 	"github.com/MrGray17/Mirage/internal/runtime/modelbroker"
 	"github.com/MrGray17/Mirage/internal/runtime/qwenagent"
+	"github.com/MrGray17/Mirage/internal/runtime/realcommit"
 	"github.com/MrGray17/Mirage/internal/runtime/workspace"
 )
 
@@ -96,6 +98,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return runSetup(args[1:], stdout, stderr)
 	case "version":
 		return runVersion(args[1:], stdout, stderr)
+	case "recover":
+		return runRecover(args[1:], stdout, stderr)
 	case "help", "--help", "-h":
 		printHelp(stdout)
 		return nil
@@ -785,7 +789,7 @@ func runHostileFixture(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return errors.Join(err, disposable.Cleanup())
 	}
-	lifecycle, err := hostileruntime.NewBoundLifecycle(manifest)
+	lifecycle, err := newDurableLifecycle(manifest)
 	if err != nil {
 		return errors.Join(err, disposable.Cleanup())
 	}
@@ -1088,7 +1092,7 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return errors.Join(err, closeBroker())
 	}
-	lifecycle, err := hostileruntime.NewBoundLifecycle(manifest)
+	lifecycle, err := newDurableLifecycle(manifest)
 	if err != nil {
 		return errors.Join(err, closeBroker())
 	}
@@ -1340,4 +1344,15 @@ func cleanupRuntime(lifecycle *hostileruntime.Lifecycle, disposable *workspace.D
 		return err
 	}
 	return nil
+}
+
+func newDurableLifecycle(manifest *hostileruntime.RunManifest) (*hostileruntime.Lifecycle, error) {
+	if runtime.GOOS != "linux" {
+		return hostileruntime.NewBoundLifecycle(manifest)
+	}
+	store, err := realcommit.DefaultJournalStore()
+	if err != nil {
+		return nil, fmt.Errorf("prepare durable commit journal: %w", err)
+	}
+	return hostileruntime.NewBoundLifecycleWithJournal(manifest, store)
 }

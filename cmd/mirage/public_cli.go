@@ -42,6 +42,7 @@ Usage:
   mirage mcp
   mirage setup
   mirage doctor [--json]
+  mirage recover
   mirage verify <receipt.json>
   mirage receipt verify <receipt.json>
   mirage observatory --out <report.html> <receipt.json>
