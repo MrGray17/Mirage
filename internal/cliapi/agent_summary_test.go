@@ -22,6 +22,10 @@ func TestAgentRunSummaryAcceptsCommittedAndRejectedEvidence(t *testing.T) {
 	if err := rejected.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	rejected.Observed = 2
+	if err := rejected.Validate(); err != nil {
+		t.Fatalf("multi-mutation rejection: %v", err)
+	}
 	rejected.Committed = 1
 	if err := rejected.Validate(); err == nil {
 		t.Fatal("rejected summary claimed a commit")

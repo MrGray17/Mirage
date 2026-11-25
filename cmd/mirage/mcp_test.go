@@ -287,3 +287,51 @@ func mcpText(t *testing.T, result *mcp.CallToolResult) string {
 	}
 	return text.Text
 }
+
+func TestMCPEditPreservesRejectedSummaryOnNonzeroExit(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		rejected bool
+		overflow bool
+		wantErr  bool
+	}{
+		{name: "verified rejection", rejected: true},
+		{name: "failed commit claim", wantErr: true},
+		{name: "truncated rejection", rejected: true, overflow: true, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			summary := validMCPAgentSummary(dir, filepath.Join(dir, "receipt.json"), filepath.Join(dir, "receipt.html"))
+			if tc.rejected {
+				summary.Outcome, summary.Verification = "REJECTED", "REJECTED"
+				summary.Authorized, summary.Denied, summary.Observed, summary.Committed = 0, 1, 2, 0
+			}
+			session := connectMCPTestClient(t, newMirageMCPServer(func(_ []string, stdout, stderr io.Writer) error {
+				if err := json.NewEncoder(stdout).Encode(summary); err != nil {
+					return err
+				}
+				if tc.overflow {
+					_, _ = io.WriteString(stderr, strings.Repeat("x", mcpCommandOutputLimit+1))
+				}
+				return errors.New("nonzero edit exit")
+			}))
+			result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+				Name:      "mirage_edit_file",
+				Arguments: map[string]any{"file": "README.md", "task": "Change it", "approved": true},
+			})
+			if err != nil || result.IsError != tc.wantErr {
+				t.Fatalf("result=%#v err=%v", result, err)
+			}
+			if !tc.wantErr {
+				encoded, err := json.Marshal(result.StructuredContent)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := cliapi.ParseAgentRunSummary(encoded)
+				if err != nil || got != summary {
+					t.Fatalf("summary=%#v err=%v", got, err)
+				}
+			}
+		})
+	}
+}

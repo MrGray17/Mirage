@@ -17,6 +17,8 @@ import (
 
 const mcpCommandOutputLimit = 1 << 20
 
+var errMCPOutputOverflow = errors.New("Mirage command output exceeded the 1 MiB MCP safety limit")
+
 type mcpCommandRunner func(args []string, stdout, stderr io.Writer) error
 
 type mcpDoctorInput struct{}
@@ -101,13 +103,19 @@ func newMirageMCPServer(runner mcpCommandRunner) *mcp.Server {
 			args = append(args, "--output-dir", input.OutputDir)
 		}
 		args = append(args, input.File, input.Task)
-		stdout, stderr, err := executeMCPCommand(runner, args)
-		if err != nil {
-			return nil, cliapi.AgentRunSummary{}, commandToolError("Mirage edit failed", err, stderr)
+		stdout, stderr, commandErr := executeMCPCommand(runner, args)
+		summary, parseErr := cliapi.ParseAgentRunSummary(stdout)
+		// A verified policy rejection is an intentional nonzero CLI exit,
+		// not a transport failure. Never accept truncated output or a failed
+		// command claiming a successful commit.
+		if commandErr != nil {
+			if !errors.Is(commandErr, errMCPOutputOverflow) && parseErr == nil && summary.Outcome == "REJECTED" {
+				return nil, summary, nil
+			}
+			return nil, cliapi.AgentRunSummary{}, commandToolError("Mirage edit failed", commandErr, stderr)
 		}
-		summary, err := cliapi.ParseAgentRunSummary(stdout)
-		if err != nil {
-			return nil, cliapi.AgentRunSummary{}, fmt.Errorf("Mirage returned an invalid agent summary: %w", err)
+		if parseErr != nil {
+			return nil, cliapi.AgentRunSummary{}, fmt.Errorf("Mirage returned an invalid agent summary: %w", parseErr)
 		}
 		return nil, summary, nil
 	})
@@ -135,7 +143,7 @@ func executeMCPCommand(runner mcpCommandRunner, args []string) ([]byte, []byte, 
 	var stdout, stderr mcpLimitedBuffer
 	err := runner(args, &stdout, &stderr)
 	if stdout.truncated || stderr.truncated {
-		overflow := errors.New("Mirage command output exceeded the 1 MiB MCP safety limit")
+		overflow := errMCPOutputOverflow
 		if err == nil {
 			err = overflow
 		} else {

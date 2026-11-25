@@ -870,7 +870,7 @@ func validateQwenAgentCommand(command []string) (string, error) {
 	return command[3], nil
 }
 
-func runAgent(args []string, stdout, stderr io.Writer) error {
+func runAgent(args []string, stdout, stderr io.Writer) (returnErr error) {
 	flags := flag.NewFlagSet("run agent", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	agentImage := flags.String("image", strings.TrimSpace(os.Getenv("MIRAGE_AGENT_IMAGE")), "preloaded digest-pinned coding-agent image")
@@ -1250,6 +1250,11 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 		if err := lifecycle.Commit(); err != nil {
 			return errors.Join(err, cleanupAgentRuntime(lifecycle, disposable, closeBroker))
 		}
+		// A completed replacement cannot be rolled back by a later evidence
+		// or cleanup error. Preserve the outcome in every subsequent error.
+		defer func() {
+			returnErr = committedRunError(runID, returnErr)
+		}()
 		fmt.Fprintf(progress, "runtime=%s committed_resource=%s\n", lifecycle.State(), *allowedResource)
 		if *agentMode == "qwen" {
 			if err := verifyCommittedReality(disposable.RealWorkspace(), plan); err != nil {
@@ -1280,6 +1285,13 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 	}
 	cleanupErr := cleanupAgentRuntime(lifecycle, disposable, closeBroker)
 	return cleanupErr
+}
+
+func committedRunError(runID string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("COMMITTED_INCOMPLETE run=%s: real file replacement succeeded; do not retry automatically: %w", runID, err)
 }
 
 func resolveAgentDiagnostic(agent diagnostics.Record, broker modelbroker.DiagnosticSnapshot) diagnostics.Record {

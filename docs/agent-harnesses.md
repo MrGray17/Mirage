@@ -72,3 +72,5 @@ write tools. To obtain Mirage guarantees, configure or instruct the harness to
 use `mirage_edit_file` for the edit. Running a complete third-party CLI inside
 Mirage remains the advanced `mirage run agent` path and requires a separately
 built, digest-pinned, acceptance-tested agent image.
+
+A verified policy rejection returns a structured `REJECTED` result over MCP, even though the direct CLI uses a nonzero exit. `COMMITTED_INCOMPLETE` means a real file replacement succeeded but a subsequent operation failed; inspect reality and evidence before retrying. The MCP `approved` field is a caller assertion, not independent proof of human consent. Only connect trusted harnesses that enforce explicit user approval.
