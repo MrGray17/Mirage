@@ -119,14 +119,16 @@ func roundTripWindowsOllama(request *http.Request) (*http.Response, error) {
 }
 
 type boundedOllamaBuffer struct {
-	bytes.Buffer
+	buffer   bytes.Buffer
 	limit    int
 	overflow bool
 }
 
+func (buffer *boundedOllamaBuffer) Bytes() []byte { return buffer.buffer.Bytes() }
+
 func (buffer *boundedOllamaBuffer) Write(value []byte) (int, error) {
 	original := len(value)
-	remaining := buffer.limit - buffer.Len()
+	remaining := buffer.limit - buffer.buffer.Len()
 	if remaining <= 0 {
 		buffer.overflow = true
 		return original, nil
@@ -135,7 +137,7 @@ func (buffer *boundedOllamaBuffer) Write(value []byte) (int, error) {
 		value = value[:remaining]
 		buffer.overflow = true
 	}
-	_, _ = buffer.Buffer.Write(value)
+	_, _ = buffer.buffer.Write(value)
 	return original, nil
 }
 
