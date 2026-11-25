@@ -646,7 +646,19 @@ func (l *Lifecycle) PublishGitHub(ctx context.Context, engine GitPublicationEngi
 		if authorityErr := l.revalidatePublicationAuthority(callbackContext, at, true); authorityErr != nil {
 			return time.Time{}, authorityErr
 		}
-		return at, nil
+		// Remote observation and artifact revalidation can take time. Do not
+		// authorize dispatch using the instant observed before those checks.
+		dispatch, observeErr := l.clock.Observe()
+		if observeErr != nil {
+			return time.Time{}, fmt.Errorf("observe final publication dispatch time: %w", observeErr)
+		}
+		if l.manifest.contract.ExpiredAt(dispatch) {
+			return time.Time{}, fmt.Errorf("%w: authority expired during publication revalidation", ErrContractExpired)
+		}
+		if err := callbackContext.Err(); err != nil {
+			return time.Time{}, err
+		}
+		return dispatch, nil
 	})
 	if result.Attempted {
 		l.publicationAttempted = true
