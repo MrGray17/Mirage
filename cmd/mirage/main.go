@@ -1090,12 +1090,12 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 		publicationPolicy = contracts.GitHubPublicationPolicy{RepositoryFullName: *githubRepository, TargetRef: gitrefs.RunTarget(runID), Operation: contracts.GitHubCreateBranch}
 	}
 	contract, err := contracts.New(contracts.Spec{
-		Version:   contractVersion,
-		RunID:     runID,
-		ActorID:   "coding-agent",
-		ExpiresAt: issuedAt.Add(authorityDuration),
+		Version:    contractVersion,
+		RunID:      runID,
+		ActorID:    "coding-agent",
+		ExpiresAt:  issuedAt.Add(authorityDuration),
 		Filesystem: contracts.FilesystemPolicy{Write: writeRules},
-		GitHub: publicationPolicy,
+		GitHub:     publicationPolicy,
 	})
 	if err != nil {
 		return errors.Join(err, closeBroker())
