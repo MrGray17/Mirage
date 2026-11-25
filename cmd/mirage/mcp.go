@@ -190,18 +190,20 @@ func parseDoctorReport(encoded []byte) (doctorReport, error) {
 }
 
 type mcpLimitedBuffer struct {
-	bytes.Buffer
+	buffer bytes.Buffer
 	truncated bool
 }
 
+func (b *mcpLimitedBuffer) Bytes() []byte { return b.buffer.Bytes() }
+
 func (b *mcpLimitedBuffer) Write(value []byte) (int, error) {
 	original := len(value)
-	remaining := mcpCommandOutputLimit - b.Len()
+	remaining := mcpCommandOutputLimit - b.buffer.Len()
 	if remaining > 0 {
 		if remaining > len(value) {
 			remaining = len(value)
 		}
-		_, _ = b.Buffer.Write(value[:remaining])
+		_, _ = b.buffer.Write(value[:remaining])
 	}
 	if remaining < len(value) {
 		b.truncated = true
