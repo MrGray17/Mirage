@@ -117,7 +117,10 @@ func newMirageMCPServerWithContext(runner mcpContextCommandRunner) *mcp.Server {
 		// not a transport failure. Never accept truncated output or a failed
 		// command claiming a successful commit.
 		if commandErr != nil {
-			if !errors.Is(commandErr, errMCPOutputOverflow) && parseErr == nil && summary.Outcome == "REJECTED" {
+			if errors.Is(commandErr, errMCPOutputOverflow) {
+				return nil, cliapi.AgentRunSummary{}, commandErr
+			}
+			if parseErr == nil && summary.Outcome == "REJECTED" {
 				return nil, summary, nil
 			}
 			return nil, cliapi.AgentRunSummary{}, commandToolError("Mirage edit failed", commandErr, stderr)
@@ -190,7 +193,7 @@ func parseDoctorReport(encoded []byte) (doctorReport, error) {
 }
 
 type mcpLimitedBuffer struct {
-	buffer bytes.Buffer
+	buffer    bytes.Buffer
 	truncated bool
 }
 
