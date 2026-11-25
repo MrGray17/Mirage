@@ -441,7 +441,8 @@ func formatDuration(value time.Duration) string {
 func buildPageTemplate() string {
 	digest := sha256.Sum256([]byte(interactionScript))
 	scriptHash := "sha256-" + base64.StdEncoding.EncodeToString(digest[:])
-	withPolicy := strings.Replace(pageTemplateSource, "__MIRAGE_SCRIPT_HASH__", scriptHash, 1)
+	withDesign := strings.Replace(pageTemplateSource, "__MIRAGE_DESIGN_CSS__", DesignCSS(), 1)
+	withPolicy := strings.Replace(withDesign, "__MIRAGE_SCRIPT_HASH__", scriptHash, 1)
 	return strings.Replace(withPolicy, "__MIRAGE_INTERACTION_SCRIPT__", interactionScript, 1)
 }
 
@@ -453,25 +454,7 @@ const pageTemplateSource = `<!doctype html>
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src '__MIRAGE_SCRIPT_HASH__'; connect-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
   <title>MIRAGE Observatory &mdash; {{.Proof.RunID}}</title>
   <style>
-    :root {
-      color-scheme: light;
-      --canvas: #f7f6f2;
-      --surface: #ffffff;
-      --ink: #171716;
-      --muted: #6b6964;
-      --quiet: #827f78;
-      --border: #e5e1d8;
-      --border-strong: #dedad2;
-      --rail: #b8b3aa;
-      --orange: #f45b20;
-      --orange-soft: #fff3ec;
-      --orange-muted: #b9562d;
-      --green: #18794e;
-      --green-soft: #edf7f1;
-      --red: #c83a2e;
-      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
-      --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-    }
+    __MIRAGE_DESIGN_CSS__
     * { box-sizing: border-box; }
     html { background: var(--canvas); }
     body {
@@ -540,8 +523,8 @@ const pageTemplateSource = `<!doctype html>
       transition: background-color 120ms ease, opacity 120ms ease;
     }
     .history-event:focus-visible { outline: 2px solid var(--orange); outline-offset: -2px; }
-    .interaction-ready .history-event:not(.is-path) { opacity: .42; }
-    .history-event.is-selected { background: #efede7; }
+    .interaction-ready .history-event:not(.is-path) { opacity: 1; }
+    .history-event.is-selected { background: var(--hover); }
     .effect-row {
       position: relative;
       min-width: 0;
@@ -584,7 +567,7 @@ const pageTemplateSource = `<!doctype html>
     }
     .history-stage .history-rail { grid-row: 1; min-height: 31px; }
     .history-stage .history-rail::before { top: 0; bottom: 0; }
-    .history-stage .history-node { top: 10px; left: 8px; width: 8px; height: 8px; border: 1.5px solid #756f66; border-radius: 50%; background: var(--canvas); }
+    .history-stage .history-node { top: 10px; left: 8px; width: 8px; height: 8px; border: 1.5px solid var(--rail); border-radius: 50%; background: var(--canvas); }
     .history-stage.verified .history-node,
     .history-stage.committed .history-node { border-color: var(--green); background: var(--green-soft); }
     .history-stage.committed .history-node { background: var(--green); }
@@ -603,7 +586,7 @@ const pageTemplateSource = `<!doctype html>
     .history-boundary .history-rail { grid-row: 1; min-height: 29px; }
     .history-boundary .history-rail::before { top: 0; bottom: 0; background: linear-gradient(to bottom, var(--rail) 0 50%, var(--green) 50% 100%); }
     .history-boundary-line { grid-column: 1 / -1; position: relative; margin-left: 11px; border-top: 1px solid var(--border-strong); text-align: center; }
-    .history-boundary-line span { position: relative; top: -8px; padding: 0 9px; background: var(--canvas); color: var(--muted); font-size: 10px; font-weight: 720; letter-spacing: .1em; text-transform: uppercase; }
+    .history-boundary-line span { position: relative; top: -8px; padding: 0 9px; background: var(--surface); color: var(--muted); font-size: 10px; font-weight: 720; letter-spacing: .1em; text-transform: uppercase; }
     .inspector {
       min-width: 0;
       padding: 18px 20px 18px 22px;
@@ -702,28 +685,92 @@ const pageTemplateSource = `<!doctype html>
       .proof-grid { grid-template-columns: 1fr; gap: 2px; }
       .proof-grid dd { margin-bottom: 7px; }
     }
+
+    .shell { width: min(1440px, 100%); padding: 0 32px 32px; }
+    .topbar { min-height: 68px; }
+    .brand { align-items: center; gap: 10px; }
+    .brand h1 { color: var(--ink); font-size: 15px; letter-spacing: .11em; }
+    .brand .brand-mark { color: var(--ink); font-size: 15px; }
+    .brand-separator { color: var(--quiet); }
+    .terminal-state { border: 1px solid var(--border); background: var(--green-soft); padding: 5px 10px; border-radius: 6px; }
+    .terminal-state[data-outcome="rejected"] { color: var(--red); background: var(--red-soft); }
+    .terminal-state[data-outcome="rejected"]::before { border-color: var(--red); background: var(--red); }
+    .task-strip { padding: 26px 0 20px; }
+    .task-strip .report-tag { margin: 12px 0 4px; }
+    .task-strip h2 { overflow-wrap: anywhere; font-size: clamp(22px, 2.4vw, 32px); }
+    .summary { font-size: 12px; }
+    .metric-blocked { color: var(--red); }
+    .metric-committed { color: var(--green); }
+    .workbench { grid-template-columns: minmax(0, 1.6fr) minmax(340px, 1fr); gap: 16px; padding: 20px 0; align-items: start; }
+    .effect-trace { min-width: 0; padding: 18px 16px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+    .section-heading { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+    .section-heading h2 { font-size: 15px; letter-spacing: -.01em; text-transform: none; }
+    .section-heading p { color: var(--muted); margin: 4px 0 0; font-size: 12px; }
+    .history-event:hover { background: var(--hover); }
+    .history-event.is-selected { box-shadow: inset 2px 0 var(--orange); border-radius: 5px; }
+    .effect-row { min-height: 56px; border-bottom: 1px solid var(--border); }
+    .history-stage { min-height: 38px; }
+    .history-stage .history-rail { min-height: 38px; }
+    .inspector { padding: 18px; border: 1px solid var(--border); border-radius: 10px; }
+    .inspector-chrome { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding-bottom: 13px; margin-bottom: 18px; border-bottom: 1px solid var(--border); }
+    .inspector-heading h2 { font-size: 22px; overflow-wrap: anywhere; }
+    .panel-state { width: fit-content; padding: 4px 8px; background: var(--orange-soft); border-radius: 4px; }
+    .panel-state.blocked { background: var(--red-soft); }
+    .panel-state.verified, .panel-state.committed { background: var(--green-soft); }
+    .panel-nav { border-radius: 6px; }
+    .proof-footer { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 0 20px; }
+    .proof-caveat { padding-bottom: 13px; }
+    @media (max-width: 850px) {
+      .shell { padding-inline: 20px; }
+      .workbench { grid-template-columns: 1fr; }
+      .inspector { border: 1px solid var(--border); }
+    }
+    @media (max-width: 540px) {
+      .shell { padding: 0 12px 20px; }
+      .topbar { align-items: center; gap: 8px; }
+      .brand { display: flex; flex-wrap: wrap; gap: 5px; }
+      .brand .brand-mark { display: none; }
+      .brand h1 { font-size: 13px; }
+      .brand span { font-size: 12px; }
+      .run-state { gap: 5px; }
+      .terminal-state { padding: 4px 6px; font-size: 10px; }
+      .task-strip { padding-top: 18px; }
+      .effect-trace { padding: 12px 8px; }
+      .section-heading .report-tag { display: none; }
+      .effect-row { grid-template-columns: 24px 22px 55px minmax(0, 1fr); column-gap: 5px; }
+      .effect-operation, .effect-resource { font-size: 11px; }
+      .effect-state { font-size: 10px; }
+      .history-stage { grid-template-columns: 24px 22px 70px minmax(0, 1fr); column-gap: 5px; }
+      .proof-footer { padding: 0 12px; }
+    }
   </style>
 </head>
 <body>
   <div class="shell">
     <header class="topbar">
-      <div class="brand"><h1>MIRAGE</h1><span>Observatory</span></div>
+      <div class="brand"><span class="brand-mark" aria-hidden="true">M</span><h1>MIRAGE</h1><span class="brand-separator" aria-hidden="true">/</span><span>Observatory</span></div>
       <div class="run-state">
         <div class="run-id">run <code title="{{.Proof.RunID}}">{{.RunShort}}</code></div>
-        <div class="terminal-state">{{.Status}}</div>
+        <div class="terminal-state" data-outcome="{{if .Rejected}}rejected{{else}}committed{{end}}">{{.Status}}</div>
       </div>
     </header>
 
     <main>
       <section class="task-strip" aria-labelledby="task-heading">
-        <p class="eyebrow">Task</p>
+        <p class="eyebrow">Execution / Verified receipt</p>
+        <p class="report-tag">Task</p>
         <h2 id="task-heading">{{.Task}}</h2>
         <p class="summary"><strong>{{.Attempted}}</strong> effects &middot; <strong class="blocked">{{.Blocked}}</strong> blocked &middot; <strong class="committed">{{.Committed}}</strong> committed</p>
+        <div class="metric-grid" aria-label="Effect accounting">
+          <div class="metric-card"><span class="metric-label">Attempted effects</span><strong class="metric-value">{{.Attempted}}</strong><span class="metric-note">Receipt-reported attempts</span></div>
+          <div class="metric-card"><span class="metric-label">Blocked effects</span><strong class="metric-value metric-blocked">{{.Blocked}}</strong><span class="metric-note">Denied by policy or isolation</span></div>
+          <div class="metric-card"><span class="metric-label">Committed mutations</span><strong class="metric-value metric-committed">{{.Committed}}</strong><span class="metric-note">Changes recorded in reality</span></div>
+        </div>
       </section>
 
       <div class="workbench">
         <section class="effect-trace" aria-labelledby="effects-heading">
-          <div class="section-heading"><h2 id="effects-heading">Execution history</h2></div>
+          <div class="section-heading"><div><h2 id="effects-heading">Execution history</h2><p>Select a step to inspect its evidence.</p></div><span class="report-tag">Recorded sequence</span></div>
           <div class="history-controls" role="tablist" aria-label="Execution evidence" aria-orientation="vertical">
             <ol class="effect-list" role="presentation">
               {{range .Effects}}
@@ -784,6 +831,7 @@ const pageTemplateSource = `<!doctype html>
         </section>
 
         <aside class="inspector" aria-label="Evidence inspector" aria-live="polite">
+          <div class="inspector-chrome"><span class="report-tag">Evidence inspector</span><span class="report-tag">Read-only</span></div>
           {{range .Panels}}
           <section id="panel-{{.ID}}" class="inspector-panel" data-inspector-panel role="tabpanel" aria-labelledby="{{.HistoryID}}"{{if not .Selected}} hidden{{end}}>
             <header class="inspector-heading">
@@ -850,6 +898,7 @@ const pageTemplateSource = `<!doctype html>
         <p class="invariant">CommittedEffects &sube; AuthorizedEffects</p>
         <div class="receipt-status">Receipt integrity <strong>VALID</strong></div>
       </div>
+      <p class="proof-note proof-caveat">Receipt integrity is not a digital signature or independent attestation against a compromised host.</p>
       <details>
         <summary>Integrity details</summary>
         <p class="proof-note">SHA-256 hashes help detect changes to this evidence; they are not a digital signature or independent attestation against a compromised host.</p>

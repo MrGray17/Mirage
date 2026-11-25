@@ -15,6 +15,7 @@ import (
 
 	"github.com/MrGray17/Mirage/internal/cliapi"
 	"github.com/MrGray17/Mirage/internal/demo"
+	"github.com/MrGray17/Mirage/internal/observatory"
 	"github.com/MrGray17/Mirage/internal/receipt"
 )
 
@@ -183,15 +184,27 @@ func persistLabReport(dir string, report labReport, stdout io.Writer) error {
 var labTemplate = template.Must(template.New("lab").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
-<title>Mirage · Attack Lab</title><style>
-:root{color-scheme:dark;--muted:#9aa9bd;--line:#28364b;--ink:#e8edf5;--aqua:#72e4d5}
-*{box-sizing:border-box}body{margin:0;background:#080f1c;color:var(--ink);font:15px system-ui,sans-serif}
-main{max-width:1100px;margin:auto;padding:clamp(24px,6vw,64px)}header{border-bottom:1px solid var(--line);padding-bottom:24px}
-.eyebrow{color:var(--aqua);font:12px monospace;letter-spacing:.2em}h1{font-size:clamp(30px,5vw,52px);margin:10px 0}
-p,small{color:var(--muted);line-height:1.6}.metric{font-size:42px;font-weight:650;color:var(--aqua)}.card{border:1px solid var(--line);border-radius:14px;padding:24px;margin:24px 0;background:#101b2c}
-table{width:100%;border-collapse:collapse;text-align:left}th,td{padding:14px 10px;border-bottom:1px solid var(--line)}th{color:var(--muted);font-size:12px;text-transform:uppercase}a{color:var(--aqua)}.fail{color:#fda4af}.pass{color:var(--aqua)}code{overflow-wrap:anywhere} .scroll{overflow-x:auto}
-</style></head><body><main><header><div class="eyebrow">MIRAGE / EXPERIMENTAL EVALUATION</div><h1>Attack Lab</h1><p>Observed outcomes from official isolated fixtures. No simulated metrics.</p></header>
-<section class="card"><div class="metric">{{.Passed}} / {{.Planned}}</div><p>Trials passed · {{len .Trials}} executed · {{.Platform}}</p><small>Official image: <code>{{.Image}}</code><br>Started: {{.StartedAt}}</small></section>
-<section class="card scroll"><table><thead><tr><th>Scenario</th><th>Result</th><th>Elapsed ms</th><th>Denied</th><th>Committed</th><th>Evidence</th></tr></thead><tbody>
-{{range .Trials}}<tr><td>{{.Scenario}}</td>{{if .Failure}}<td class="fail">FAILED / UNCERTAIN</td><td>{{.DurationMS}}</td><td>—</td><td>—</td><td>{{.Failure}}</td>{{else}}<td class="pass">PASSED</td><td>{{.DurationMS}}</td><td>{{.Summary.Denied}}</td><td>{{.Summary.Committed}}</td><td><a href="{{.ReportLink}}">Inspect run</a></td>{{end}}</tr>{{end}}
-</tbody></table></section><p>Elapsed time covers the full demo invocation, including setup, verified mutation, cleanup and evidence persistence. A passed malicious trial includes one authorized README commit and three denied fixture probes. These are bounded fixture results, not universal agent-security measurements. Failed trials stop the campaign and are never counted as passes.</p></main></body></html>`))
+<title>Mirage · Attack Lab</title><style>` + observatory.DesignCSS() + `
+main{max-width:1320px;margin:auto;padding:0 32px 36px}header{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:68px;border-bottom:1px solid var(--border)}
+.brand{display:flex;align-items:center;gap:10px}.brand strong{font-size:15px;letter-spacing:.11em}.brand span{color:var(--muted)}
+.hero{padding:24px 0 6px}.eyebrow{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.09em;margin:0 0 5px}h1{font-size:clamp(24px,4vw,34px);margin:0;letter-spacing:-.035em;font-weight:650}h2{font-size:15px;margin:0;font-weight:650}
+p,small{color:var(--muted);line-height:1.6}.card{border:1px solid var(--border);border-radius:10px;padding:20px;margin:16px 0;background:var(--surface)}.card-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+table{width:100%;border-collapse:collapse;text-align:left;font-size:13px}caption{text-align:left;color:var(--muted);padding-bottom:10px;font-size:12px}
+th,td{padding:13px 10px;border-bottom:1px solid var(--border);vertical-align:top}th{color:var(--muted);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em}tbody tr:last-child td{border-bottom:0}tbody tr:hover{background:var(--hover)}
+.fail{color:var(--red)}.pass{color:var(--green)}.result{white-space:nowrap;font-size:12px;font-weight:650}.numeric{font-variant-numeric:tabular-nums;text-align:right}.scroll{overflow-x:auto}code{overflow-wrap:anywhere}.metadata{display:grid;grid-template-columns:110px minmax(0,1fr);gap:8px 12px;font-size:12px;margin:0}.metadata dt{color:var(--muted)}.metadata dd{margin:0;overflow-wrap:anywhere}.note{font-size:12px;margin:0}.failure-detail{max-width:360px;overflow-wrap:anywhere}.metric-passed{color:var(--green)}
+@media(max-width:600px){main{padding:0 12px 24px}header{gap:6px}.brand{gap:6px}.brand strong{font-size:13px}.brand .brand-mark{display:none}.report-tag{font-size:10px}.card{padding:12px}.metadata{grid-template-columns:1fr;gap:4px}.metadata dd{margin-bottom:8px}}
+</style></head><body><main>
+<header><div class="brand"><span class="brand-mark" aria-hidden="true">M</span><strong>MIRAGE</strong><span>/ Attack Lab</span></div><span class="report-tag">Offline evaluation</span></header>
+<section class="hero"><p class="eyebrow">Experiments / Official fixtures</p><h1>Attack Lab</h1><p>Measured outcomes from real isolated workloads. No simulated metrics.</p></section>
+<div class="metric-grid" aria-label="Trial accounting">
+<div class="metric-card"><span class="metric-label">Passed trials</span><strong class="metric-value metric-passed">{{.Passed}}</strong><span class="metric-note">Validated receipts</span></div>
+<div class="metric-card"><span class="metric-label">Executed trials</span><strong class="metric-value">{{len .Trials}}</strong><span class="metric-note">Includes failed trials</span></div>
+<div class="metric-card"><span class="metric-label">Planned trials</span><strong class="metric-value">{{.Planned}}</strong><span class="metric-note">Requested campaign</span></div>
+</div>
+<section class="card"><div class="card-heading"><h2>Experiment results</h2><span class="report-tag">{{if and (gt .Planned 0) (eq .Passed .Planned)}}Complete{{else}}Incomplete / review required{{end}}</span></div>
+<div class="scroll"><table><caption>Each successful trial links to its individual verified receipt report.</caption><thead><tr><th scope="col">Scenario</th><th scope="col">Result</th><th scope="col" class="numeric">Elapsed ms</th><th scope="col" class="numeric">Denied</th><th scope="col" class="numeric">Committed</th><th scope="col">Evidence</th></tr></thead><tbody>
+{{range .Trials}}<tr><td>{{.Scenario}}</td>{{if .Failure}}<td class="fail result"><span class="status-dot"></span>FAILED / UNCERTAIN</td><td class="numeric">{{.DurationMS}}</td><td class="numeric">—</td><td class="numeric">—</td><td class="failure-detail">{{.Failure}}</td>{{else}}<td class="pass result"><span class="status-dot"></span>PASSED</td><td class="numeric">{{.DurationMS}}</td><td class="numeric">{{.Summary.Denied}}</td><td class="numeric">{{.Summary.Committed}}</td><td><a href="{{.ReportLink}}">Inspect run &rarr;</a></td>{{end}}</tr>{{end}}
+</tbody></table></div></section>
+<section class="card"><div class="card-heading"><h2>Execution environment</h2><span class="report-tag">Reproducibility</span></div><dl class="metadata"><dt>Platform</dt><dd><code>{{.Platform}}</code></dd><dt>Fixture image</dt><dd><code>{{.Image}}</code></dd><dt>Started at</dt><dd><time>{{.StartedAt}}</time></dd><dt>Raw results</dt><dd><a href="evaluation.json">evaluation.json</a></dd></dl></section>
+<section class="card"><div class="card-heading"><h2>Method &amp; limitations</h2></div><p class="note">Elapsed time covers the full demo invocation, including setup, verified mutation, cleanup and evidence persistence. A passed malicious trial includes one authorized README commit and three denied fixture probes. These are bounded fixture results, not universal agent-security measurements. Failed trials stop the campaign and are never counted as passes.</p></section>
+</main></body></html>`))
