@@ -70,6 +70,8 @@ its requested edit inside the disposable workspace.
 
 ## Install or upgrade MIRAGE v1
 
+Source installers require a clean Git checkout and compile an exported snapshot of the exact named commit, rather than the mutable working tree. Local ignored or uncommitted files are not build inputs.
+
 MIRAGE installs from a Git checkout and embeds the checkout's complete commit
 identity in the binary. Install only from the commit you intend to run, and
 verify the reported identity afterward.
