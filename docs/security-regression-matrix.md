@@ -57,8 +57,8 @@ On **2026-10-27**, [hosted live acceptance run #33](https://github.com/MrGray17/
 - **No syscall-perfect audit.** Tool and broker events are not universal syscall telemetry; the security decision relies on trusted final-state reconciliation after verified stop/freeze.
 - **Single-file scope only.** No general multi-file atomic commit, file creation/deletion, permission-mode change, symlink/hard-link commit, or full preservation of ACLs/xattrs/ownership is promised.
 - **Residual host races remain.** In particular, the final revalidation-to-replacement window against a non-cooperating host process is documented; the current design does not claim host-level transaction isolation.
-- **Evidence is not signed attestation.** Hashes detect many accidental/structural modifications but do not prove truth against a compromised host.
-- **Current main does not include a crash-durable commit journal.** Do not describe the local replacement path as crash-recoverable or as a general transaction log.
+- **Optional signatures are endorsements, not automatic execution attestation.** Hashes and detached proofs do not prove truth against a compromised signer host.
+- **The commit journal is deliberately narrow.** It classifies interrupted single-file commits without replay; do not describe it as a general transaction log or full host recovery system.
 
 ## Change policy
 

@@ -696,7 +696,7 @@ The deterministic public demo pins its fixture image rather than accepting arbit
 
 The build embeds a version and full source commit identity. Source installers label builds 1.0.0-dev by default. The build identity also includes platform and bridge-protocol version, which the Windows frontend uses to check its pair with the WSL backend.
 
-The published v1.0.0 release predates later installer and security hardening and has no downloadable binary assets. The current source build should not be described as a new stable release merely because it is installable from main.
+The published v1.0.0 release predates later installer and security hardening and has no downloadable binary assets. The repository now has a tag-driven release workflow for checksummed Linux/Windows binaries, per-target CycloneDX SBOMs, and GitHub artifact attestations. A source build from main is still a development build, not a stable release.
 
 ### 15.2 Native Linux
 
@@ -844,9 +844,9 @@ The implementation does not claim complete preservation or transactional handlin
 
 A narrow final revalidation-to-replacement race against a non-cooperating host process remains documented. A broader guarantee would require a stronger host-level coordination/locking model and additional security work.
 
-### 18.4 No crash-durable transaction journal
+### 18.4 Narrow crash-durable transaction journal
 
-MIRAGE does not currently claim crash-durable intent/evidence journaling and full recovery across arbitrary process or host crashes. A successful real commit followed by an evidence I/O failure must be represented as a committed outcome, not falsely described as an unchanged workspace; however, full durable post-crash recovery is future work.
+The supported single-file commit path records durable metadata-only checkpoints around replacement. `mirage recover` classifies interrupted transactions conservatively and never replays a write; ambiguous attribution remains unresolved. `mirage journal list` exposes retained records, while explicit pruning can remove only older terminal records. MIRAGE does not claim general multi-file recovery, receipt reconstruction, or recovery across arbitrary host/filesystem failure.
 
 ### 18.5 Not syscall-perfect observability
 
@@ -860,9 +860,9 @@ The kernel, Docker daemon and trusted MIRAGE control plane are inside the truste
 
 The supported GitHub publication foundation is create-only branch publication under exact, prebound authority. Pull-request creation and other arbitrary remote operations should not be claimed as implemented current capabilities.
 
-### 18.8 Self-hashed evidence is not signed evidence
+### 18.8 Self-hashes and optional signed endorsement
 
-A SHA-256 self-hash detects internal modifications when checked against the retained hash, and validation also checks structural bindings. The receipt is not a digital signature, not a public-key attestation, and not a signed, hash-chained durable audit ledger.
+A SHA-256 self-hash detects internal modifications when checked against the retained hash, and validation also checks structural bindings. Operators may add a detached Ed25519 proof and verify it using an independently trusted public key. That proof authenticates explicit endorsement of the exact receipt bytes; it is not automatic execution attestation, a timestamp authority, or a signed hash-chained durable audit ledger, and a compromised signer can fabricate endorsements.
 
 ---
 

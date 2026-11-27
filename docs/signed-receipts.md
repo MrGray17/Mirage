@@ -4,12 +4,10 @@ Mirage receipts have a deterministic self-checksum and independent structural ve
 
 ## Offline workflow
 
-Generate an Ed25519 key outside the project and sandbox. Keep the private key protected; distribute the public key through a separate trusted channel.
+Generate an Ed25519 key outside the project and sandbox. Keep the private key protected; distribute the public key through a separate trusted channel. Key destinations are create-only.
 
 ```sh
-umask 077
-openssl genpkey -algorithm ED25519 -out signer.pem
-openssl pkey -in signer.pem -pubout -out signer.pub.pem
+mirage attest keygen --private signer.pem --public signer.pub.pem
 
 mirage attest sign --key signer.pem --out proof.json receipt.json
 mirage attest verify --key signer.pub.pem --proof proof.json receipt.json
@@ -21,4 +19,4 @@ The verifier needs only the receipt, detached proof and a separately trusted pub
 
 This is **explicit operator endorsement**, not automated execution attestation, a hardware root of trust, a timestamp authority, a transparency log, or proof that a particular machine actually ran an agent. A signer could endorse a fabricated but structurally valid receipt. An attacker who controls the signing key can forge endorsements. Never trust a public key obtained only from the same untrusted sender as the receipt. The signature never grants mutation authority.
 
-The private key is never needed by the agent container. Do not place it in the project snapshot, repository, or evidence bundle. The CLI does not create or rotate keys or provide revocation; those responsibilities belong to the operator. Proof output is create-only.
+The private key is never needed by the agent container. Do not place it in the project snapshot, repository, or evidence bundle. The CLI creates a local keypair but does not rotate, escrow, revoke, or distribute trust; those responsibilities belong to the operator. Key and proof output is create-only.

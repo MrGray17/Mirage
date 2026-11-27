@@ -76,12 +76,11 @@ MIRAGE installs from a Git checkout and embeds the checkout's complete commit
 identity in the binary. Install only from the commit you intend to run, and
 verify the reported identity afterward.
 
-**Release status:** the published [`v1.0.0` release](https://github.com/MrGray17/Mirage/releases/tag/v1.0.0)
-predates the current installer and has no downloadable binary assets. Source
-installs from `main` are labeled `1.0.0-dev` and embed the exact source commit.
-The current `main` branch passes the rootless-Docker live gate and the real
-Windows/WSL install and edit acceptance; packaged, signed binaries remain future
-release work.
+**Release status:** `v1.0.0` predates the current hardening and has no binary
+assets. New `v*` releases are produced by a tag-driven workflow with standalone
+Linux/Windows binaries, checksums, CycloneDX SBOMs, and GitHub artifact
+attestations. Source installs from `main` remain development builds and embed the
+exact source commit. See [release verification](docs/release.md).
 
 ### Windows 11 with WSL2
 
@@ -363,3 +362,7 @@ The local commit path records durable metadata-only intent before replacement.
 After interruption, use `mirage recover` to classify pending transactions without
 replaying changes. Ambiguous attribution is reported as uncertain. See
 [the transaction journal design](docs/crash-safe-commit-journal.md).
+
+Inspect retained records with `mirage journal list`. Explicit pruning requires
+an RFC3339 cutoff and `--confirm`; it removes only older `COMMITTED`/`ABORTED`
+records and always retains unresolved recovery evidence.

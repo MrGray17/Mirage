@@ -8,7 +8,53 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestJournalListAndPruneOnlyTerminalRecords(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "README.md")
+	before, after := []byte("before"), []byte("after")
+	if err := os.WriteFile(target, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewJournalStore(filepath.Join(t.TempDir(), "transactions"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixed := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	store.now = func() time.Time { return fixed }
+	committed := newTestPlan(t, root, before, after, 0o600)
+	if err := ApplyWithJournal(committed, allowReplace, store); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, after, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pending := newTestPlan(t, root, after, []byte("later"), 0o600)
+	tx, err := store.Begin(pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.MarkApplying(); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Close(); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := store.List()
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("entries=%#v err=%v", entries, err)
+	}
+	removed, err := store.PruneTerminal(fixed.Add(time.Second))
+	if err != nil || len(removed) != 1 || removed[0] != transactionID(committed.Hash()) {
+		t.Fatalf("removed=%#v err=%v", removed, err)
+	}
+	entries, err = store.List()
+	if err != nil || len(entries) != 1 || entries[0].State != JournalApplying {
+		t.Fatalf("retained entries=%#v err=%v", entries, err)
+	}
+}
 
 func TestApplyWithJournalCommitsOnlyAfterDurableTargetReplacement(t *testing.T) {
 	root := t.TempDir()

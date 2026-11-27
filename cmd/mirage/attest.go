@@ -1,10 +1,15 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -12,12 +17,15 @@ import (
 )
 
 func runAttest(args []string, stdout, stderr io.Writer) error {
-	const usage = "usage: mirage attest sign --key PRIVATE.pem --out PROOF.json RECEIPT.json | mirage attest verify --key PUBLIC.pem --proof PROOF.json RECEIPT.json"
+	const usage = "usage: mirage attest keygen --private PRIVATE.pem --public PUBLIC.pem | mirage attest sign --key PRIVATE.pem --out PROOF.json RECEIPT.json | mirage attest verify --key PUBLIC.pem --proof PROOF.json RECEIPT.json"
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
 		fmt.Fprintln(stdout, usage)
 		return nil
 	}
 	mode := args[0]
+	if mode == "keygen" {
+		return runAttestKeygen(args[1:], stdout, stderr)
+	}
 	if mode != "sign" && mode != "verify" {
 		return errors.New(usage)
 	}
@@ -79,5 +87,67 @@ func runAttest(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(stdout, "SIGNATURE_VALID signer=%s receipt=%s run=%s committed=%d\n", attestation.KeyID(public), verified.SHA256, verified.RunID, len(verified.CommittedMutations))
+	return nil
+}
+
+func runAttestKeygen(args []string, stdout, stderr io.Writer) error {
+	const usage = "usage: mirage attest keygen --private PRIVATE.pem --public PUBLIC.pem"
+	flags := flag.NewFlagSet("attest keygen", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	privatePath := flags.String("private", "", "new Ed25519 PKCS#8 private key PEM")
+	publicPath := flags.String("public", "", "new Ed25519 PKIX public key PEM")
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if flags.NArg() != 0 || strings.TrimSpace(*privatePath) == "" || strings.TrimSpace(*publicPath) == "" {
+		return errors.New(usage)
+	}
+	privateAbsolute, err := filepath.Abs(*privatePath)
+	if err != nil {
+		return err
+	}
+	publicAbsolute, err := filepath.Abs(*publicPath)
+	if err != nil {
+		return err
+	}
+	if filepath.Clean(privateAbsolute) == filepath.Clean(publicAbsolute) {
+		return errors.New("private and public key paths must be different")
+	}
+	for _, path := range []string{privateAbsolute, publicAbsolute} {
+		if _, err := os.Lstat(path); err == nil {
+			return fmt.Errorf("refusing to overwrite existing key file %s", path)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect key destination %s: %w", path, err)
+		}
+	}
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return fmt.Errorf("generate Ed25519 key: %w", err)
+	}
+	defer clear(private)
+	privateDER, err := x509.MarshalPKCS8PrivateKey(private)
+	if err != nil {
+		return fmt.Errorf("encode private key: %w", err)
+	}
+	defer clear(privateDER)
+	publicDER, err := x509.MarshalPKIXPublicKey(public)
+	if err != nil {
+		return fmt.Errorf("encode public key: %w", err)
+	}
+	publicPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER})
+	privatePEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER})
+	defer clear(privatePEM)
+	// Write the non-secret half first. A partial failure never leaves an
+	// unreported private key without its matching public key.
+	if err := writeNewEvidence(publicAbsolute, publicPEM); err != nil {
+		return fmt.Errorf("write public key: %w", err)
+	}
+	if err := writeNewEvidence(privateAbsolute, privatePEM); err != nil {
+		return fmt.Errorf("write private key (public key remains at %s): %w", publicAbsolute, err)
+	}
+	fmt.Fprintf(stdout, "KEYPAIR_CREATED signer=%s private=%s public=%s\n", attestation.KeyID(public), privateAbsolute, publicAbsolute)
 	return nil
 }

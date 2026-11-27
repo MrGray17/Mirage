@@ -57,7 +57,7 @@ Each transaction record contains:
 
 Record files are written with private permissions through a temporary file, file sync, atomic rename, and journal-directory sync. The journal directory is restricted to the user's account. A process lock serializes journal operations across MIRAGE processes; concurrent recovery returns a busy error while a live transaction holds the lock.
 
-The journal is bounded to 1 MiB per record and 4096 records during recovery scanning. Records are retained as audit evidence; automatic pruning is deliberately not part of this increment. Reaching the limit is an operational condition to handle explicitly, not a reason to delete unresolved records casually.
+The journal is bounded to 1 MiB per record and 4096 records during scanning. Records are retained by default. Operators can inspect all checksum-valid records and explicitly prune only conclusively terminal records; unresolved evidence is never eligible for pruning.
 
 ## Recovery command
 
@@ -72,6 +72,19 @@ An explicit journal directory is available for tests and diagnostics:
 ~~~bash
 mirage recover --journal-dir /path/to/transactions
 ~~~
+
+## Inspection and retention
+
+~~~bash
+mirage journal list
+mirage journal list --json
+mirage journal prune --before 2026-01-01T00:00:00Z --confirm
+~~~
+
+`journal prune` validates every record before deletion and removes only
+`COMMITTED` or `ABORTED` records whose update time is strictly older than the
+cutoff. `PREPARED`, `APPLYING`, observed-state, and `RECOVERY_REQUIRED` records
+are retained. The native Windows frontend routes journal operations to WSL.
 
 The command reads and validates pending records, verifies the workspace still has the same filesystem identity, inspects the exact target as a supported regular file, and compares its observed digest and mode with the journal. It does not load or re-run model output. It does not invoke the commit engine, reconstruct file contents, replay a write, or automatically repair the workspace.
 

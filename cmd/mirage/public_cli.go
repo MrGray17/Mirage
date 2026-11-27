@@ -44,8 +44,11 @@ Usage:
   mirage setup
   mirage doctor [--json]
   mirage recover
+  mirage journal list [--json]
+  mirage journal prune --before RFC3339 --confirm
   mirage lab --scenario benign|malicious|both --trials 1..10
   mirage verify <receipt.json>
+  mirage attest keygen --private PRIVATE.pem --public PUBLIC.pem
   mirage attest sign --key PRIVATE.pem --out PROOF.json RECEIPT.json
   mirage attest verify --key PUBLIC.pem --proof PROOF.json RECEIPT.json
   mirage proof verify --key PUBLIC.pem [--report REPORT.html] BUNDLE.zip

@@ -870,11 +870,12 @@ possible point before rename. A real mismatch is
 `CONFLICTED`; expired or changed authority/shadow evidence is `REJECTED`;
 acquisition uncertainty is `FAILED`. These paths do not replace the target.
 
-M4.3 preserves regular-file content and permission mode only. It does not
+M4.3 preserved regular-file content and permission mode only. At that milestone it did not
 preserve or authorize ownership, ACLs, extended attributes, inode identity,
 timestamps, sparse layout, or other filesystem metadata. It does not implement
-multi-file atomicity, a durable commit journal, directory `fsync`, or crash
-recovery. Cleanup failure can leave a Mirage-named staging artifact, although
+multi-file atomicity. Current main adds a directory-synced metadata journal and
+conservative recovery classification around this same single-file boundary; it
+does not turn the boundary into a general transaction manager. Cleanup failure can leave a Mirage-named staging artifact, although
 the target remains unmodified; such a run is `FAILED` and never reported as
 committed. A later workspace preparation rejects that unresolved artifact
 rather than copying it into another sandbox.
@@ -1570,8 +1571,9 @@ verification/commit plans, Effect Graph evidence, sandbox/process-stop facts,
 and its own SHA-256 identity. Receipt verification is available through the CLI.
 
 These receipts are evidence downstream of authority: they cannot authorize or
-repeat a commit. Evidence persistence is not crash-durable, and v1 receipts are
-not signed or backed by a complete durable event chain.
+repeat a commit. The commit journal does not reconstruct a receipt after a
+crash. Receipts may receive an optional detached Ed25519 endorsement, but are
+not backed by a complete signed durable event chain.
 
 The target state adds a signature over durable evidence. An illustrative future
 signed receipt is:
@@ -2063,7 +2065,7 @@ The v1 release supports exactly one compelling end-to-end workflow.
 - GitHub pull-request creation (M5.4),
 - general shell-capable or extensible Qwen tooling,
 - multi-file, create, delete, mode-change, link, or special-object commits,
-- crash-durable evidence, intent journaling, or recovery,
+- general crash-durable evidence reconstruction or multi-file recovery,
 - signed/hash-chained durable audit logs,
 - universal syscall monitoring,
 - Kubernetes,
