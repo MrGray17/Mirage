@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/MrGray17/Mirage/internal/runtime/gitbinding"
 	"github.com/MrGray17/Mirage/internal/runtime/gitcommit"
 	"github.com/MrGray17/Mirage/internal/runtime/githubbinding"
+	"github.com/MrGray17/Mirage/internal/runtime/githubpullrequest"
 	"github.com/MrGray17/Mirage/internal/runtime/gitplan"
 	"github.com/MrGray17/Mirage/internal/runtime/gitpublication"
 	"github.com/MrGray17/Mirage/internal/runtime/realcommit"
@@ -232,12 +234,246 @@ func (e *m53LifecycleEngine) Reconcile(context.Context, *githubbinding.Binding, 
 	return e.reconcileObservation, outcome, nil
 }
 
+func TestM54LifecyclePlansOnlyFromPublishedV3Authority(t *testing.T) {
+	current := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	lifecycle, _, _ := preparedPullRequestLifecycle(t, func() time.Time { return current }, current.Add(time.Hour))
+	first := lifecycle.GitHubPullRequestPlan()
+	second, err := lifecycle.DeriveGitHubPullRequestPlan(context.Background())
+	if err != nil || first == nil || second != first || first.Identity() == "" || lifecycle.ExternalEffectLedger().PullRequestOutcome() != githubpullrequest.OutcomeNotAttempted {
+		t.Fatalf("plans=%p/%p ledger=%#v err=%v", first, second, lifecycle.ExternalEffectLedger(), err)
+	}
+}
+
+func TestM54LifecycleClassifiesExactPartialEffectsWithoutRetry(t *testing.T) {
+	tests := map[string]struct {
+		preflight    githubpullrequest.ObservationStatus
+		postflight   githubpullrequest.ObservationStatus
+		acknowledged bool
+		establishErr error
+		wantState    State
+		wantOutcome  githubpullrequest.PullRequestOutcome
+		wantPosts    int
+	}{
+		"preexisting exact":          {preflight: githubpullrequest.ObservationExact, wantState: StatePREstablished, wantOutcome: githubpullrequest.OutcomeAlreadyPresent},
+		"acknowledged exact":         {preflight: githubpullrequest.ObservationAbsent, postflight: githubpullrequest.ObservationExact, acknowledged: true, wantState: StatePREstablished, wantOutcome: githubpullrequest.OutcomeCreated, wantPosts: 1},
+		"lost acknowledgement exact": {preflight: githubpullrequest.ObservationAbsent, postflight: githubpullrequest.ObservationExact, establishErr: githubpullrequest.ErrCreateUnavailable, wantState: StatePREstablished, wantOutcome: githubpullrequest.OutcomeAlreadyPresent, wantPosts: 1},
+		"attempted absent":           {preflight: githubpullrequest.ObservationAbsent, postflight: githubpullrequest.ObservationAbsent, establishErr: githubpullrequest.ErrCreateRejected, wantState: StateFailed, wantOutcome: githubpullrequest.OutcomeNotCreated, wantPosts: 1},
+		"preflight conflict":         {preflight: githubpullrequest.ObservationConflicting, wantState: StateConflicted, wantOutcome: githubpullrequest.OutcomeConflict},
+		"postflight base conflict":   {preflight: githubpullrequest.ObservationAbsent, postflight: githubpullrequest.ObservationConflicting, wantState: StateConflicted, wantOutcome: githubpullrequest.OutcomeConflict, wantPosts: 1},
+		"postflight unavailable":     {preflight: githubpullrequest.ObservationAbsent, postflight: githubpullrequest.ObservationUnavailable, establishErr: githubpullrequest.ErrObservationUnavailable, wantState: StatePRCreationUncertain, wantOutcome: githubpullrequest.OutcomeUncertain, wantPosts: 1},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			current := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+			lifecycle, _, _ := preparedPullRequestLifecycle(t, func() time.Time { return current }, current.Add(time.Hour))
+			plan := lifecycle.GitHubPullRequestPlan()
+			preflight := lifecyclePRObservation(t, plan, test.preflight)
+			postflight := lifecyclePRObservation(t, plan, test.postflight)
+			engine := &m54LifecycleEngine{lifecycle: lifecycle, preflight: preflight, postflight: postflight, acknowledged: test.acknowledged, establishErr: test.establishErr}
+			ledger, err := lifecycle.EstablishGitHubPullRequest(context.Background(), engine)
+			if test.establishErr == nil && test.preflight != githubpullrequest.ObservationConflicting && err != nil {
+				t.Fatal(err)
+			}
+			if ledger == nil || ledger.PullRequestOutcome() != test.wantOutcome || lifecycle.State() != test.wantState || engine.postCount() != test.wantPosts {
+				t.Fatalf("ledger=%#v err=%v state=%s posts=%d", ledger, err, lifecycle.State(), engine.postCount())
+			}
+			if test.wantPosts == 0 && (ledger.Attempted() || lifecycle.PullRequestAttempt() != nil) {
+				t.Fatal("zero-POST outcome installed an attempt")
+			}
+			if test.wantPosts == 1 && test.wantState != StatePRCreationUncertain {
+				repeated, repeatedErr := lifecycle.EstablishGitHubPullRequest(context.Background(), engine)
+				if test.wantState == StatePREstablished {
+					if repeatedErr != nil || repeated != ledger {
+						t.Fatalf("established repeat ledger=%#v err=%v", repeated, repeatedErr)
+					}
+				} else if !errors.Is(repeatedErr, ErrInvalidTransition) {
+					t.Fatalf("terminal repeat err=%v", repeatedErr)
+				}
+				if engine.postCount() != 1 {
+					t.Fatalf("later call dispatched another POST: %d", engine.postCount())
+				}
+			}
+			if test.wantState == StatePRCreationUncertain {
+				if _, err := lifecycle.EstablishGitHubPullRequest(context.Background(), engine); !errors.Is(err, ErrInvalidTransition) || engine.postCount() != 1 {
+					t.Fatalf("uncertain retry err=%v posts=%d", err, engine.postCount())
+				}
+				engine.reconcileObservation = lifecyclePRObservation(t, plan, githubpullrequest.ObservationExact)
+				resolved, err := lifecycle.ReconcileGitHubPullRequest(engine)
+				if err != nil || resolved.PullRequestOutcome() != githubpullrequest.OutcomeAlreadyPresent || lifecycle.State() != StatePREstablished || engine.postCount() != 1 || engine.readCount() != 1 {
+					t.Fatalf("resolved=%#v err=%v state=%s posts=%d reads=%d", resolved, err, lifecycle.State(), engine.postCount(), engine.readCount())
+				}
+			}
+		})
+	}
+}
+
+func TestM54LifecycleAttemptLatchSerializesConcurrentCallers(t *testing.T) {
+	current := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	lifecycle, _, _ := preparedPullRequestLifecycle(t, func() time.Time { return current }, current.Add(time.Hour))
+	plan := lifecycle.GitHubPullRequestPlan()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	engine := &m54LifecycleEngine{lifecycle: lifecycle, preflight: githubpullrequest.Observation{Status: githubpullrequest.ObservationAbsent}, postflight: lifecyclePRObservation(t, plan, githubpullrequest.ObservationExact), acknowledged: true, entered: entered, release: release}
+	type result struct {
+		ledger *githubpullrequest.ExternalEffectLedger
+		err    error
+	}
+	results := make(chan result, 2)
+	go func() {
+		ledger, err := lifecycle.EstablishGitHubPullRequest(context.Background(), engine)
+		results <- result{ledger, err}
+	}()
+	<-entered
+	go func() {
+		ledger, err := lifecycle.EstablishGitHubPullRequest(context.Background(), engine)
+		results <- result{ledger, err}
+	}()
+	close(release)
+	for range 2 {
+		result := <-results
+		if result.err != nil || result.ledger == nil || result.ledger.PullRequestOutcome() != githubpullrequest.OutcomeCreated {
+			t.Fatalf("concurrent result=%#v err=%v", result.ledger, result.err)
+		}
+	}
+	if engine.postCount() != 1 || lifecycle.PullRequestAttempt() == nil || lifecycle.State() != StatePREstablished {
+		t.Fatalf("posts=%d attempt=%#v state=%s", engine.postCount(), lifecycle.PullRequestAttempt(), lifecycle.State())
+	}
+}
+
+func TestM54LifecycleAuthorityChangesBeforeLatchPerformZeroPOSTs(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*Lifecycle, *m53LifecycleClient, *time.Time)
+		want   error
+	}{
+		{name: "expiry", mutate: func(_ *Lifecycle, _ *m53LifecycleClient, current *time.Time) { *current = current.Add(2 * time.Hour) }, want: ErrContractExpired},
+		{name: "clock rollback", mutate: func(_ *Lifecycle, _ *m53LifecycleClient, current *time.Time) { *current = current.Add(-time.Second) }, want: ErrClockRollback},
+		{name: "published head changed", mutate: func(lifecycle *Lifecycle, client *m53LifecycleClient, _ *time.Time) {
+			client.targetOID = lifecycle.GitRepositoryBinding().HeadCommit()
+			client.targetState = githubbinding.RefPresentOther
+		}, want: githubbinding.ErrRepositoryChanged},
+		{name: "published head missing", mutate: func(_ *Lifecycle, client *m53LifecycleClient, _ *time.Time) {
+			client.targetState = githubbinding.RefAbsent
+		}, want: githubbinding.ErrRepositoryChanged},
+		{name: "base moved", mutate: func(_ *Lifecycle, client *m53LifecycleClient, _ *time.Time) {
+			client.baseCommit = strings.Repeat("f", 40)
+		}, want: githubbinding.ErrRepositoryChanged},
+		{name: "repository identity changed", mutate: func(_ *Lifecycle, client *m53LifecycleClient, _ *time.Time) {
+			client.repository.ID++
+		}, want: githubbinding.ErrRepositoryChanged},
+		{name: "publication record missing", mutate: func(lifecycle *Lifecycle, _ *m53LifecycleClient, _ *time.Time) {
+			lifecycle.publicationRecord = nil
+		}, want: ErrCommitAuthority},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			current := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+			lifecycle, _, client := preparedPullRequestLifecycle(t, func() time.Time { return current }, current.Add(time.Hour))
+			test.mutate(lifecycle, client, &current)
+			engine := &m54LifecycleEngine{lifecycle: lifecycle, preflight: githubpullrequest.Observation{Status: githubpullrequest.ObservationAbsent}}
+			ledger, err := lifecycle.EstablishGitHubPullRequest(context.Background(), engine)
+			if !errors.Is(err, test.want) || engine.postCount() != 0 || lifecycle.PullRequestAttempt() != nil || ledger.PullRequestOutcome() != githubpullrequest.OutcomeNotAttempted {
+				t.Fatalf("ledger=%#v err=%v posts=%d attempt=%#v", ledger, err, engine.postCount(), lifecycle.PullRequestAttempt())
+			}
+		})
+	}
+}
+
+type m54LifecycleEngine struct {
+	lifecycle            *Lifecycle
+	preflight            githubpullrequest.Observation
+	postflight           githubpullrequest.Observation
+	reconcileObservation githubpullrequest.Observation
+	acknowledged         bool
+	establishErr         error
+	reconcileErr         error
+	entered              chan struct{}
+	release              chan struct{}
+	mu                   sync.Mutex
+	posts                int
+	reads                int
+	enterOnce            sync.Once
+}
+
+func (e *m54LifecycleEngine) Establish(ctx context.Context, _ *githubpullrequest.Plan, final githubpullrequest.FinalAuthority) (githubpullrequest.EstablishResult, error) {
+	result := githubpullrequest.EstablishResult{Preflight: e.preflight}
+	if e.preflight.Status != githubpullrequest.ObservationAbsent {
+		return result, e.establishErr
+	}
+	attempt, err := final(ctx)
+	if err != nil {
+		return result, err
+	}
+	if e.lifecycle.pullRequestAttempt == nil || e.lifecycle.pullRequestAttempt.Identity() != attempt.Identity() || e.lifecycle.state != StatePRCreating {
+		return result, errors.New("POST became reachable before lifecycle attempt latch")
+	}
+	e.mu.Lock()
+	e.posts++
+	e.mu.Unlock()
+	result.Attempted = true
+	result.Attempt = attempt
+	result.Postflight = e.postflight
+	result.CompatibleAcknowledgement = e.acknowledged
+	if e.entered != nil {
+		e.enterOnce.Do(func() { close(e.entered) })
+	}
+	if e.release != nil {
+		<-e.release
+	}
+	return result, e.establishErr
+}
+
+func (e *m54LifecycleEngine) Reconcile(context.Context, *githubpullrequest.Plan) (githubpullrequest.Observation, error) {
+	e.mu.Lock()
+	e.reads++
+	e.mu.Unlock()
+	return e.reconcileObservation, e.reconcileErr
+}
+
+func (e *m54LifecycleEngine) postCount() int { e.mu.Lock(); defer e.mu.Unlock(); return e.posts }
+func (e *m54LifecycleEngine) readCount() int { e.mu.Lock(); defer e.mu.Unlock(); return e.reads }
+
+func preparedPullRequestLifecycle(t *testing.T, now func() time.Time, expires time.Time) (*Lifecycle, *workspace.Disposable, *m53LifecycleClient) {
+	t.Helper()
+	lifecycle, disposable, client := preparedPublicationLifecycleVersion(t, now, expires, contracts.VersionV3)
+	publicationPlan := lifecycle.GitPublicationPlan()
+	publicationEngine := &m53LifecycleEngine{publishObservation: githubbinding.RefObservation{Status: githubbinding.RefPresentExact, OID: publicationPlan.CommitOID()}, acknowledged: true}
+	if _, err := lifecycle.PublishGitHub(context.Background(), publicationEngine); err != nil {
+		t.Fatal(err)
+	}
+	client.targetRef = publicationPlan.TargetRef()
+	client.targetOID = publicationPlan.CommitOID()
+	client.targetState = githubbinding.RefPresentExact
+	if _, err := lifecycle.DeriveGitHubPullRequestPlan(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	return lifecycle, disposable, client
+}
+
+func lifecyclePRObservation(t *testing.T, plan *githubpullrequest.Plan, status githubpullrequest.ObservationStatus) githubpullrequest.Observation {
+	t.Helper()
+	switch status {
+	case githubpullrequest.ObservationExact:
+		identity, err := githubpullrequest.NewPullRequestIdentity(githubpullrequest.PullRequestIdentitySpec{Plan: plan, Number: 17, StableID: 1700, URL: "https://github.com/" + plan.RepositoryFullName() + "/pull/17", RepositoryID: plan.RepositoryID(), RepositoryFullName: plan.RepositoryFullName(), BaseRef: plan.BaseRef(), BaseCommit: plan.BaseCommit(), TargetRef: plan.TargetRef(), HeadOID: plan.CommitOID(), MetadataPolicy: plan.Metadata().Version(), Title: plan.Metadata().Title(), Body: plan.Metadata().Body(), Open: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return githubpullrequest.Observation{Status: status, Exact: identity}
+	case githubpullrequest.ObservationConflicting:
+		return githubpullrequest.Observation{Status: status, Evidence: "hostile_test_conflict"}
+	default:
+		return githubpullrequest.Observation{Status: status}
+	}
+}
+
 type m53LifecycleClient struct {
-	repository githubbinding.Repository
-	beforeRef  func()
-	refCalls   int
-	baseRef    string
-	baseCommit string
+	repository  githubbinding.Repository
+	beforeRef   func()
+	refCalls    int
+	baseRef     string
+	baseCommit  string
+	targetRef   string
+	targetOID   string
+	targetState githubbinding.RefStatus
 }
 
 func (c *m53LifecycleClient) Repository(context.Context, string) (githubbinding.Repository, error) {
@@ -256,10 +492,26 @@ func (c *m53LifecycleClient) ExactRef(_ context.Context, _ string, _ int64, ref,
 		}
 		return githubbinding.RefObservation{Status: githubbinding.RefPresentOther, OID: c.baseCommit}, nil
 	}
+	if ref == c.targetRef {
+		status := c.targetState
+		if status == "" {
+			status = githubbinding.RefPresentExact
+		}
+		switch status {
+		case githubbinding.RefPresentExact, githubbinding.RefPresentOther:
+			return githubbinding.RefObservation{Status: status, OID: c.targetOID}, nil
+		default:
+			return githubbinding.RefObservation{Status: status}, nil
+		}
+	}
 	return githubbinding.RefObservation{Status: githubbinding.RefAbsent}, nil
 }
 
 func preparedPublicationLifecycle(t *testing.T, now func() time.Time, expires time.Time) (*Lifecycle, *workspace.Disposable, *m53LifecycleClient) {
+	return preparedPublicationLifecycleVersion(t, now, expires, contracts.VersionV2)
+}
+
+func preparedPublicationLifecycleVersion(t *testing.T, now func() time.Time, expires time.Time, contractVersion string) (*Lifecycle, *workspace.Disposable, *m53LifecycleClient) {
 	t.Helper()
 	real := lifecycleRealWorkspace(t)
 	runLifecycleGit(t, real, "init", "-b", "main")
@@ -281,7 +533,14 @@ func preparedPublicationLifecycle(t *testing.T, now func() time.Time, expires ti
 	}
 	stub := &sandboxStub{real: binding.RealWorkspace(), disposable: binding.DisposableWorkspace(), token: binding.Token()}
 	runID := "lifecycle-m53"
-	contract, err := contracts.New(contracts.Spec{Version: contracts.VersionV2, RunID: runID, ActorID: "hostile-fixture", ExpiresAt: expires, Filesystem: contracts.FilesystemPolicy{Write: contracts.AccessRules{Allow: []string{"/workspace/README.md"}}}, GitHub: contracts.GitHubPublicationPolicy{RepositoryFullName: publicationLifecycleRepo, TargetRef: gitrefs.RunTarget(runID), Operation: contracts.GitHubCreateBranch}})
+	targetRef := gitrefs.RunTarget(runID)
+	contractSpec := contracts.Spec{Version: contractVersion, RunID: runID, ActorID: "hostile-fixture", ExpiresAt: expires, Filesystem: contracts.FilesystemPolicy{Write: contracts.AccessRules{Allow: []string{"/workspace/README.md"}}}}
+	if contractVersion == contracts.VersionV2 {
+		contractSpec.GitHub = contracts.GitHubPublicationPolicy{RepositoryFullName: publicationLifecycleRepo, TargetRef: targetRef, Operation: contracts.GitHubCreateBranch}
+	} else {
+		contractSpec.GitHubV3 = contracts.GitHubEffectsPolicy{RepositoryFullName: publicationLifecycleRepo, Branch: contracts.GitHubBranchPolicy{TargetRef: targetRef, Operation: contracts.GitHubCreateBranch}, PullRequest: contracts.GitHubPullRequestPolicy{BaseRef: "refs/heads/main", TargetRef: targetRef, Operation: contracts.GitHubCreatePullRequest, MetadataPolicy: contracts.PullRequestMetadataV1}}
+	}
+	contract, err := contracts.New(contractSpec)
 	if err != nil {
 		t.Fatal(err)
 	}
