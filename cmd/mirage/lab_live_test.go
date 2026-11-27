@@ -27,6 +27,10 @@ func TestLiveLabAndProofPipeline(t *testing.T) {
 	cache := t.TempDir()
 	t.Setenv("XDG_CACHE_HOME", cache)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	// The lab intentionally preserves its real demo workspace under the cache
+	// root. Give disposable runtime state a disjoint root so the production
+	// overlap guard is exercised without rejecting this test fixture.
+	t.Setenv("TMPDIR", t.TempDir())
 	var output bytes.Buffer
 	if err := runLab([]string{"--scenario", "both", "--trials", "1"}, &output, io.Discard); err != nil {
 		t.Fatalf("lab: %v; output=%s", err, output.String())
