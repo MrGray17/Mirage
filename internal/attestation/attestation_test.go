@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"testing"
@@ -84,6 +85,24 @@ func TestProofBindsExactBytesAndTrustedSigner(t *testing.T) {
 	}
 	if _, err := Sign([]byte("{}"), private); err == nil {
 		t.Fatal("invalid receipt signed")
+	}
+}
+
+func TestVerifyRejectsOversizedReceiptBeforeProofProcessing(t *testing.T) {
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oversized := make([]byte, MaxReceiptBytes+1)
+	proof, err := json.Marshal(Proof{
+		Schema: Schema, KeyID: KeyID(public), ReceiptDigest: digest(oversized),
+		ReceiptHash: "sha256:unused", Signature: base64.StdEncoding.EncodeToString(make([]byte, ed25519.SignatureSize)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(oversized, proof, public); err != ErrInvalidAttestation {
+		t.Fatalf("verify oversized receipt: %v", err)
 	}
 }
 
