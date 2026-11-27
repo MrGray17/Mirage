@@ -106,6 +106,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return runVersion(args[1:], stdout, stderr)
 	case "recover":
 		return runRecover(args[1:], stdout, stderr)
+	case "journal":
+		return runJournal(args[1:], stdout, stderr)
 	case "help", "--help", "-h":
 		printHelp(stdout)
 		return nil

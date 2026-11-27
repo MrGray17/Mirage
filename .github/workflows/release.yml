@@ -1,0 +1,105 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+jobs:
+  release:
+    name: Build, attest, and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go 1.27.4
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.27.4'
+          cache: false
+
+      - name: Verify source
+        run: |
+          go vet ./...
+          go test -race -count=1 ./...
+
+      - name: Prepare release metadata
+
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_REF_TYPE" != "tag" ]]; then
+            version="0.0.0-${GITHUB_SHA::12}"
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Build release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse HEAD)"
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 windows/amd64; do
+            goos="${target%/*}"
+            goarch="${target#*/}"
+            name="mirage_${VERSION}_${goos}_${goarch}"
+            if [[ "$goos" == windows ]]; then name="${name}.exe"; fi
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build \
+              -trimpath \
+              -ldflags="-s -w -X github.com/MrGray17/Mirage/internal/buildinfo.Version=${VERSION} -X github.com/MrGray17/Mirage/internal/buildinfo.Commit=${commit}" \
+              -o "dist/$name" ./cmd/mirage
+          done
+
+      - name: Generate CycloneDX SBOMs
+        shell: bash
+        run: |
+          set -euo pipefail
+          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.12.0
+          for target in linux/amd64 linux/arm64 windows/amd64; do
+            goos="${target%/*}"
+            goarch="${target#*/}"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" cyclonedx-gomod app \
+              -json -licenses -packages -main cmd/mirage \
+              -output "dist/mirage_${VERSION}_${goos}_${goarch}.cdx.json" .
+          done
+          (cd dist && sha256sum mirage_* > SHA256SUMS)
+
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+
+      - name: Attest Linux amd64 SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/mirage_${{ env.VERSION }}_linux_amd64
+          sbom-path: dist/mirage_${{ env.VERSION }}_linux_amd64.cdx.json
+
+      - name: Attest Linux arm64 SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/mirage_${{ env.VERSION }}_linux_arm64
+          sbom-path: dist/mirage_${{ env.VERSION }}_linux_arm64.cdx.json
+
+      - name: Attest Windows amd64 SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/mirage_${{ env.VERSION }}_windows_amd64.exe
+          sbom-path: dist/mirage_${{ env.VERSION }}_windows_amd64.cdx.json
+
+      - name: Publish GitHub release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes

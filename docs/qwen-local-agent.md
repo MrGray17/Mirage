@@ -210,11 +210,11 @@ credentials, and no real-workspace mount.
 The local model is untrusted input. Its response and the driver action log are
 diagnostic evidence only; neither can authorize verification or commit.
 
-Evidence persistence is deliberately not crash-durable in this milestone. A
-successful real commit followed by an evidence I/O failure remains a committed
-run whose CLI returns an error after already reporting `runtime=COMMITTED`; it
-is never retried or represented as an unchanged reality. Durable journaling and
-recovery belong to M6.
+Receipt persistence is not reconstructed after a crash. The single-file commit
+path uses a durable metadata journal, while a successful real commit followed
+by an evidence I/O failure remains committed and is never retried or represented
+as unchanged reality. Recovery classifies journaled target state conservatively
+without replaying a mutation.
 
 ## Rejected proof
 

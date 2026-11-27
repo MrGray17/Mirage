@@ -112,6 +112,19 @@ type RecoveryResult struct {
 	Reason        string       `json:"reason,omitempty"`
 }
 
+// JournalEntry is the stable, read-only view exposed by journal inspection.
+type JournalEntry struct {
+	TransactionID string       `json:"transaction_id"`
+	PlanHash      string       `json:"plan_hash"`
+	Workspace     string       `json:"workspace"`
+	Resource      string       `json:"resource"`
+	State         JournalState `json:"state"`
+	Outcome       string       `json:"outcome"`
+	Reason        string       `json:"reason,omitempty"`
+	CreatedAt     time.Time    `json:"created_at"`
+	UpdatedAt     time.Time    `json:"updated_at"`
+}
+
 func NewJournalStore(dir string) (*JournalStore, error) {
 	if runtime.GOOS == "windows" {
 		return nil, ErrJournalUnsupportedPlatform
@@ -149,6 +162,112 @@ func (s *JournalStore) Directory() string {
 		return ""
 	}
 	return s.dir
+}
+
+// List validates every journal record before returning a chronological view.
+func (s *JournalStore) List() ([]JournalEntry, error) {
+	if s == nil {
+		return nil, ErrJournalInvalid
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	lockFile, err := s.acquire()
+	if err != nil {
+		return nil, err
+	}
+	defer unlockAndClose(lockFile)
+	records, err := s.readAllRecords()
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]JournalEntry, 0, len(records))
+	for _, record := range records {
+		createdAt, _ := time.Parse(time.RFC3339Nano, record.CreatedAt)
+		updatedAt, _ := time.Parse(time.RFC3339Nano, record.UpdatedAt)
+		entries = append(entries, JournalEntry{
+			TransactionID: record.TransactionID, PlanHash: record.PlanHash,
+			Workspace: record.Workspace, Resource: record.Resource,
+			State: record.State, Outcome: record.Outcome, Reason: record.Reason,
+			CreatedAt: createdAt, UpdatedAt: updatedAt,
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].UpdatedAt.Equal(entries[j].UpdatedAt) {
+			return entries[i].TransactionID < entries[j].TransactionID
+		}
+		return entries[i].UpdatedAt.Before(entries[j].UpdatedAt)
+	})
+	return entries, nil
+}
+
+// PruneTerminal removes only conclusively terminal records older than before.
+func (s *JournalStore) PruneTerminal(before time.Time) ([]string, error) {
+	if s == nil || before.IsZero() {
+		return nil, ErrJournalInvalid
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	lockFile, err := s.acquire()
+	if err != nil {
+		return nil, err
+	}
+	defer unlockAndClose(lockFile)
+	records, err := s.readAllRecords()
+	if err != nil {
+		return nil, err
+	}
+	cutoff := before.UTC()
+	var removed []string
+	for _, record := range records {
+		if record.State != JournalCommitted && record.State != JournalAborted {
+			continue
+		}
+		updatedAt, _ := time.Parse(time.RFC3339Nano, record.UpdatedAt)
+		if !updatedAt.Before(cutoff) {
+			continue
+		}
+		path := filepath.Join(s.dir, record.TransactionID+".json")
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return removed, fmt.Errorf("%w: terminal record changed before pruning", ErrJournalCorrupt)
+		}
+		if err := os.Remove(path); err != nil {
+			return removed, fmt.Errorf("%w: prune terminal record %s: %v", ErrJournalInvalid, record.TransactionID, err)
+		}
+		removed = append(removed, record.TransactionID)
+	}
+	if len(removed) > 0 {
+		if err := syncDirectory(s.dir); err != nil {
+			return removed, fmt.Errorf("%w: sync pruned journal: %v", ErrJournalInvalid, err)
+		}
+	}
+	return removed, nil
+}
+
+func (s *JournalStore) readAllRecords() ([]journalRecord, error) {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return nil, fmt.Errorf("%w: list transaction records: %v", ErrJournalInvalid, err)
+	}
+	var names []string
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".json") {
+			names = append(names, entry.Name())
+		}
+	}
+	sort.Strings(names)
+	if len(names) > maxJournalFiles {
+		return nil, fmt.Errorf("%w: found %d journal records, limit is %d", ErrJournalInvalid, len(names), maxJournalFiles)
+	}
+	records := make([]journalRecord, 0, len(names))
+	for _, name := range names {
+		record, err := s.readRecord(filepath.Join(s.dir, name))
+		if err != nil {
+			return records, err
+		}
+		records = append(records, record)
+	}
+	return records, nil
 }
 
 func ensurePrivateDirectory(path string) error {

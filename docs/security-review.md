@@ -135,15 +135,15 @@ The hostile fixture and coding-agent launchers rediscovered containers by name d
 | Risk or limitation | Current position |
 |---|---|
 | Host-level race after final revalidation and before filesystem replacement | A documented residual race against a non-cooperating host process remains. Do not claim host-wide transactional isolation. |
-| Crash durability | No durable intent journal/recovery protocol exists yet. A crash can leave an operationally incomplete result, including a known post-commit evidence-persistence window. |
-| Evidence authenticity | Receipt and graph hashes detect many structural changes but are not signatures or independent attestation. A compromised trusted host can recompute hashes. |
+| Crash durability | The single-file commit path durably journals intent and conservatively classifies interrupted transactions without replay. It is not a general transaction manager, and a post-commit crash can still occur before receipt persistence. |
+| Evidence authenticity | Receipt and graph hashes provide structural integrity. Optional detached Ed25519 proofs authenticate explicit endorsement when the verifier obtains the public key independently; neither mechanism defeats a compromised signer host. |
 | Syscall observation | Agent action logs and broker events are not syscall-perfect telemetry. The final frozen-tree reconciliation is authoritative within the trusted-host model. |
 | Filesystem scope | The real commit is intentionally limited to one existing independent regular file's content. It is not a general multi-file transaction engine and does not promise full ACL/xattr/ownership preservation. |
 | Local Qwen/WSL2 behavior | The hosted Linux gate is not proof of a provider-backed Ollama/Qwen run on the user's own WSL2 installation. That separate acceptance must be run with the local model and an authorized GHCR package workflow. |
 | GitHub remote publication | The M5.3 external branch-creation test is separate and has not been run here. It must use a disposable repository and narrowly scoped credentials, never a production repository. |
 | Trusted host and helper image | Kernel, rootless Docker daemon, host process, clock source, contract issuer, and the helper/keeper image remain trusted components. A custom `--helper-image` must be independently vetted: it has write access to the disposable volume even though it is network-disabled, capability-dropped, and confined by rootless Docker. A digest pin is an identity pin, not a provenance or safety audit. This is not a sandbox against a compromised host administrator. |
 
-These limits are part of the security contract, not embarrassing footnotes. Do not describe Mirage as crash-durable, signed, syscall-complete, multi-file transactional, or independently secure against a compromised host.
+These limits are part of the security contract, not embarrassing footnotes. Describe the narrow journal and optional detached signatures precisely; do not generalize them into host-wide crash recovery, automatic execution attestation, syscall-complete evidence, multi-file transactions, or security against a compromised host.
 
 ## Validation evidence
 
