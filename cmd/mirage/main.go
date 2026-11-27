@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -31,6 +32,7 @@ import (
 	"github.com/MrGray17/Mirage/internal/runtime/gitpublication"
 	"github.com/MrGray17/Mirage/internal/runtime/modelbroker"
 	"github.com/MrGray17/Mirage/internal/runtime/qwenagent"
+	"github.com/MrGray17/Mirage/internal/runtime/realcommit"
 	"github.com/MrGray17/Mirage/internal/runtime/workspace"
 )
 
@@ -57,6 +59,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 	switch args[0] {
 	case "edit":
 		return runQuickEdit(args[1:], stdout, stderr)
+	case "lab":
+		return runLab(args[1:], stdout, stderr)
 	case "mcp":
 		return runMCP(args[1:], stdout, stderr)
 	case "run":
@@ -88,6 +92,10 @@ func run(args []string, stdout, stderr io.Writer) error {
 			return usageError()
 		}
 		return runReceiptVerify(args[2:], stdout, stderr)
+	case "proof":
+		return runProof(args[1:], stdout, stderr)
+	case "attest":
+		return runAttest(args[1:], stdout, stderr)
 	case "observatory":
 		return runObservatory(args[1:], stdout, stderr)
 	case "doctor":
@@ -96,6 +104,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return runSetup(args[1:], stdout, stderr)
 	case "version":
 		return runVersion(args[1:], stdout, stderr)
+	case "recover":
+		return runRecover(args[1:], stdout, stderr)
 	case "help", "--help", "-h":
 		printHelp(stdout)
 		return nil
@@ -113,7 +123,7 @@ func printQuickEditHelp(writer io.Writer) {
 	fmt.Fprintln(writer, "  mirage edit [options] <file> <task>")
 	fmt.Fprintln(writer, "  MIRAGE_QWEN_IMAGE=<registry/image@sha256:digest> configures the Qwen agent image.")
 	fmt.Fprintln(writer, "  The target must be one existing regular file inside --workspace.")
-	fmt.Fprintln(writer, "  Options: --workspace, --image, --helper-image, --timeout, --format, --output-dir, --open, --yes")
+	fmt.Fprintln(writer, "  Options: --workspace, --image, --helper-image, --timeout, --format, --output-dir, --policy, --open, --yes")
 }
 
 type quickEditPlan struct {
@@ -125,6 +135,7 @@ type quickEditPlan struct {
 	Timeout   time.Duration
 	Format    string
 	OutputDir string
+	Policy    string
 	Open      bool
 	Yes       bool
 }
@@ -167,6 +178,7 @@ func parseQuickEditPlan(args []string) (quickEditPlan, error) {
 	timeout := flags.Duration("timeout", 10*time.Minute, "maximum agent execution time")
 	format := flags.String("format", "text", "summary format: text or json")
 	outputDir := flags.String("output-dir", "", "directory for this run's evidence")
+	policyPath := flags.String("policy", "", "trusted operator write policy JSON outside the workspace")
 	open := flags.Bool("open", false, "open the verified Observatory after the run")
 	yes := flags.Bool("yes", false, "skip the interactive confirmation prompt")
 	if err := flags.Parse(args); err != nil {
@@ -216,7 +228,7 @@ func parseQuickEditPlan(args []string) (quickEditPlan, error) {
 	return quickEditPlan{
 		Workspace: workspaceReal, File: file, Task: task, Image: strings.TrimSpace(*image),
 		Helper: strings.TrimSpace(*helper), Timeout: *timeout, Format: *format,
-		OutputDir: strings.TrimSpace(*outputDir), Open: *open, Yes: *yes,
+		OutputDir: strings.TrimSpace(*outputDir), Policy: *policyPath, Open: *open, Yes: *yes,
 	}, nil
 }
 
@@ -286,6 +298,9 @@ func (plan quickEditPlan) agentArgs() []string {
 	if plan.OutputDir != "" {
 		args = append(args, "--output-dir", plan.OutputDir)
 	}
+	if plan.Policy != "" {
+		args = append(args, "--policy", plan.Policy)
+	}
 	if plan.Open {
 		args = append(args, "--open")
 	}
@@ -303,6 +318,13 @@ func quickEditAgentTask(file, request string) string {
 }
 
 func runQuickEdit(args []string, stdout, stderr io.Writer) error {
+	return runQuickEditContext(context.Background(), args, stdout, stderr)
+}
+
+func runQuickEditContext(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	plan, err := parseQuickEditPlan(args)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -321,7 +343,7 @@ func runQuickEdit(args []string, stdout, stderr io.Writer) error {
 			return nil
 		}
 	}
-	return runAgent(plan.agentArgs(), stdout, stderr)
+	return runAgentContext(ctx, plan.agentArgs(), stdout, stderr)
 }
 
 func confirmQuickEdit(reader io.Reader, writer io.Writer, plan quickEditPlan) (bool, error) {
@@ -785,7 +807,7 @@ func runHostileFixture(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return errors.Join(err, disposable.Cleanup())
 	}
-	lifecycle, err := hostileruntime.NewBoundLifecycle(manifest)
+	lifecycle, err := newDurableLifecycle(manifest)
 	if err != nil {
 		return errors.Join(err, disposable.Cleanup())
 	}
@@ -871,12 +893,22 @@ func validateQwenAgentCommand(command []string) (string, error) {
 }
 
 func runAgent(args []string, stdout, stderr io.Writer) error {
+	return runAgentContext(context.Background(), args, stdout, stderr)
+}
+
+func runAgentContext(parent context.Context, args []string, stdout, stderr io.Writer) (returnErr error) {
+	if err := parent.Err(); err != nil {
+		return err
+	}
+	commandCtx, cancelSignal := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
+	defer cancelSignal()
 	flags := flag.NewFlagSet("run agent", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	agentImage := flags.String("image", strings.TrimSpace(os.Getenv("MIRAGE_AGENT_IMAGE")), "preloaded digest-pinned coding-agent image")
 	helperImage := flags.String("helper-image", strings.TrimSpace(os.Getenv("MIRAGE_HELPER_IMAGE")), "preloaded digest-pinned helper image containing /bin/sh, cat, df, tail, and sleep")
 	realWorkspace := flags.String("workspace", ".", "trusted real repository used only as the bounded snapshot source")
 	allowedResource := flags.String("allow", "", "the one existing file the M4.3 boundary may modify (for example /workspace/README.md)")
+	policyPath := flags.String("policy", "", "trusted operator write policy JSON outside the workspace")
 	timeout := flags.Duration("timeout", 10*time.Minute, "maximum coding-agent execution time")
 	quota := flags.Int64("workspace-quota-bytes", 64<<20, "hard writable disposable-workspace capacity")
 	agentMode := flags.String("agent", "generic", "coding-agent evidence mode: generic or qwen")
@@ -960,6 +992,22 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 	}
 	if *publishGitHub && strings.TrimSpace(*githubRepository) == "" {
 		return errors.New("--publish-github requires exact --github-repo owner/repo authority")
+	}
+	writeRules := contracts.AccessRules{Allow: []string{*allowedResource}}
+	authorityDuration := *timeout + 3*operationTimeout
+	if *policyPath != "" {
+		if *publishGitHub {
+			return errors.New("local write policy does not authorize GitHub publication")
+		}
+		operatorPolicy, err := loadWritePolicy(*realWorkspace, *policyPath)
+		if err != nil {
+			return err
+		}
+		writeRules, authorityDuration, err = operatorPolicy.Restrict(*allowedResource, authorityDuration)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(progress, "operator_policy=restricted authority_seconds=%d\n", int(authorityDuration/time.Second))
 	}
 	githubToken := ""
 	if *publishGitHub {
@@ -1068,14 +1116,12 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 		publicationPolicy = contracts.GitHubPublicationPolicy{RepositoryFullName: *githubRepository, TargetRef: gitrefs.RunTarget(runID), Operation: contracts.GitHubCreateBranch}
 	}
 	contract, err := contracts.New(contracts.Spec{
-		Version:   contractVersion,
-		RunID:     runID,
-		ActorID:   "coding-agent",
-		ExpiresAt: issuedAt.Add(*timeout + 3*operationTimeout),
-		Filesystem: contracts.FilesystemPolicy{Write: contracts.AccessRules{
-			Allow: []string{*allowedResource},
-		}},
-		GitHub: publicationPolicy,
+		Version:    contractVersion,
+		RunID:      runID,
+		ActorID:    "coding-agent",
+		ExpiresAt:  issuedAt.Add(authorityDuration),
+		Filesystem: contracts.FilesystemPolicy{Write: writeRules},
+		GitHub:     publicationPolicy,
 	})
 	if err != nil {
 		return errors.Join(err, closeBroker())
@@ -1088,7 +1134,7 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return errors.Join(err, closeBroker())
 	}
-	lifecycle, err := hostileruntime.NewBoundLifecycle(manifest)
+	lifecycle, err := newDurableLifecycle(manifest)
 	if err != nil {
 		return errors.Join(err, closeBroker())
 	}
@@ -1101,7 +1147,7 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 		if _, err := lifecycle.BindGitRepository(); err != nil {
 			return errors.Join(err, closeBroker())
 		}
-		bindCtx, cancelBind := context.WithTimeout(context.Background(), operationTimeout)
+		bindCtx, cancelBind := context.WithTimeout(commandCtx, operationTimeout)
 		_, err = lifecycle.BindGitHubRepository(bindCtx, *githubRepository, githubClient)
 		cancelBind()
 		if err != nil {
@@ -1113,8 +1159,6 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 	// broker rather than letting a defer erase evidence or a live mount.
 	cleanupDisposable = false
 
-	commandCtx, cancelSignal := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancelSignal()
 	prepareCtx, cancelPrepare := context.WithTimeout(commandCtx, operationTimeout)
 	err = lifecycle.Prepare(prepareCtx)
 	cancelPrepare()
@@ -1134,6 +1178,7 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 	waitCtx, cancelWait := context.WithTimeout(commandCtx, *timeout)
 	waitErr := launcher.Wait(waitCtx)
 	cancelWait()
+	waitErr = errors.Join(waitErr, commandCtx.Err())
 	if waitErr != nil {
 		fmt.Fprintf(progress, "agent completion unavailable: %v; freezing without commit authority\n", waitErr)
 	}
@@ -1144,6 +1189,7 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 		return errors.Join(freezeErr, waitErr, cleanupAgentRuntime(lifecycle, disposable, closeBroker))
 	}
 	fmt.Fprintf(progress, "runtime=%s process_tree=stopped frozen_tree=exported\n", lifecycle.State())
+	waitErr = errors.Join(waitErr, commandCtx.Err())
 	var brokerDiagnostic modelbroker.DiagnosticSnapshot
 	if broker != nil {
 		brokerDiagnostic = broker.Diagnostics()
@@ -1247,9 +1293,14 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return errors.Join(err, cleanupAgentRuntime(lifecycle, disposable, closeBroker))
 		}
-		if err := lifecycle.Commit(); err != nil {
+		if err := lifecycle.CommitContext(commandCtx); err != nil {
 			return errors.Join(err, cleanupAgentRuntime(lifecycle, disposable, closeBroker))
 		}
+		// A completed replacement cannot be rolled back by a later evidence
+		// or cleanup error. Preserve the outcome in every subsequent error.
+		defer func() {
+			returnErr = committedRunError(runID, returnErr)
+		}()
 		fmt.Fprintf(progress, "runtime=%s committed_resource=%s\n", lifecycle.State(), *allowedResource)
 		if *agentMode == "qwen" {
 			if err := verifyCommittedReality(disposable.RealWorkspace(), plan); err != nil {
@@ -1280,6 +1331,13 @@ func runAgent(args []string, stdout, stderr io.Writer) error {
 	}
 	cleanupErr := cleanupAgentRuntime(lifecycle, disposable, closeBroker)
 	return cleanupErr
+}
+
+func committedRunError(runID string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("COMMITTED_INCOMPLETE run=%s: real file replacement succeeded; do not retry automatically: %w", runID, err)
 }
 
 func resolveAgentDiagnostic(agent diagnostics.Record, broker modelbroker.DiagnosticSnapshot) diagnostics.Record {
@@ -1340,4 +1398,15 @@ func cleanupRuntime(lifecycle *hostileruntime.Lifecycle, disposable *workspace.D
 		return err
 	}
 	return nil
+}
+
+func newDurableLifecycle(manifest *hostileruntime.RunManifest) (*hostileruntime.Lifecycle, error) {
+	if runtime.GOOS != "linux" {
+		return hostileruntime.NewBoundLifecycle(manifest)
+	}
+	store, err := realcommit.DefaultJournalStore()
+	if err != nil {
+		return nil, fmt.Errorf("prepare durable commit journal: %w", err)
+	}
+	return hostileruntime.NewBoundLifecycleWithJournal(manifest, store)
 }

@@ -17,7 +17,11 @@ import (
 
 const mcpCommandOutputLimit = 1 << 20
 
+var errMCPOutputOverflow = errors.New("Mirage command output exceeded the 1 MiB MCP safety limit")
+
 type mcpCommandRunner func(args []string, stdout, stderr io.Writer) error
+
+type mcpContextCommandRunner func(context.Context, []string, io.Writer, io.Writer) error
 
 type mcpDoctorInput struct{}
 
@@ -52,7 +56,7 @@ func runMCP(args []string, stdout, stderr io.Writer) error {
 	if flags.NArg() != 0 {
 		return errors.New("usage: mirage mcp")
 	}
-	server := newMirageMCPServer(runAutomationEntrypoint)
+	server := newMirageMCPServerWithContext(runAutomationEntrypointContext)
 	if err := server.Run(context.Background(), &mcp.StdioTransport{MaxLineLength: 1 << 20}); err != nil {
 		return fmt.Errorf("serve MCP over stdio: %w", err)
 	}
@@ -61,6 +65,12 @@ func runMCP(args []string, stdout, stderr io.Writer) error {
 }
 
 func newMirageMCPServer(runner mcpCommandRunner) *mcp.Server {
+	return newMirageMCPServerWithContext(func(_ context.Context, args []string, stdout, stderr io.Writer) error {
+		return runner(args, stdout, stderr)
+	})
+}
+
+func newMirageMCPServerWithContext(runner mcpContextCommandRunner) *mcp.Server {
 	server := mcp.NewServer(
 		&mcp.Implementation{Name: "mirage", Version: buildinfo.Version},
 		&mcp.ServerOptions{Instructions: "Use mirage_edit_file for authorized file changes. It can modify exactly one existing regular file per call, runs without sandbox network access, and returns verified evidence. Never set approved=true unless the user authorized that exact target and task."},
@@ -71,8 +81,8 @@ func newMirageMCPServer(runner mcpCommandRunner) *mcp.Server {
 		Title:       "Check Mirage readiness",
 		Description: "Check whether Mirage's security runtime and local editing agent are ready. This is read-only.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true, OpenWorldHint: &closed},
-	}, func(_ context.Context, _ *mcp.CallToolRequest, _ mcpDoctorInput) (*mcp.CallToolResult, doctorReport, error) {
-		stdout, stderr, err := executeMCPCommand(runner, []string{"doctor", "--json"})
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ mcpDoctorInput) (*mcp.CallToolResult, doctorReport, error) {
+		stdout, stderr, err := executeMCPCommandContext(ctx, runner, []string{"doctor", "--json"})
 		if err != nil {
 			return nil, doctorReport{}, commandToolError("Mirage readiness check failed", err, stderr)
 		}
@@ -89,7 +99,7 @@ func newMirageMCPServer(runner mcpCommandRunner) *mcp.Server {
 		Title:       "Safely edit one file with Mirage",
 		Description: "Transactionally edit exactly one user-authorized existing regular file with local Qwen. The sandbox has no network, shell, Git, or ambient credentials. Returns a verified receipt and Observatory path. Set approved=true only after explicit user authorization.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: &destructive, IdempotentHint: false, OpenWorldHint: &closed},
-	}, func(_ context.Context, _ *mcp.CallToolRequest, input mcpEditInput) (*mcp.CallToolResult, cliapi.AgentRunSummary, error) {
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, input mcpEditInput) (*mcp.CallToolResult, cliapi.AgentRunSummary, error) {
 		if !input.Approved {
 			return nil, cliapi.AgentRunSummary{}, errors.New("edit not authorized: approved must be true after the user explicitly authorizes this exact file and task")
 		}
@@ -101,13 +111,22 @@ func newMirageMCPServer(runner mcpCommandRunner) *mcp.Server {
 			args = append(args, "--output-dir", input.OutputDir)
 		}
 		args = append(args, input.File, input.Task)
-		stdout, stderr, err := executeMCPCommand(runner, args)
-		if err != nil {
-			return nil, cliapi.AgentRunSummary{}, commandToolError("Mirage edit failed", err, stderr)
+		stdout, stderr, commandErr := executeMCPCommandContext(ctx, runner, args)
+		summary, parseErr := cliapi.ParseAgentRunSummary(stdout)
+		// A verified policy rejection is an intentional nonzero CLI exit,
+		// not a transport failure. Never accept truncated output or a failed
+		// command claiming a successful commit.
+		if commandErr != nil {
+			if errors.Is(commandErr, errMCPOutputOverflow) {
+				return nil, cliapi.AgentRunSummary{}, commandErr
+			}
+			if parseErr == nil && summary.Outcome == "REJECTED" {
+				return nil, summary, nil
+			}
+			return nil, cliapi.AgentRunSummary{}, commandToolError("Mirage edit failed", commandErr, stderr)
 		}
-		summary, err := cliapi.ParseAgentRunSummary(stdout)
-		if err != nil {
-			return nil, cliapi.AgentRunSummary{}, fmt.Errorf("Mirage returned an invalid agent summary: %w", err)
+		if parseErr != nil {
+			return nil, cliapi.AgentRunSummary{}, fmt.Errorf("Mirage returned an invalid agent summary: %w", parseErr)
 		}
 		return nil, summary, nil
 	})
@@ -117,8 +136,8 @@ func newMirageMCPServer(runner mcpCommandRunner) *mcp.Server {
 		Title:       "Verify a Mirage receipt",
 		Description: "Independently parse and verify one Mirage execution receipt. This is read-only.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true, OpenWorldHint: &closed},
-	}, func(_ context.Context, _ *mcp.CallToolRequest, input mcpVerifyInput) (*mcp.CallToolResult, mcpVerifyOutput, error) {
-		stdout, stderr, err := executeMCPCommand(runner, []string{"verify", input.Receipt})
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, input mcpVerifyInput) (*mcp.CallToolResult, mcpVerifyOutput, error) {
+		stdout, stderr, err := executeMCPCommandContext(ctx, runner, []string{"verify", input.Receipt})
 		if err != nil {
 			return nil, mcpVerifyOutput{}, commandToolError("Mirage receipt verification failed", err, stderr)
 		}
@@ -131,11 +150,14 @@ func newMirageMCPServer(runner mcpCommandRunner) *mcp.Server {
 	return server
 }
 
-func executeMCPCommand(runner mcpCommandRunner, args []string) ([]byte, []byte, error) {
+func executeMCPCommandContext(ctx context.Context, runner mcpContextCommandRunner, args []string) ([]byte, []byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	var stdout, stderr mcpLimitedBuffer
-	err := runner(args, &stdout, &stderr)
+	err := runner(ctx, args, &stdout, &stderr)
 	if stdout.truncated || stderr.truncated {
-		overflow := errors.New("Mirage command output exceeded the 1 MiB MCP safety limit")
+		overflow := errMCPOutputOverflow
 		if err == nil {
 			err = overflow
 		} else {
@@ -171,18 +193,20 @@ func parseDoctorReport(encoded []byte) (doctorReport, error) {
 }
 
 type mcpLimitedBuffer struct {
-	bytes.Buffer
+	buffer    bytes.Buffer
 	truncated bool
 }
 
+func (b *mcpLimitedBuffer) Bytes() []byte { return b.buffer.Bytes() }
+
 func (b *mcpLimitedBuffer) Write(value []byte) (int, error) {
 	original := len(value)
-	remaining := mcpCommandOutputLimit - b.Len()
+	remaining := mcpCommandOutputLimit - b.buffer.Len()
 	if remaining > 0 {
 		if remaining > len(value) {
 			remaining = len(value)
 		}
-		_, _ = b.Buffer.Write(value[:remaining])
+		_, _ = b.buffer.Write(value[:remaining])
 	}
 	if remaining < len(value) {
 		b.truncated = true

@@ -113,6 +113,10 @@ try {
     if ($commit -cnotmatch '^[0-9a-f]{40}$') {
         throw "MIRAGE source commit identity is not a canonical SHA-1. No installed files were changed."
     }
+    $sourceStatus = @(& git.exe -C $repoRoot status --porcelain=v1 --untracked-files=all)
+    if ($LASTEXITCODE -ne 0 -or $sourceStatus.Count -ne 0) {
+        throw "MIRAGE requires a clean source checkout. No installed files were changed."
+    }
     if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
         throw "WSL2 is required. Install it explicitly, then rerun this installer."
     }
@@ -145,24 +149,34 @@ try {
     }
 
     New-Item -ItemType Directory -Force -Path $temporaryRoot, $windowsBin, $installRoot | Out-Null
+    # Export the exact commit so ignored and concurrently edited worktree files
+    # cannot become part of a binary labeled with the selected commit.
+    $sourceArchive = Join-Path $temporaryRoot "source.zip"
+    $sourceRoot = Join-Path $temporaryRoot "source"
+    & git.exe -C $repoRoot archive --format=zip "--output=$sourceArchive" $commit
+    if ($LASTEXITCODE -ne 0) { throw "Could not export the MIRAGE source commit." }
+    Expand-Archive -LiteralPath $sourceArchive -DestinationPath $sourceRoot
     $ldflags = "-X github.com/MrGray17/Mirage/internal/buildinfo.Version=$Version -X github.com/MrGray17/Mirage/internal/buildinfo.Commit=$commit"
 
     $oldGOOS = $env:GOOS
     $oldGOARCH = $env:GOARCH
+    $oldGOWORK = $env:GOWORK
     try {
+        $env:GOWORK = "off"
         $env:GOOS = "windows"
         $env:GOARCH = "amd64"
-        & go.exe -C $repoRoot build -ldflags $ldflags -o $temporaryWindows ./cmd/mirage
+        & go.exe -C $sourceRoot build -ldflags $ldflags -o $temporaryWindows ./cmd/mirage
         if ($LASTEXITCODE -ne 0) { throw "Windows frontend build failed." }
 
         $env:GOOS = "linux"
         $env:GOARCH = "amd64"
-        & go.exe -C $repoRoot build -ldflags $ldflags -o $temporaryLinux ./cmd/mirage
+        & go.exe -C $sourceRoot build -ldflags $ldflags -o $temporaryLinux ./cmd/mirage
         if ($LASTEXITCODE -ne 0) { throw "Linux backend build failed." }
     }
     finally {
         $env:GOOS = $oldGOOS
         $env:GOARCH = $oldGOARCH
+        $env:GOWORK = $oldGOWORK
     }
 
     $linuxHomeOutput = & wsl.exe -d $Distribution --exec printenv HOME

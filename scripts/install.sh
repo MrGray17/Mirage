@@ -44,6 +44,23 @@ if [[ ! "$commit" =~ ^[0-9a-f]{40}$ ]]; then
   exit 1
 fi
 
+if ! source_status="$(git -C "$repo_root" status --porcelain=v1 --untracked-files=all)"; then
+  echo "MIRAGE could not establish clean source state; nothing was installed." >&2
+  exit 1
+fi
+if [[ -n "$source_status" ]]; then
+  echo "MIRAGE requires a clean source checkout; nothing was installed." >&2
+  exit 1
+fi
+
+# Build the named commit, not mutable working-tree files or ignored build inputs.
+source_root="$temporary_root/source"
+mkdir -p -- "$source_root"
+if ! git -C "$repo_root" archive --format=tar "$commit" | tar -xf - -C "$source_root"; then
+  echo "MIRAGE could not export the source commit; nothing was installed." >&2
+  exit 1
+fi
+
 version="${MIRAGE_VERSION:-1.0.0-dev}"
 mkdir -p -- "$install_root"
 target="$install_root/mirage"
@@ -53,7 +70,7 @@ if [[ -L "$target" || ( -e "$target" && ! -f "$target" ) ]]; then
 fi
 
 host_arch="$(go env GOHOSTARCH)"
-if ! GOOS=linux GOARCH="$host_arch" go -C "$repo_root" build \
+if ! GOWORK=off GOOS=linux GOARCH="$host_arch" go -C "$source_root" build \
   -ldflags "-X github.com/MrGray17/Mirage/internal/buildinfo.Version=$version -X github.com/MrGray17/Mirage/internal/buildinfo.Commit=$commit" \
   -o "$temporary_root/mirage" ./cmd/mirage; then
   echo "MIRAGE Linux build failed; the existing installation was not changed." >&2
