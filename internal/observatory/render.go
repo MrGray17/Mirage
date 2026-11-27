@@ -549,7 +549,7 @@ const pageTemplateSource = `<!doctype html>
     .effect-index { grid-column: 2; color: var(--quiet); font: 11px/1.4 var(--mono); }
     .effect-operation { grid-column: 3; color: var(--ink); font: 700 13px/1.4 var(--mono); letter-spacing: .035em; }
     .effect-resource { grid-column: 4; min-width: 0; color: var(--ink); font: 13px/1.4 var(--mono); overflow-wrap: anywhere; word-break: break-word; }
-    .effect-state { grid-column: 5; font-size: 12px; font-weight: 760; letter-spacing: .05em; text-align: right; }
+    .effect-state { grid-column: 5; font-size: 12px; font-weight: 760; letter-spacing: .05em; text-align: right; white-space: nowrap; }
     .effect-row.blocked .effect-state { color: var(--red); }
     .effect-row.authorized .effect-state,
     .effect-row.selected .effect-state { color: var(--orange-muted); font-weight: 700; }
@@ -560,7 +560,7 @@ const pageTemplateSource = `<!doctype html>
       min-height: 31px;
       padding-right: 10px;
       display: grid;
-      grid-template-columns: 32px 34px 76px 105px minmax(0, 1fr);
+      grid-template-columns: 32px 34px 96px 105px minmax(0, 1fr);
       column-gap: 8px;
       align-items: center;
       background: transparent;
@@ -575,7 +575,7 @@ const pageTemplateSource = `<!doctype html>
     .history-stage.committed .history-rail::before,
     .history-stage.reality-stage .history-rail::before { background: var(--green); }
     .history-stage.reality-stage .history-rail::before { bottom: 16px; }
-    .history-stage-label { grid-column: 3; color: var(--muted); font-size: 11px; font-weight: 720; letter-spacing: .07em; text-transform: uppercase; }
+    .history-stage-label { grid-column: 3; color: var(--muted); font-size: 11px; font-weight: 720; letter-spacing: .07em; text-transform: uppercase; white-space: nowrap; }
     .history-stage-action { grid-column: 4; min-width: 0; color: var(--ink); font-size: 12px; font-weight: 650; }
     .history-stage-resource { grid-column: 5; min-width: 0; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
     .history-stage.verified .history-stage-action,
@@ -664,14 +664,14 @@ const pageTemplateSource = `<!doctype html>
       .run-id { max-width: 180px; overflow-wrap: anywhere; white-space: normal; text-align: right; }
       .task-strip { padding: 12px 0 14px; }
       .workbench { padding-top: 18px; }
-      .effect-row { grid-template-columns: 28px 30px 62px minmax(0, 1fr); row-gap: 5px; padding-right: 0; }
+      .effect-row { grid-template-columns: 28px 30px 72px minmax(0, 1fr); row-gap: 5px; padding-right: 0; }
       .history-rail { grid-column: 1; }
       .effect-index { grid-column: 2; }
       .effect-operation { grid-column: 3; }
       .effect-resource { grid-column: 4; }
       .effect-state { grid-column: 3; grid-row: 2; text-align: left; }
       .effect-enforcement { grid-column: 4; grid-row: 2; margin-top: 0; }
-      .history-stage { grid-template-columns: 28px 30px 76px minmax(0, 1fr); padding: 3px 0; }
+      .history-stage { grid-template-columns: 28px 30px 90px minmax(0, 1fr); padding: 3px 0; }
       .history-stage-label { grid-column: 3; }
       .history-stage-action { grid-column: 4; }
       .history-stage-resource { grid-column: 4; grid-row: 2; margin-top: 2px; }
@@ -737,10 +737,10 @@ const pageTemplateSource = `<!doctype html>
       .task-strip { padding-top: 18px; }
       .effect-trace { padding: 12px 8px; }
       .section-heading .report-tag { display: none; }
-      .effect-row { grid-template-columns: 24px 22px 55px minmax(0, 1fr); column-gap: 5px; }
+      .effect-row { grid-template-columns: 24px 22px 72px minmax(0, 1fr); column-gap: 5px; }
       .effect-operation, .effect-resource { font-size: 11px; }
       .effect-state { font-size: 10px; }
-      .history-stage { grid-template-columns: 24px 22px 70px minmax(0, 1fr); column-gap: 5px; }
+      .history-stage { grid-template-columns: 24px 22px 90px minmax(0, 1fr); column-gap: 5px; }
       .proof-footer { padding: 0 12px; }
     }
   </style>

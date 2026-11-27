@@ -24,6 +24,8 @@ func TestDashboardPresentationRetainsOutcomeAndOfflineDesign(t *testing.T) {
 				"Attempted effects", "Blocked effects", "Committed mutations",
 				"Evidence inspector", "prefers-color-scheme: dark",
 				"prefers-reduced-motion: reduce", "Receipt integrity is not a digital signature",
+				"grid-template-columns: 24px 22px 72px minmax(0, 1fr)",
+				"grid-template-columns: 24px 22px 90px minmax(0, 1fr)",
 			} {
 				if !strings.Contains(html, marker) {
 					t.Errorf("missing %q", marker)
