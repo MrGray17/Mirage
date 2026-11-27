@@ -261,6 +261,8 @@ The contract is the deterministic statement of what a run is allowed to do. The 
 
 - Contract v1 defines filesystem read/write resource allowlists and denylists.
 - Contract v2 adds exact create-only GitHub branch-publication authority.
+- Contract v3 adds exact create-only GitHub pull-request authority while
+  retaining the earlier filesystem and branch-publication bindings.
 
 The file-policy model uses canonical resource identifiers rather than glob patterns. The project deliberately avoids broad wildcard semantics until those semantics receive a separate security design and review.
 
@@ -664,9 +666,14 @@ Important properties include:
 
 A live branch-publication test is a separate acceptance action. It creates a real remote branch in a disposable test repository and does not automatically delete that branch. Do not point it at a production repository or use broad production credentials.
 
-### 14.5 Pull requests are a separate capability
+### 14.5 Exact create-only pull requests
 
-**GitHub pull-request creation is not included in the current supported main feature set.** Building a commit and publishing a branch are not equivalent to creating a pull request. The older M5.4 pull-request work remains separate and should not be presented as a shipped feature.
+M5.4 implements one bounded `CREATE_PULL_REQUEST` effect after authoritative
+branch publication. Contract v3 binds the exact repository, base/head refs,
+base commit, title, and body. Trusted code observes existing matching pull
+requests before the one allowed create attempt and reconciles uncertain results
+without blind retry. It cannot merge, edit, close, label, comment on, review, or
+delete pull requests. Credentialed acceptance must use a disposable repository.
 
 ---
 
@@ -858,7 +865,9 @@ The kernel, Docker daemon and trusted MIRAGE control plane are inside the truste
 
 ### 18.7 External effects remain narrow
 
-The supported GitHub publication foundation is create-only branch publication under exact, prebound authority. Pull-request creation and other arbitrary remote operations should not be claimed as implemented current capabilities.
+The supported GitHub effects are create-only branch publication and one exact
+create-only pull request under prebound authority. Merge, edit, close, deletion,
+and arbitrary remote operations are not implemented capabilities.
 
 ### 18.8 Self-hashes and optional signed endorsement
 
