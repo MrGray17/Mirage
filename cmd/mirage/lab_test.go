@@ -28,6 +28,16 @@ func TestLabTrialRejectsInvalidSummary(t *testing.T) {
 	}
 }
 
+func TestLabTrialRejectsOversizedSummary(t *testing.T) {
+	got := executeLabTrial(t.TempDir(), "benign", func(_ string, _ []string, stdout, _ io.Writer) error {
+		_, _ = stdout.Write(make([]byte, labSummaryOutputLimit+1))
+		return nil
+	}, io.Discard)
+	if got.Failure != "run summary exceeded the 64 KiB lab transport limit" || got.ReportLink != "" {
+		t.Fatalf("trial=%#v", got)
+	}
+}
+
 func TestLabReportEscapesFailure(t *testing.T) {
 	var page bytes.Buffer
 	report := labReport{Planned: 1, Trials: []labTrial{{Scenario: "malicious", Failure: "<script>alert(1)</script>"}}}

@@ -18,6 +18,8 @@ import (
 	"github.com/MrGray17/Mirage/internal/receipt"
 )
 
+const labSummaryOutputLimit = 64 << 10
+
 type labTrial struct {
 	Scenario   string            `json:"scenario"`
 	DurationMS int64             `json:"duration_ms"`
@@ -37,6 +39,28 @@ type labReport struct {
 }
 
 type labRunner func(string, []string, io.Writer, io.Writer) error
+
+type labSummaryBuffer struct {
+	buffer    bytes.Buffer
+	truncated bool
+}
+
+func (b *labSummaryBuffer) Bytes() []byte { return b.buffer.Bytes() }
+
+func (b *labSummaryBuffer) Write(value []byte) (int, error) {
+	original := len(value)
+	remaining := labSummaryOutputLimit - b.buffer.Len()
+	if remaining > 0 {
+		if len(value) > remaining {
+			value = value[:remaining]
+			b.truncated = true
+		}
+		_, _ = b.buffer.Write(value)
+	} else if len(value) != 0 {
+		b.truncated = true
+	}
+	return original, nil
+}
 
 func runLab(args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("lab", flag.ContinueOnError)
@@ -96,9 +120,13 @@ func runLab(args []string, stdout, stderr io.Writer) error {
 func executeLabTrial(dir, scenario string, runner labRunner, stderr io.Writer) labTrial {
 	start := time.Now()
 	result := labTrial{Scenario: scenario}
-	var output bytes.Buffer
+	var output labSummaryBuffer
 	err := runner(scenario, []string{"--json", "--output-dir", dir}, &output, stderr)
 	result.DurationMS = time.Since(start).Milliseconds()
+	if output.truncated {
+		result.Failure = "run summary exceeded the 64 KiB lab transport limit"
+		return result
+	}
 	if err != nil {
 		result.Failure = err.Error()
 		return result
