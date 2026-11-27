@@ -83,7 +83,8 @@ func Sign(encoded []byte, private ed25519.PrivateKey) ([]byte, error) {
 // Verify requires a public key supplied independently of the proof. An
 // embedded or attacker-selected key must never establish signer trust.
 func Verify(encoded, proofBytes []byte, trusted ed25519.PublicKey) (*receipt.Receipt, error) {
-	if len(trusted) != ed25519.PublicKeySize || len(proofBytes) == 0 || len(proofBytes) > MaxProofBytes {
+	if len(trusted) != ed25519.PublicKeySize || len(encoded) == 0 || len(encoded) > MaxReceiptBytes ||
+		len(proofBytes) == 0 || len(proofBytes) > MaxProofBytes {
 		return nil, ErrInvalidAttestation
 	}
 	var proof Proof
@@ -101,7 +102,7 @@ func Verify(encoded, proofBytes []byte, trusted ed25519.PublicKey) (*receipt.Rec
 	if err != nil || len(signature) != ed25519.SignatureSize || base64.StdEncoding.EncodeToString(signature) != proof.Signature {
 		return nil, fmt.Errorf("%w: signature encoding", ErrInvalidAttestation)
 	}
-	if len(encoded) == 0 || len(encoded) > MaxReceiptBytes || !ed25519.Verify(trusted, message(encoded), signature) {
+	if !ed25519.Verify(trusted, message(encoded), signature) {
 		return nil, fmt.Errorf("%w: signature mismatch", ErrInvalidAttestation)
 	}
 	verified, err := verifiedReceipt(encoded)
