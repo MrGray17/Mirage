@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$Distribution = "",
-    [string]$Version = "1.0.0-dev"
+    [string]$Version = "1.1.0-dev"
 )
 
 $ErrorActionPreference = "Stop"

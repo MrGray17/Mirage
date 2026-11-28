@@ -701,7 +701,7 @@ The deterministic public demo pins its fixture image rather than accepting arbit
 
 ### 15.1 Build identity
 
-The build embeds a version and full source commit identity. Source installers label builds 1.0.0-dev by default. The build identity also includes platform and bridge-protocol version, which the Windows frontend uses to check its pair with the WSL backend.
+The build embeds a version and full source commit identity. Source installers label current main builds `1.1.0-dev` by default. The build identity also includes platform and bridge-protocol version, which the Windows frontend uses to check its pair with the WSL backend.
 
 The published v1.0.0 release predates later installer and security hardening and has no downloadable binary assets. The repository now has a tag-driven release workflow for checksummed Linux/Windows binaries, per-target CycloneDX SBOMs, and GitHub artifact attestations. A source build from main is still a development build, not a stable release.
 

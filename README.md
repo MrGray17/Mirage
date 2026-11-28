@@ -119,7 +119,7 @@ mirage version
 mirage doctor
 ```
 
-`mirage version` must report `mirage 1.0.0-dev`, a full 40-character lowercase Git
+`mirage version` must report `mirage 1.1.0-dev`, a full 40-character lowercase Git
 commit, bridge protocol 1, and `platform=windows`. `mirage doctor` checks that
 the WSL backend has the same version, commit, and bridge protocol. It must report
 both `READY` and `EDIT READY` before the first local edit.
@@ -144,7 +144,7 @@ mirage doctor
 ```
 
 The status command should print nothing. `mirage version` must report version
-`1.0.0-dev`, the checkout's complete commit identity, and `platform=linux`.
+`1.1.0-dev`, the checkout's complete commit identity, and `platform=linux`.
 
 ## Quick deterministic demo
 

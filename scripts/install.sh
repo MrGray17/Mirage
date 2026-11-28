@@ -61,7 +61,7 @@ if ! git -C "$repo_root" archive --format=tar "$commit" | tar -xf - -C "$source_
   exit 1
 fi
 
-version="${MIRAGE_VERSION:-1.0.0-dev}"
+version="${MIRAGE_VERSION:-1.1.0-dev}"
 mkdir -p -- "$install_root"
 target="$install_root/mirage"
 if [[ -L "$target" || ( -e "$target" && ! -f "$target" ) ]]; then
