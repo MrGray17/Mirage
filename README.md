@@ -329,7 +329,6 @@ MIRAGE v1 intentionally does **not** provide:
 - a general shell-capable Qwen agent or extensible tool framework;
 - complete ACL/xattr/ownership preservation;
 - full receipt reconstruction after a host crash or an authenticated durable audit log;
-- the M5.4 exact GitHub pull-request effect;
 - a complete signed/hash-chained durable audit log;
 - universal syscall monitoring or syscall-perfect observation.
 

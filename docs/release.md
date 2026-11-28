@@ -1,6 +1,7 @@
 # Release and artifact verification
 
-MIRAGE releases are built from `v*` tags by GitHub Actions. Each release contains
+MIRAGE releases are built from `v*` tags by GitHub Actions. Tags containing a
+hyphen (for example, `v1.1.0-rc.1`) are published as prereleases. Each release contains
 standalone Linux amd64, Linux arm64, and Windows amd64 binaries, a `SHA256SUMS`
 file, and a CycloneDX JSON SBOM for each target.
 

@@ -69,9 +69,9 @@ trusted host-side Ollama broker. The Qwen process has a constrained
 general shell-capable coding environment. Model output and agent action logs
 are untrusted explanatory evidence and never grant commit authority.
 
-MIRAGE v1 also contains deterministic Git commit construction and create-only
-GitHub branch-publication foundations. GitHub pull-request creation (M5.4),
-multi-file commit, crash-durable recovery, signed/hash-chained durable audit
+MIRAGE v1 also contains deterministic Git commit construction, create-only
+GitHub branch publication, and one exact create-only GitHub pull-request effect.
+Multi-file commit, general crash recovery, signed/hash-chained durable audit
 logs, and universal syscall monitoring are not implemented v1 claims.
 
 ---
@@ -2062,7 +2062,6 @@ The v1 release supports exactly one compelling end-to-end workflow.
 
 ## Explicitly not in MVP
 
-- GitHub pull-request creation (M5.4),
 - general shell-capable or extensible Qwen tooling,
 - multi-file, create, delete, mode-change, link, or special-object commits,
 - general crash-durable evidence reconstruction or multi-file recovery,
@@ -2357,8 +2356,8 @@ The project is not considered architecturally real until all of the following ar
 13. V1 receipt evidence is deterministic, self-hashed, and independently
     verifiable for internal consistency.
 
-Signed receipts, a durable hash-chained event log, and the M5.4 pull-request
-effect remain target-state requirements rather than v1 claims.
+Automated signing, a durable hash-chained event log, and broader remote effects
+remain target-state requirements rather than v1 claims.
 
 If any of these are faked by prompting the model to "behave safely," the implementation has violated the MIRAGE thesis.
 
