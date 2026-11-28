@@ -73,8 +73,8 @@ else
   curl_command=(curl --silent --show-error --fail --noproxy '*')
 fi
 
-tags_json="$("${curl_command[@]}" http://127.0.0.1:11434/api/tags 2>&1)" ||
-  fail "could not reach Ollama at 127.0.0.1:11434; ensure Ollama is running and WSL interop is healthy: $tags_json"
+tags_json="$("${curl_command[@]}" http://127.0.0.1:11434/api/tags)" ||
+  fail "could not reach Ollama at 127.0.0.1:11434; ensure Ollama is running and WSL interop is healthy"
 printf '%s' "$tags_json" |
   python3 -c '
 import json, sys
