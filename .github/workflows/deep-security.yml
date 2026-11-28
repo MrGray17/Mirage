@@ -1,0 +1,38 @@
+name: deep security
+
+on:
+  schedule:
+    - cron: '17 3 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  journal-and-fuzz:
+    name: Journal interruption and extended authorization fuzzing
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Set up Go 1.27.4
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.27.4'
+          cache: false
+
+      - name: Repeat journal interruption and retention simulations
+        run: |
+          go test -race -count=50 -timeout=15m ./internal/runtime/realcommit \
+            -run 'Test(RecoverPending|Recovery|Journal|ApplyWithJournal)'
+
+      - name: Extended authorization-invariant fuzzing
+        run: |
+          go test ./internal/runtime/reconcile \
+            -run '^$' \
+            -fuzz '^FuzzVerifyExactAuthorization$' \
+            -fuzztime 5m \
+            -parallel 2
