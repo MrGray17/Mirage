@@ -1,5 +1,11 @@
 # MIRAGE release acceptance
 
+In addition to pull-request CI, `.github/workflows/deep-security.yml` runs
+weekly and on demand. It repeats journal interruption/recovery/retention tests
+under the race detector and fuzzes the exact-authorization invariant for five
+minutes. A stable release candidate should have a recent successful deep
+security run at the candidate commit.
+
 The normal CI workflow checks formatting, static analysis, race-enabled tests, and Windows/Linux builds. It does not run the opt-in rootless-Docker integration tests, because those require a prepared Linux environment and digest-pinned images.
 
 Use this release gate on the Linux filesystem inside WSL2 or on a Linux host that has the supported **rootless Docker** configuration. The script runs the ordinary checks first, then explicitly enables the M4.2 hostile fixtures, M4.4 coding-agent/broker checks, and the real-runtime demo acceptance tests.
