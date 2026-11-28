@@ -56,4 +56,14 @@ When explicitly authorized and properly configured, run only that test with:
 
 Set MIRAGE_M53_TEST_REPO, MIRAGE_M53_TEST_REPO_ROOT, and MIRAGE_GITHUB_TOKEN first. Do not point it at a production repository. Do not put credentials in source control or paste them into logs.
 
+M5.4 has a separate dynamic disposable-repository acceptance. It creates one
+new branch and one pull request, verifies the exact provider identity, and
+proves a repeated lifecycle call cannot dispatch a second pull request:
+
+    MIRAGE_M54_ACCEPTANCE=1 go test -race -count=1 -v -run '^TestM54DisposableGitHubAcceptance$' ./internal/runtime
+
+Set `MIRAGE_M54_TEST_REPO`, `MIRAGE_M54_TEST_REPO_ROOT`, and the explicit
+host-only `MIRAGE_GITHUB_TOKEN`. The repository must be dedicated to testing,
+have `main` checked out at the exact remote base, and contain `README.md`.
+
 A live provider-backed coding-agent run is a separate acceptance item because it uses an external service and may incur cost. Run only with a dedicated low-limit test credential and a throwaway workspace after the no-credential runtime gate passes. The gate itself requires no model-provider API key and makes no GitHub writes.
